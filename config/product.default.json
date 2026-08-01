@@ -1,0 +1,50 @@
+{
+  "stock_source": "user_subscription_list",
+  "agent_goal": "judge_entry_opportunities_for_subscribed_symbols",
+  "opportunity_radar_agent": "subscription_opportunity_radar_agent",
+  "optional_analysts": [
+    "opportunity_radar",
+    "technical_position",
+    "fundamental_news"
+  ],
+  "post_trade_review_agent": "post_trade_review_learning_agent",
+  "learning_loop": {
+    "enabled": true,
+    "memory_strategy": "distilled_retrieval_memory",
+    "retrieval_backend": "fundamental_chroma_structured_parent_child_bm25_rrf_rerank",
+    "vector_index": {
+      "enabled": true,
+      "chroma_path": "config/rag_chroma",
+      "collection": "ai_trading_copilot_fundamentals",
+      "scope": "fundamental_only",
+      "embedding_provider": "openai",
+      "embedding_model": "text-embedding-3-small",
+      "allowed_source_types": [
+        "annual_report",
+        "company_guidance",
+        "earnings_call_transcript",
+        "earnings_report",
+        "fundamental_research_note",
+        "investor_day",
+        "sec_10k",
+        "sec_10q"
+      ],
+      "chunking": {
+        "strategy": "structured_semantic_parent_child_v1",
+        "parent_chunk_size": 2200,
+        "parent_chunk_overlap": 300,
+        "child_chunk_size": 500,
+        "child_chunk_overlap": 80
+      },
+      "keyword_recall": "bm25",
+      "fusion": "rrf",
+      "rerank": {
+        "enabled": true,
+        "model": "local_cross_feature_v1",
+        "stage": "post_rrf_candidate_rerank"
+      },
+      "fallback": "none"
+    },
+    "max_retrieved_memories_per_run": 5
+  }
+}

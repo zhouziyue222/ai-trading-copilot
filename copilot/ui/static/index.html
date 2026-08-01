@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Trading Copilot</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div>
+          <h1>AI Trading Copilot</h1>
+          <p>订阅池分析 / 风险门控 / 报告追踪</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="safety-pill">
+          <span>Simulation 默认</span>
+          <strong>Live 只读</strong>
+        </div>
+        <div class="run-state status-neutral" id="runState">未运行</div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel subscriptions">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">Watchlist</p>
+            <h2>订阅池</h2>
+          </div>
+          <button id="refreshSubscriptions" class="ghost-button" type="button">刷新</button>
+        </div>
+
+        <form id="subscriptionForm" class="stack form-card">
+          <div class="field-row">
+            <label>
+              代码
+              <input id="subSymbol" name="symbol" placeholder="AAPL" required />
+            </label>
+            <label>
+              市场
+              <select id="subMarket" name="market_type">
+                <option value="US_STOCK">美股</option>
+                <option value="US_ETF">美股 ETF</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            关注理由
+            <input id="subReason" name="reason" placeholder="回调接近支撑" />
+          </label>
+          <label>
+            目标动作
+            <input id="subAction" name="target_action" placeholder="等待确认后买入" />
+          </label>
+          <button type="submit">添加订阅</button>
+        </form>
+
+        <div id="subscriptionList" class="list"></div>
+      </section>
+
+      <section class="panel controls">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">Run Control</p>
+            <h2>运行分析</h2>
+          </div>
+          <button id="startRun" type="button">启动</button>
+        </div>
+
+        <div class="safety-note">
+          <strong>不会真实下单</strong>
+          <span>Live 模式只读取组合上下文，执行仍需人工确认。</span>
+        </div>
+
+        <section class="rag-box">
+          <div class="section-heading compact-heading">
+            <h3>RAG 知识库</h3>
+            <span id="ragStatus">未加载</span>
+          </div>
+          <div class="rag-actions">
+            <button id="ingestDefaults" class="ghost-button" type="button">导入默认资料</button>
+            <button id="refreshRag" class="ghost-button" type="button">刷新状态</button>
+          </div>
+          <div class="field-row">
+            <label>
+              在线代码
+              <input id="ragSymbols" placeholder="AAPL, MSFT" />
+            </label>
+            <label>
+              天数
+              <input id="ragLookBackDays" type="number" min="1" max="60" value="7" />
+            </label>
+          </div>
+          <button id="ingestOnline" class="ghost-button" type="button">抓取基本面资料</button>
+          <label>
+            资料标题
+            <input id="ragTitle" placeholder="AAPL earnings note" />
+          </label>
+          <label>
+            标签
+            <input id="ragTags" placeholder="earnings,risk,fundamental_research_note" />
+          </label>
+          <label>
+            新资料
+            <textarea id="ragText" rows="4" placeholder="粘贴财报、业绩会纪要、公司指引或基本面研究摘要"></textarea>
+          </label>
+          <button id="ingestText" class="ghost-button" type="button">写入知识库</button>
+        </section>
+
+        <div class="stack">
+          <label>
+            手动代码
+            <textarea id="manualSymbols" rows="3" placeholder="TSLA, NVDA"></textarea>
+          </label>
+
+          <fieldset>
+            <legend>分析模块</legend>
+            <label class="check module-check">
+              <input type="checkbox" name="analyst" value="opportunity_radar" checked />
+              <span>
+                <strong>机会雷达</strong>
+                <small>趋势与机会状态</small>
+              </span>
+            </label>
+            <label class="check module-check">
+              <input type="checkbox" name="analyst" value="technical_position" checked />
+              <span>
+                <strong>技术位置</strong>
+                <small>支撑、回撤、均线</small>
+              </span>
+            </label>
+            <label class="check module-check">
+              <input type="checkbox" name="analyst" value="fundamental_news" checked />
+              <span>
+                <strong>基本面/新闻风险</strong>
+                <small>风险点与催化剂</small>
+              </span>
+            </label>
+          </fieldset>
+
+          <div class="field-row">
+            <label>
+              交易日期
+              <input id="tradeDate" type="date" />
+            </label>
+            <label>
+              回看天数
+              <input id="lookBackDays" type="number" min="1" max="1000" value="90" />
+            </label>
+          </div>
+
+          <label>
+            组合模式
+            <select id="portfolioMode">
+              <option value="simulation">模拟组合</option>
+              <option value="live">Live 只读组合</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel results">
+        <div class="panel-title result-title">
+          <div>
+            <p class="eyebrow">Decision Workbench</p>
+            <h2>结果工作台</h2>
+          </div>
+          <button id="refreshRun" class="ghost-button" type="button" disabled>刷新进度</button>
+        </div>
+
+        <div id="summaryCards" class="summary-grid"></div>
+        <div id="progress" class="progress"></div>
+        <div id="errors" class="errors"></div>
+
+        <section class="decision-section">
+          <div class="section-heading">
+            <h3>标的决策</h3>
+            <span>风控结论与执行边界</span>
+          </div>
+          <div class="table-wrap">
+            <table class="decision-table">
+              <thead>
+                <tr>
+                  <th>标的</th>
+                  <th>机会状态</th>
+                  <th>当前价</th>
+                  <th>支撑位</th>
+                  <th>收益风险比</th>
+                  <th>方向</th>
+                  <th>风控</th>
+                  <th>执行</th>
+                  <th>建议动作</th>
+                </tr>
+              </thead>
+              <tbody id="decisionRows">
+                <tr>
+                  <td colspan="9" class="empty-cell">启动一次运行后，决策摘要会显示在这里。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="report-section">
+          <div class="section-heading">
+            <h3>报告</h3>
+            <span>阶段报告与运行审计</span>
+          </div>
+          <nav id="reportTabs" class="tabs"></nav>
+          <pre id="reportContent" class="report">选择或启动一次运行后，报告会显示在这里。</pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "persona_name": "swing_balanced_pullback_trader",
+  "trading_style": "swing",
+  "risk_profile": "balanced_plus",
+  "max_portfolio_drawdown": 0.25,
+  "allowed_markets": ["US_STOCK", "US_ETF"],
+  "forbidden_instruments": ["LEVERAGE", "OPTIONS"],
+  "max_single_position_weight": 0.5,
+  "default_position_weight_min": 0.1,
+  "default_position_weight_max": 0.25,
+  "stock_source": "user_subscription_list",
+  "preferred_market_regime": "bull_market_or_uptrend"
+}
+

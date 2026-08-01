@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-trading-copilot"
+version = "0.1.0"
+description = "Subscription-list-driven AI trading copilot for US stocks and ETFs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "chromadb>=0.5.0",
+    "fastapi>=0.115.0",
+    "futu-api>=10.4.6408",
+    "langchain-core>=0.3.81",
+    "langchain-openai>=0.3.23",
+    "langgraph>=0.4.8",
+    "pandas>=2.3.0",
+    "pydantic>=2.0.0",
+    "python-dateutil>=2.9.0",
+    "python-dotenv>=1.0.0",
+    "questionary>=2.1.0",
+    "requests>=2.32.4",
+    "typing-extensions>=4.14.0",
+    "uvicorn>=0.30.0",
+    "yfinance>=0.2.63",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+ai-trading-copilot = "ai_trading_copilot.copilot.run:main"
+ai-trading-copilot-ui = "ai_trading_copilot.copilot.ui.server:main"
+ai-trading-copilot-rag = "ai_trading_copilot.copilot.rag:main"
+ai-trading-copilot-eval = "ai_trading_copilot.copilot.evaluation:main"
+
+[tool.setuptools]
+package-dir = { "ai_trading_copilot" = "." }
+packages = [
+    "ai_trading_copilot",
+    "ai_trading_copilot.copilot",
+    "ai_trading_copilot.copilot.adapters",
+    "ai_trading_copilot.copilot.agents",
+    "ai_trading_copilot.copilot.analysis",
+    "ai_trading_copilot.copilot.config",
+    "ai_trading_copilot.copilot.domain",
+    "ai_trading_copilot.copilot.graph",
+    "ai_trading_copilot.copilot.services",
+    "ai_trading_copilot.copilot.ui",
+    "ai_trading_copilot.copilot.workflow",
+]
+
+[tool.setuptools.package-data]
+ai_trading_copilot = [
+    "config/*.json",
+    "config/*.md",
+    "copilot/ui/static/*",
+    "knowledge/fundamentals/*.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+markers = [
+    "unit: fast isolated unit tests",
+    "integration: tests requiring external services",
+    "smoke: quick sanity-check tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
