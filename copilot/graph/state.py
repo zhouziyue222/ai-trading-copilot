@@ -12,11 +12,12 @@ from ai_trading_copilot.copilot.domain.models import (
     DistilledMemory,
     ExecutionDecision,
     FundamentalNewsReport,
+    NewsSentimentReport,
     OpportunityRadarItem,
     PortfolioSnapshot,
     PriceBar,
-    RagDocument,
     RiskAssessment,
+    TechnicalContext,
     TechnicalPosition,
     TraceEvent,
     TradePlan,
@@ -43,14 +44,16 @@ class CopilotGraphState(TypedDict, total=False):
     look_back_days: int
     radar_items: List[OpportunityRadarItem]
     technical_positions: Dict[str, TechnicalPosition]
+    technical_contexts: Dict[str, TechnicalContext]
+    news_sentiment_by_symbol: Dict[str, NewsSentimentReport]
     market_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
     fundamental_news_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
+    news_sentiment_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
     opportunity_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
     trade_plans: Dict[str, TradePlan]
     risk_assessments: Dict[str, RiskAssessment]
     execution_decisions: Dict[str, ExecutionDecision]
     memories: Dict[str, List[DistilledMemory]]
-    fundamental_rag_contexts: Dict[str, List[RagDocument]]
     explanations: Dict[str, Any]
     report: CopilotRunReport
     report_output_dir: str
@@ -60,4 +63,6 @@ class CopilotGraphState(TypedDict, total=False):
     errors: List[str]
     execution_mode: ExecutionMode
     user_confirmed: bool
+    broker_execution_enabled: bool
+    run_id: str
     trace_persisted: bool

@@ -49,6 +49,8 @@ class TradePlanReviewWorkflow:
         portfolio: PortfolioSnapshot,
         mode: ExecutionMode = ExecutionMode.SIMULATION,
         user_confirmed: bool = False,
+        broker_execution_enabled: bool = False,
+        run_id: str | None = None,
     ) -> TradePlanReview:
         from ai_trading_copilot.copilot.domain.enums import MarketType
 
@@ -69,6 +71,8 @@ class TradePlanReviewWorkflow:
             risk_assessment=risk_assessment,
             mode=mode,
             user_confirmed=user_confirmed,
+            broker_execution_enabled=broker_execution_enabled,
+            run_id=run_id,
         )
         return TradePlanReview(
             plan=plan,

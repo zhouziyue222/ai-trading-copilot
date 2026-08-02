@@ -23,11 +23,16 @@ class AnalystType(str, Enum):
     OPPORTUNITY_RADAR = "opportunity_radar"
     TECHNICAL_POSITION = "technical_position"
     FUNDAMENTAL_NEWS = "fundamental_news"
+    NEWS_SENTIMENT = "news_sentiment"
+    FUNDAMENTAL_ANALYSIS = "fundamental_analysis"
 
 
 class MarketRegime(str, Enum):
     BULL_MARKET = "bull_market"
     UPTREND = "uptrend"
+    DOWNTREND = "downtrend"
+    RANGE_BOUND = "range_bound"
+    REVERSAL_POINT = "reversal_point"
     TRADABLE_RANGE = "tradable_range"
     UNCLEAR = "unclear"
     WEAKENING = "weakening"
@@ -66,6 +71,8 @@ class ExecutionStatus(str, Enum):
     BLOCKED_BY_RISK = "blocked_by_risk"
     ALERT_ONLY = "alert_only"
     SIMULATION_READY = "simulation_ready"
+    SIMULATED_ORDER_SUBMITTED = "simulated_order_submitted"
+    SIMULATED_ORDER_FAILED = "simulated_order_failed"
     CONFIRMATION_REQUIRED = "confirmation_required"
     LIVE_READY = "live_ready"
 

@@ -1,4 +1,4 @@
-"""Trader agent for turning reviewed opportunities into trade plans."""
+"""Trader agent for turning analyst evidence into trade plans."""
 
 from __future__ import annotations
 
@@ -10,12 +10,15 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
 )
 from ai_trading_copilot.copilot.domain.enums import (
     MarketRegime,
-    SymbolTrendState,
     SubscriptionStatus,
+    SymbolTrendState,
     TradeDirection,
 )
 from ai_trading_copilot.copilot.domain.models import (
+    FundamentalNewsReport,
+    NewsSentimentReport,
     OpportunityRadarItem,
+    TechnicalContext,
     TechnicalPosition,
     TradePlan,
     UserPersonaConfig,
@@ -28,10 +31,11 @@ class TraderAnalysisResult:
     plan: TradePlan
     report: str
     tool_calls: list[str]
+    opportunity: OpportunityRadarItem | None = None
 
 
 class TraderAgent:
-    """Generates a structured LLM-backed plan from analyst evidence."""
+    """Generates a structured plan after internal opportunity gating."""
 
     def __init__(self, llm=None):
         self.llm = llm
@@ -45,12 +49,16 @@ class TraderAgent:
         persona: UserPersonaConfig | None = None,
     ) -> TradePlan:
         persona = persona or UserPersonaConfig()
-        resolved_regime = market_regime or _market_regime_from_trend(
-            opportunity.trend_state
+        reviewed = _review_opportunity(
+            opportunity=opportunity,
+            technical_position=technical_position,
+            fundamental_news=None,
+            news_sentiment=None,
         )
-        if opportunity.status == SubscriptionStatus.ACTIONABLE:
+        resolved_regime = market_regime or _market_regime_from_trend(reviewed.trend_state)
+        if reviewed.status == SubscriptionStatus.ACTIONABLE:
             return self._buy_plan(
-                opportunity=opportunity,
+                opportunity=reviewed,
                 technical_position=technical_position,
                 market_regime=resolved_regime,
                 persona=persona,
@@ -58,24 +66,54 @@ class TraderAgent:
 
         direction = (
             TradeDirection.WATCH
-            if opportunity.status
+            if reviewed.status
             in {SubscriptionStatus.OBSERVING, SubscriptionStatus.NEAR_OPPORTUNITY}
             else TradeDirection.HOLD
         )
         return TradePlan(
-            symbol=opportunity.symbol,
-            subscription_status=opportunity.status,
+            symbol=reviewed.symbol,
+            subscription_status=reviewed.status,
             market_regime=resolved_regime,
             direction=direction,
-            entry_logic=opportunity.reason,
-            support_level=opportunity.support_level,
+            entry_logic=reviewed.reason,
+            support_level=reviewed.support_level,
             stop_loss=None,
             targets=[],
-            reward_risk_ratio=opportunity.reward_risk_ratio,
+            reward_risk_ratio=reviewed.reward_risk_ratio,
             position_weight=0.0,
-            holding_period="机会变为可执行前不设置主动持有周期。",
+            holding_period="No active holding period until the setup becomes actionable.",
             invalidation_conditions=[],
-            persona_fit_reason="当前机会尚不符合回调型用户画像的可执行要求。",
+            persona_fit_reason="The current evidence does not meet actionable entry requirements.",
+        )
+
+    def create_plan_from_evidence(
+        self,
+        *,
+        symbol: str,
+        technical_position: TechnicalPosition | None = None,
+        technical_context: TechnicalContext | None = None,
+        news_sentiment: NewsSentimentReport | None = None,
+        fundamental_news: FundamentalNewsReport | None = None,
+        persona: UserPersonaConfig | None = None,
+        analyst_context: str = "",
+    ) -> TraderAnalysisResult:
+        position = technical_position or _technical_position_from_context(symbol, technical_context)
+        opportunity = _opportunity_from_evidence(
+            symbol=symbol,
+            technical_position=position,
+            technical_context=technical_context,
+            news_sentiment=news_sentiment,
+            fundamental_news=fundamental_news,
+        )
+        return self.create_plan_with_report(
+            opportunity=opportunity,
+            technical_position=position,
+            market_regime=_market_regime_from_context(technical_context, opportunity),
+            persona=persona,
+            analyst_context=analyst_context,
+            technical_context=technical_context,
+            news_sentiment=news_sentiment,
+            fundamental_news=fundamental_news,
         )
 
     def _buy_plan(
@@ -104,24 +142,27 @@ class TraderAgent:
             market_regime=market_regime,
             direction=TradeDirection.BUY,
             entry_logic=(
-                "仅在价格保持在已确认支撑附近、且市场环境仍具建设性时买入。"
+                "Buy only after the stock, sector, and broad market context "
+                "support an actionable pullback or confirmed continuation setup."
             ),
             support_level=support,
             stop_loss=stop_loss,
             targets=[first_target, second_target],
             reward_risk_ratio=technical_position.reward_risk_ratio,
             position_weight=persona.default_position_weight_max,
-            holding_period="1-6 周",
+            holding_period="1-6 weeks",
             invalidation_conditions=[
-                "日线收盘跌破支撑位或止损位。",
-                "市场环境降级为熊市风险。",
-                "入场前收益风险比跌破要求阈值。",
+                "Daily close below support or stop loss.",
+                "Broad market context deteriorates into a downtrend.",
+                "News/fundamental evidence introduces unresolved material risk.",
             ],
             persona_fit_reason=(
-                "支撑附近出现可执行回调，回撤风险可控，仓位处于默认 10%-25% 区间内。"
+                "The plan fits a controlled pullback style with explicit stop loss, "
+                "bounded position weight, and no leverage or options."
             ),
             uses_leverage=False,
             uses_options=False,
+            pullback_confirmed=True,
         )
 
     def create_plan_with_report(
@@ -132,20 +173,36 @@ class TraderAgent:
         market_regime: MarketRegime | None = None,
         persona: UserPersonaConfig | None = None,
         analyst_context: str = "",
+        technical_context: TechnicalContext | None = None,
+        news_sentiment: NewsSentimentReport | None = None,
+        fundamental_news: FundamentalNewsReport | None = None,
     ) -> TraderAnalysisResult:
-        fallback = self.create_plan(
+        reviewed = _review_opportunity(
             opportunity=opportunity,
             technical_position=technical_position,
-            market_regime=market_regime,
+            fundamental_news=fundamental_news,
+            news_sentiment=news_sentiment,
+        )
+        resolved_regime = market_regime or _market_regime_from_context(
+            technical_context,
+            reviewed,
+        )
+        fallback = self.create_plan(
+            opportunity=reviewed,
+            technical_position=technical_position,
+            market_regime=resolved_regime,
             persona=persona,
         )
-        fallback_report = _report_from_plan(fallback, "确定性备用交易计划。")
+        fallback_report = _report_from_plan(fallback, reviewed, "deterministic trader gate")
         if self.llm is None:
-            return TraderAnalysisResult(fallback, fallback_report, [])
+            return TraderAnalysisResult(fallback, fallback_report, [], reviewed)
 
         prompt = _trader_prompt(
-            opportunity=opportunity,
+            opportunity=reviewed,
             technical_position=technical_position,
+            technical_context=technical_context,
+            news_sentiment=news_sentiment,
+            fundamental_news=fundamental_news,
             persona=persona or UserPersonaConfig(),
             fallback=fallback,
             analyst_context=analyst_context,
@@ -155,51 +212,204 @@ class TraderAgent:
             content = str(getattr(response, "content", response) or "").strip()
             payload = extract_json_object(content)
             plan = _plan_from_payload(payload, fallback)
-            report = strip_trailing_json_object(content) or _report_from_plan(plan, "LLM 交易计划。")
-            return TraderAnalysisResult(plan, report, [])
+            report = strip_trailing_json_object(content) or _report_from_plan(
+                plan,
+                reviewed,
+                "LLM trader plan",
+            )
+            return TraderAnalysisResult(plan, report, [], reviewed)
         except Exception:
-            return TraderAnalysisResult(fallback, fallback_report, [])
+            return TraderAnalysisResult(fallback, fallback_report, [], reviewed)
+
+
+def _review_opportunity(
+    *,
+    opportunity: OpportunityRadarItem,
+    technical_position: TechnicalPosition,
+    fundamental_news: FundamentalNewsReport | None,
+    news_sentiment: NewsSentimentReport | None,
+) -> OpportunityRadarItem:
+    if fundamental_news is not None and fundamental_news.symbol != opportunity.symbol:
+        raise ValueError(
+            f"Fundamental report symbol {fundamental_news.symbol} does not match {opportunity.symbol}"
+        )
+    if news_sentiment is not None and news_sentiment.symbol != opportunity.symbol:
+        raise ValueError(
+            f"News sentiment symbol {news_sentiment.symbol} does not match {opportunity.symbol}"
+        )
+
+    updates: dict[str, object] = {}
+    risk_points = list(opportunity.risk_points)
+    review_reasons = [*opportunity.review_reasons, opportunity.reason]
+
+    if (
+        technical_position.moving_average_50 is not None
+        and technical_position.current_price < technical_position.moving_average_50
+    ):
+        risk_points.append("price_below_50dma")
+        updates["status"] = SubscriptionStatus.RISK_ELEVATED
+        review_reasons.append("Technical evidence shows price below the 50-day average.")
+
+    if news_sentiment is not None:
+        review_reasons.append(f"News sentiment score={news_sentiment.sentiment_score:.2f}.")
+        if news_sentiment.material_risk or news_sentiment.sentiment_score <= -0.4:
+            updates["status"] = SubscriptionStatus.RISK_ELEVATED
+            risk_points.extend(news_sentiment.risk_flags or ["negative_news_sentiment"])
+
+    if fundamental_news is not None:
+        score = fundamental_news.fundamental_score
+        if score is not None:
+            review_reasons.append(f"Fundamental score={score:.2f}.")
+        if fundamental_news.material_risk or not fundamental_news.thesis_intact:
+            updates["status"] = SubscriptionStatus.RISK_ELEVATED
+            risk_points.extend(fundamental_news.risk_flags or ["fundamental_thesis_risk"])
+
+    status = updates.get("status", opportunity.status)
+    return opportunity.model_copy(
+        update={
+            **updates,
+            "final_conclusion": zh_label(status),
+            "review_reasons": _unique_strings(review_reasons),
+            "risk_points": _unique_strings(risk_points),
+            "suggested_action": _suggested_action(status),
+        }
+    )
+
+
+def _opportunity_from_evidence(
+    *,
+    symbol: str,
+    technical_position: TechnicalPosition,
+    technical_context: TechnicalContext | None,
+    news_sentiment: NewsSentimentReport | None,
+    fundamental_news: FundamentalNewsReport | None,
+) -> OpportunityRadarItem:
+    trend_state = _stock_trend_state(technical_context, technical_position)
+    status = SubscriptionStatus.OBSERVING
+    reason = "Technical evidence is insufficient for an active trade."
+    if trend_state in {SymbolTrendState.UPTREND, SymbolTrendState.UPTREND_PULLBACK}:
+        if (
+            technical_position.reward_risk_ratio is not None
+            and technical_position.reward_risk_ratio >= 2.0
+        ):
+            status = SubscriptionStatus.ACTIONABLE
+            reason = "Technical setup is actionable with acceptable reward/risk."
+        else:
+            status = SubscriptionStatus.NEAR_OPPORTUNITY
+            reason = "Trend is constructive but reward/risk or entry quality needs confirmation."
+    if trend_state == SymbolTrendState.DOWNTREND:
+        status = SubscriptionStatus.RISK_ELEVATED
+        reason = "Stock technical state is a downtrend."
+
+    item = OpportunityRadarItem(
+        symbol=symbol.strip().upper(),
+        status=status,
+        trend_state=trend_state,
+        current_price=technical_position.current_price,
+        support_level=technical_position.support_level,
+        reward_risk_ratio=technical_position.reward_risk_ratio,
+        reason=reason,
+    )
+    return _review_opportunity(
+        opportunity=item,
+        technical_position=technical_position,
+        fundamental_news=fundamental_news,
+        news_sentiment=news_sentiment,
+    )
+
+
+def _market_regime_from_context(
+    technical_context: TechnicalContext | None,
+    opportunity: OpportunityRadarItem,
+) -> MarketRegime:
+    if technical_context is None or technical_context.market is None:
+        return _market_regime_from_trend(opportunity.trend_state)
+    state = technical_context.market.trend_state
+    if state == SymbolTrendState.UPTREND:
+        return MarketRegime.UPTREND
+    if state == SymbolTrendState.DOWNTREND:
+        return MarketRegime.DOWNTREND
+    if state == SymbolTrendState.UPTREND_PULLBACK:
+        return MarketRegime.RANGE_BOUND
+    return _market_regime_from_trend(opportunity.trend_state)
 
 
 def _market_regime_from_trend(trend_state: SymbolTrendState | None) -> MarketRegime:
     if trend_state in {SymbolTrendState.UPTREND, SymbolTrendState.UPTREND_PULLBACK}:
         return MarketRegime.UPTREND
     if trend_state == SymbolTrendState.DOWNTREND:
-        return MarketRegime.WEAKENING
+        return MarketRegime.DOWNTREND
     return MarketRegime.UNCLEAR
+
+
+def _stock_trend_state(
+    technical_context: TechnicalContext | None,
+    technical_position: TechnicalPosition,
+) -> SymbolTrendState:
+    if technical_context is not None and technical_context.stock.trend_state is not None:
+        return technical_context.stock.trend_state
+    if technical_position.uptrend:
+        return SymbolTrendState.UPTREND_PULLBACK
+    if (
+        technical_position.moving_average_50 is not None
+        and technical_position.current_price < technical_position.moving_average_50
+    ):
+        return SymbolTrendState.DOWNTREND
+    return SymbolTrendState.UNKNOWN
+
+
+def _technical_position_from_context(
+    symbol: str,
+    technical_context: TechnicalContext | None,
+) -> TechnicalPosition:
+    stock = technical_context.stock if technical_context is not None else None
+    current = stock.current_price if stock and stock.current_price else 1.0
+    ma20 = stock.moving_average_20 if stock else None
+    ma50 = stock.moving_average_50 if stock else None
+    return TechnicalPosition(
+        symbol=symbol.strip().upper(),
+        current_price=current,
+        support_level=current,
+        recent_high=current,
+        moving_average_20=ma20,
+        moving_average_50=ma50,
+        distance_to_support_pct=0.0,
+        pullback_from_high_pct=0.0,
+        reward_risk_ratio=None,
+        uptrend=stock.trend_state == SymbolTrendState.UPTREND if stock else False,
+    )
 
 
 def _trader_prompt(
     *,
     opportunity: OpportunityRadarItem,
     technical_position: TechnicalPosition,
+    technical_context: TechnicalContext | None,
+    news_sentiment: NewsSentimentReport | None,
+    fundamental_news: FundamentalNewsReport | None,
     persona: UserPersonaConfig,
     fallback: TradePlan,
     analyst_context: str,
 ) -> str:
     return (
-        "You are the Trader in an AI trading copilot, mirroring the TradingAgents "
-        "Trader role. Convert the reviewed opportunity and analyst evidence into a "
-        "specific transaction proposal: buy, sell/reduce, hold, or watch. Anchor every "
-        "decision in the provided analyst/tool reports and the user's persona. Do not "
-        "discover new market facts and do not override a non-actionable review with a buy.\n\n"
-        "高效报告格式：\n"
-        "1. 交易建议：动作、仓位和时间周期。\n"
-        "2. 入场计划：入场条件、止损、目标位和失效条件。\n"
-        "3. 证据：来自分析师报告的 2-4 条要点，不要原文大段复制。\n"
-        "4. 暂缓原因：如需回避或延后，用一句话说明最主要原因。\n\n"
-        "Use only the provided analyst/tool reports as evidence. Write the entire "
-        "Markdown Trader report and all JSON string values in Simplified Chinese. "
-        "Enum values such as direction and market_regime must still use the allowed English values. "
-        "Return a Markdown Trader report followed by one JSON object with keys: direction, entry_logic, "
+        "You are the Trader in an AI trading copilot. Follow this strict order: "
+        "1) classify market state as uptrend, downtrend, range_bound, reversal_point, or unclear "
+        "from the multi-dimensional technical context; 2) check stock/sector/broad-market "
+        "technical alignment; 3) combine news sentiment and fundamental score; 4) produce "
+        "a concrete trade plan. Use only supplied analyst/tool reports. Do not invent data.\n\n"
+        "Return Markdown followed by one final JSON object with keys: direction, entry_logic, "
         "market_regime, support_level, stop_loss, targets, reward_risk_ratio, "
         "position_weight, holding_period, invalidation_conditions, persona_fit_reason, "
         "uses_leverage, uses_options, is_chasing, breakout_confirmed, pullback_confirmed. "
-        "Allowed direction values: buy, hold, reduce, sell, watch. JSON must be the final object. "
-        "Do not invent market data.\n\n"
+        "Allowed direction values: buy, hold, reduce, sell, watch. Allowed market_regime "
+        "values: bull_market, uptrend, downtrend, range_bound, reversal_point, tradable_range, "
+        "unclear, weakening, bear_risk. JSON must be the final object.\n\n"
         f"Persona: {persona.model_dump_json()}\n"
         f"Reviewed opportunity: {opportunity.model_dump_json()}\n"
         f"Technical position: {technical_position.model_dump_json()}\n"
+        f"Technical context: {technical_context.model_dump_json() if technical_context else '-'}\n"
+        f"News sentiment: {news_sentiment.model_dump_json() if news_sentiment else '-'}\n"
+        f"Fundamental report: {fundamental_news.model_dump_json() if fundamental_news else '-'}\n"
         f"Fallback safe plan: {fallback.model_dump_json()}\n"
         f"Analyst context:\n{analyst_context or '-'}"
     )
@@ -232,15 +442,38 @@ def _plan_from_payload(payload: dict, fallback: TradePlan) -> TradePlan:
     return TradePlan(**data)
 
 
-def _report_from_plan(plan: TradePlan, note: str) -> str:
+def _report_from_plan(plan: TradePlan, opportunity: OpportunityRadarItem, note: str) -> str:
     return (
-        f"# 交易员报告：{plan.symbol}\n\n"
-        f"- 说明：{note}\n"
-        f"- 方向：{zh_label(plan.direction)}\n"
-        f"- 入场逻辑：{plan.entry_logic}\n"
-        f"- 止损位：{plan.stop_loss}\n"
-        f"- 目标位：{', '.join(str(target) for target in plan.targets) or '-'}\n"
-        f"- 仓位权重：{plan.position_weight:.1%}\n"
-        f"- 持有周期：{plan.holding_period}\n"
-        f"- 用户画像匹配：{plan.persona_fit_reason}\n"
+        f"# Trader Report: {plan.symbol}\n\n"
+        f"- Note: {note}\n"
+        f"- Market state: {zh_label(plan.market_regime)}\n"
+        f"- Opportunity status: {zh_label(opportunity.status)}\n"
+        f"- Direction: {zh_label(plan.direction)}\n"
+        f"- Entry logic: {plan.entry_logic}\n"
+        f"- Stop loss: {plan.stop_loss}\n"
+        f"- Targets: {', '.join(str(target) for target in plan.targets) or '-'}\n"
+        f"- Position weight: {plan.position_weight:.1%}\n"
+        f"- Holding period: {plan.holding_period}\n"
+        f"- Risk points: {', '.join(opportunity.risk_points) or '-'}\n"
     )
+
+
+def _suggested_action(status: SubscriptionStatus) -> str:
+    if status == SubscriptionStatus.ACTIONABLE:
+        return "Prepare a risk-checked trade plan."
+    if status == SubscriptionStatus.NEAR_OPPORTUNITY:
+        return "Wait for better entry confirmation."
+    if status == SubscriptionStatus.RISK_ELEVATED:
+        return "Avoid new entry until risk clears."
+    return "Continue monitoring."
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    output = []
+    seen = set()
+    for value in values:
+        cleaned = str(value).strip()
+        if cleaned and cleaned not in seen:
+            output.append(cleaned)
+            seen.add(cleaned)
+    return output

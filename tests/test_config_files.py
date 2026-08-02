@@ -25,9 +25,10 @@ def test_product_default_json_matches_memory_limit():
     assert payload["learning_loop"]["memory_strategy"] == "distilled_retrieval_memory"
     assert (
         payload["learning_loop"]["retrieval_backend"]
-        == "fundamental_chroma_structured_parent_child_bm25_rrf_rerank"
+        == "fundamental_analyst_chroma_structured_parent_child_bm25_rrf_rerank"
     )
     vector_index = payload["learning_loop"]["vector_index"]
+    assert vector_index["chroma_path"] == "config/rag_chroma"
     assert vector_index["scope"] == "fundamental_only"
     assert "trade_memory" not in vector_index["allowed_source_types"]
     assert vector_index["chunking"]["strategy"] == "structured_semantic_parent_child_v1"

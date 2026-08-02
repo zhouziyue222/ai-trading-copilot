@@ -164,6 +164,9 @@ def _validate_buy_plan(
 
     if plan.market_regime in {
         MarketRegime.UNCLEAR,
+        MarketRegime.DOWNTREND,
+        MarketRegime.RANGE_BOUND,
+        MarketRegime.REVERSAL_POINT,
         MarketRegime.WEAKENING,
         MarketRegime.BEAR_RISK,
     }:

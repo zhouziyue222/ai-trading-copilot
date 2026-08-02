@@ -14,6 +14,9 @@ from ai_trading_copilot.copilot.config import DEFAULT_REPORT_OUTPUT_DIR
 from ai_trading_copilot.copilot.config.defaults import DEFAULT_PERSONA_CONFIG
 from ai_trading_copilot.copilot.domain.enums import AnalystType, ExecutionMode
 from ai_trading_copilot.copilot.graph import CopilotLangGraph
+from ai_trading_copilot.copilot.services.fundamental_research import (
+    FundamentalResearchRetriever,
+)
 from ai_trading_copilot.copilot.services.memory_store import DistilledMemoryStore
 from ai_trading_copilot.copilot.services.rag_store import FundamentalRagStore
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
@@ -23,11 +26,11 @@ from ai_trading_copilot.copilot.services.subscription_service import Subscriptio
 DEFAULT_SUBSCRIPTIONS_FILE = Path(__file__).resolve().parents[1] / "config" / "subscriptions.json"
 DEFAULT_MEMORY_FILE = Path(__file__).resolve().parents[1] / "config" / "memory.jsonl"
 DEFAULT_ANALYSTS = [
-    AnalystType.OPPORTUNITY_RADAR,
+    AnalystType.NEWS_SENTIMENT,
     AnalystType.TECHNICAL_POSITION,
-    AnalystType.FUNDAMENTAL_NEWS,
+    AnalystType.FUNDAMENTAL_ANALYSIS,
 ]
-ALL_ANALYST_VALUES = [analyst.value for analyst in DEFAULT_ANALYSTS]
+ALL_ANALYST_VALUES = [analyst.value for analyst in AnalystType]
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -49,6 +52,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         "mode": ExecutionMode(args.mode),
         "portfolio_mode": ExecutionMode(args.portfolio_mode),
         "user_confirmed": False,
+        "broker_execution_enabled": args.broker_execution_enabled,
+        "run_id": run_id,
     }
     defaults = {
         "persona": DEFAULT_PERSONA_CONFIG,
@@ -69,6 +74,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         CopilotLangGraph,
         run_tracker=tracker,
         memory_agent=create_default_memory_agent(),
+        fundamental_rag_retriever=create_default_fundamental_research_retriever(),
     )
     state = None
     error = None
@@ -143,6 +149,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         "--portfolio-mode",
         choices=[ExecutionMode.SIMULATION.value, ExecutionMode.LIVE.value],
         default=ExecutionMode.SIMULATION.value,
+    )
+    parser.add_argument(
+        "--broker-execution-enabled",
+        action="store_true",
+        help="Submit risk-approved order candidates to a Futu simulated account.",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -293,19 +304,36 @@ def create_default_memory_agent(
     auto_ingest_seed: bool = True,
 ) -> PostTradeReviewLearningAgent:
     memory_path = Path(path)
-    rag_store = FundamentalRagStore(rag_chroma_dir or memory_path.parent / "rag_chroma")
-    agent = PostTradeReviewLearningAgent(
-        DistilledMemoryStore(memory_path),
-        rag_store=rag_store,
+    return PostTradeReviewLearningAgent(DistilledMemoryStore(memory_path))
+
+
+def create_default_fundamental_research_retriever(
+    path: str | Path = DEFAULT_MEMORY_FILE,
+    *,
+    rag_chroma_dir: str | Path | None = None,
+    auto_ingest_seed: bool = True,
+) -> FundamentalResearchRetriever:
+    memory_path = Path(path)
+    retriever = FundamentalResearchRetriever(
+        FundamentalRagStore(rag_chroma_dir or memory_path.parent / "rag_chroma")
     )
     if auto_ingest_seed:
-        agent.ingest_seed_knowledge()
-    return agent
+        retriever.ingest_seed_knowledge()
+    return retriever
 
 
-def _create_graph(graph_cls: type, *, run_tracker: RunTracker, memory_agent):
+def _create_graph(
+    graph_cls: type,
+    *,
+    run_tracker: RunTracker,
+    memory_agent,
+    fundamental_rag_retriever=None,
+):
     if _accepts_keyword(graph_cls, "memory_agent"):
-        return graph_cls(run_tracker=run_tracker, memory_agent=memory_agent)
+        kwargs = {"run_tracker": run_tracker, "memory_agent": memory_agent}
+        if _accepts_keyword(graph_cls, "fundamental_rag_retriever"):
+            kwargs["fundamental_rag_retriever"] = fundamental_rag_retriever
+        return graph_cls(**kwargs)
     return graph_cls(run_tracker=run_tracker)
 
 

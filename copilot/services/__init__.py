@@ -1,6 +1,10 @@
 """Application services for the AI trading copilot."""
 
 from .execution_manager import prepare_execution_decision
+from .fundamental_research import (
+    FundamentalResearchRetriever,
+    create_fundamental_research_retriever,
+)
 from .memory_store import DistilledMemoryStore
 from .rag_store import (
     ChromaRagStore,
@@ -19,6 +23,7 @@ __all__ = [
     "DistilledMemoryStore",
     "ChromaRagStore",
     "FundamentalRagStore",
+    "FundamentalResearchRetriever",
     "HashingTextEmbedder",
     "LocalVectorMemoryIndex",
     "OpenAITextEmbedder",
@@ -28,6 +33,7 @@ __all__ = [
     "RunTracker",
     "SubscriptionStore",
     "can_transition",
+    "create_fundamental_research_retriever",
     "prepare_execution_decision",
     "transition_subscription_status",
 ]

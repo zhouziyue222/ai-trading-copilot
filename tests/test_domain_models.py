@@ -37,8 +37,9 @@ def test_product_config_uses_distilled_retrieval_memory_limit():
     assert learning_loop["memory_strategy"] == "distilled_retrieval_memory"
     assert (
         learning_loop["retrieval_backend"]
-        == "fundamental_chroma_structured_parent_child_bm25_rrf_rerank"
+        == "fundamental_analyst_chroma_structured_parent_child_bm25_rrf_rerank"
     )
+    assert learning_loop["vector_index"]["chroma_path"] == "config/rag_chroma"
     assert learning_loop["vector_index"]["scope"] == "fundamental_only"
     assert "earnings_report" in learning_loop["vector_index"]["allowed_source_types"]
     assert "trade_memory" not in learning_loop["vector_index"]["allowed_source_types"]

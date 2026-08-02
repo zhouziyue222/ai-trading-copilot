@@ -40,6 +40,25 @@ class FakeGraph:
         }
 
 
+class FakeFundamentalRetriever:
+    def rag_status(self):
+        return {
+            "backend": "fundamental_chroma",
+            "scope": "fundamental_only",
+            "available": False,
+            "document_count": 0,
+        }
+
+    def ingest_seed_knowledge(self):
+        return {"added": 0, "skipped": 0, "errors": []}
+
+    def ingest_text_knowledge(self, **kwargs):
+        return {"added": 1, "skipped": 0, "errors": []}
+
+    def ingest_online_fundamental_research(self, **kwargs):
+        return {"added": 0, "skipped": 0, "errors": []}
+
+
 @pytest.fixture()
 def client(tmp_path):
     FakeGraph.calls = []
@@ -51,6 +70,7 @@ def client(tmp_path):
             reports_dir=tmp_path / "reports",
             graph_cls=FakeGraph,
             run_in_background=False,
+            fundamental_retriever_factory=lambda settings, auto_ingest_seed: FakeFundamentalRetriever(),
         )
     )
     return TestClient(app)
@@ -97,10 +117,11 @@ def test_create_run_constructs_graph_params_and_status(client):
         json={
             "symbols": ["aapl"],
             "manual_symbols": "msft, CRCL",
-            "selected_analysts": ["opportunity_radar", "fundamental_news"],
+            "selected_analysts": ["news_sentiment", "fundamental_analysis"],
             "trade_date": "2026-05-13",
             "look_back_days": 45,
             "portfolio_mode": "live",
+            "broker_execution_enabled": True,
         },
     )
 
@@ -113,11 +134,12 @@ def test_create_run_constructs_graph_params_and_status(client):
     assert payload["status"]["decision_summary"]["symbols"][0]["symbol"] == "AAPL"
     assert FakeGraph.calls[0]["subscription_symbols"] == ["AAPL", "MSFT", "CRCL"]
     assert [item.value for item in FakeGraph.calls[0]["selected_analysts"]] == [
-        "opportunity_radar",
-        "fundamental_news",
+        "news_sentiment",
+        "fundamental_analysis",
     ]
     assert FakeGraph.calls[0]["mode"].value == "simulation"
     assert FakeGraph.calls[0]["portfolio_mode"].value == "live"
+    assert FakeGraph.calls[0]["broker_execution_enabled"] is True
     assert FakeGraph.memory_agents[0].retrieve_context(symbol="AAPL") == []
 
 

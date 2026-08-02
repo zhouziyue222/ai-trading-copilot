@@ -1,6 +1,7 @@
 from ai_trading_copilot.copilot.domain import RagDocument
 from ai_trading_copilot.copilot.services.rag_store import (
     ChromaRagStore,
+    FundamentalRagStore,
     RagQueryPlan,
     RagQueryPlanner,
     _rerank_documents,
@@ -223,6 +224,10 @@ def test_chroma_rag_store_upserts_and_queries_with_symbol_filter(tmp_path):
     ]
     assert found[0].metadata["rerank_model"] == "local_cross_feature_v1"
     assert "retrieval" in store.status()
+
+
+def test_fundamental_rag_store_uses_chroma_backend():
+    assert FundamentalRagStore is ChromaRagStore
 
 
 def test_chroma_rag_store_fuses_vector_and_bm25_recall(tmp_path):

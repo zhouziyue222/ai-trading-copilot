@@ -8,9 +8,10 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from ai_trading_copilot.copilot.agents import (
     ExecutionAlertManager,
+    FundamentalAnalystAgent,
     FundamentalNewsAgent,
+    NewsSentimentAgent,
     OpportunityRadarAgent,
-    OpportunityReviewManager,
     PostTradeReviewLearningAgent,
     RiskAgent,
     RunExplanationAgent,
@@ -37,13 +38,14 @@ from ai_trading_copilot.copilot.domain.models import (
     DistilledMemory,
     ExecutionDecision,
     FundamentalNewsReport,
+    NewsSentimentReport,
     OpportunityRadarItem,
     PortfolioSnapshot,
     PriceBar,
-    RagDocument,
     RiskAssessment,
     Subscription,
     SubscriptionBook,
+    TechnicalContext,
     TechnicalPosition,
     TraceEvent,
     TradePlan,
@@ -59,9 +61,9 @@ PortfolioGetter = Callable[[ExecutionMode], PortfolioSnapshot]
 
 
 DEFAULT_SELECTED_ANALYSTS = [
-    AnalystType.OPPORTUNITY_RADAR,
+    AnalystType.NEWS_SENTIMENT,
     AnalystType.TECHNICAL_POSITION,
-    AnalystType.FUNDAMENTAL_NEWS,
+    AnalystType.FUNDAMENTAL_ANALYSIS,
 ]
 
 _DEFAULT_LLM = object()
@@ -75,8 +77,9 @@ class CopilotLangGraph:
     NODE_RETRIEVE_MEMORIES = "Retrieve Memories"
     NODE_OPPORTUNITY_RADAR = "Opportunity Radar"
     NODE_TECHNICAL_POSITION = "Technical Position"
+    NODE_NEWS_SENTIMENT = "News Sentiment"
+    NODE_FUNDAMENTAL_ANALYSIS = "Fundamental Analysis"
     NODE_FUNDAMENTAL_NEWS_REVIEW = "Fundamental News Review"
-    NODE_OPPORTUNITY_REVIEW = "Opportunity Review"
     NODE_TRADER = "Trader"
     NODE_RISK_CHECK = "Risk Check"
     NODE_EXECUTION_ALERT = "Execution Alert"
@@ -87,10 +90,9 @@ class CopilotLangGraph:
         NODE_LOAD_PERSONA_MARKDOWN,
         NODE_LOAD_SUBSCRIPTION_SYMBOLS,
         NODE_RETRIEVE_MEMORIES,
-        NODE_OPPORTUNITY_RADAR,
         NODE_TECHNICAL_POSITION,
-        NODE_FUNDAMENTAL_NEWS_REVIEW,
-        NODE_OPPORTUNITY_REVIEW,
+        NODE_NEWS_SENTIMENT,
+        NODE_FUNDAMENTAL_ANALYSIS,
         NODE_TRADER,
         NODE_RISK_CHECK,
         NODE_EXECUTION_ALERT,
@@ -102,8 +104,9 @@ class CopilotLangGraph:
         self,
         *,
         opportunity_radar_agent: Optional[OpportunityRadarAgent] = None,
+        news_sentiment_agent: Optional[NewsSentimentAgent] = None,
+        fundamental_analyst_agent: Optional[FundamentalAnalystAgent] = None,
         fundamental_news_agent: Optional[FundamentalNewsAgent] = None,
-        opportunity_review_manager: Optional[OpportunityReviewManager] = None,
         technical_position_agent: Optional[TechnicalPositionAgent] = None,
         trader_agent: Optional[TraderAgent] = None,
         risk_agent: Optional[RiskAgent] = None,
@@ -122,6 +125,7 @@ class CopilotLangGraph:
         technical_position_llm=None,
         fundamental_news_llm=None,
         run_tracker: Optional[RunTracker] = None,
+        fundamental_rag_retriever=None,
     ):
         default_llm = None
         if llm is _DEFAULT_LLM:
@@ -135,11 +139,18 @@ class CopilotLangGraph:
         self.opportunity_radar_agent = opportunity_radar_agent or OpportunityRadarAgent(
             llm=opportunity_radar_llm or default_llm
         )
-        self.fundamental_news_agent = fundamental_news_agent or FundamentalNewsAgent(
+        self.news_sentiment_agent = news_sentiment_agent or NewsSentimentAgent(
             llm=fundamental_news_llm or default_llm
         )
-        self.opportunity_review_manager = (
-            opportunity_review_manager or OpportunityReviewManager(llm=default_llm)
+        self.fundamental_analyst_agent = (
+            fundamental_analyst_agent
+            or FundamentalAnalystAgent(
+                llm=fundamental_news_llm or default_llm,
+                rag_retriever=fundamental_rag_retriever,
+            )
+        )
+        self.fundamental_news_agent = fundamental_news_agent or FundamentalNewsAgent(
+            llm=fundamental_news_llm or default_llm
         )
         self.technical_position_agent = technical_position_agent or TechnicalPositionAgent(
             llm=technical_position_llm or default_llm
@@ -150,12 +161,8 @@ class CopilotLangGraph:
             llm=default_llm
         )
         self.memory_agent = memory_agent
-        if (
-            self.memory_agent is not None
-            and default_llm is not None
-            and hasattr(self.memory_agent, "set_rag_query_llm")
-        ):
-            self.memory_agent.set_rag_query_llm(default_llm)
+        if default_llm is not None and hasattr(self.fundamental_analyst_agent, "set_rag_query_llm"):
+            self.fundamental_analyst_agent.set_rag_query_llm(default_llm)
         self.explanation_agent = explanation_agent or RunExplanationAgent(
             llm=default_llm
         )
@@ -187,6 +194,8 @@ class CopilotLangGraph:
         mode: ExecutionMode = ExecutionMode.SIMULATION,
         portfolio_mode: ExecutionMode = ExecutionMode.SIMULATION,
         user_confirmed: bool = False,
+        broker_execution_enabled: bool = False,
+        run_id: str | None = None,
     ) -> CopilotGraphState:
         resolved_portfolio, portfolio_report, portfolio_error = self._resolve_portfolio(
             portfolio=portfolio,
@@ -218,6 +227,8 @@ class CopilotLangGraph:
             "look_back_days": look_back_days,
             "execution_mode": mode,
             "user_confirmed": user_confirmed,
+            "broker_execution_enabled": broker_execution_enabled,
+            "run_id": run_id or "",
             "trace_events": [],
             "errors": [portfolio_error] if portfolio_error else [],
             "explanations": {},
@@ -225,6 +236,9 @@ class CopilotLangGraph:
             "agent_reports": {"futu_portfolio": portfolio_report_path},
             "market_reports_by_symbol": {},
             "fundamental_news_reports_by_symbol": {},
+            "news_sentiment_reports_by_symbol": {},
+            "news_sentiment_by_symbol": {},
+            "technical_contexts": {},
             "opportunity_reports_by_symbol": {},
             "report_output_dir": str(report_output_dir or self.report_output_dir),
         }
@@ -243,6 +257,9 @@ class CopilotLangGraph:
             "agent_reports": {},
             "market_reports_by_symbol": {},
             "fundamental_news_reports_by_symbol": {},
+            "news_sentiment_reports_by_symbol": {},
+            "news_sentiment_by_symbol": {},
+            "technical_contexts": {},
             "opportunity_reports_by_symbol": {},
             "report_output_dir": self.report_output_dir,
             "portfolio_mode": ExecutionMode.SIMULATION,
@@ -251,6 +268,8 @@ class CopilotLangGraph:
             "look_back_days": 90,
             "execution_mode": ExecutionMode.SIMULATION,
             "user_confirmed": False,
+            "broker_execution_enabled": False,
+            "run_id": "",
         }
         base_state.update(state)
         base_state["selected_analysts"] = _normalize_analysts(
@@ -281,7 +300,13 @@ class CopilotLangGraph:
 
         workflow = StateGraph(CopilotGraphState)
         node_map = self._node_map()
-        for node_name in self.NODE_ORDER:
+        for node_name in _unique_list(
+            [
+                *self.NODE_ORDER,
+                self.NODE_OPPORTUNITY_RADAR,
+                self.NODE_FUNDAMENTAL_NEWS_REVIEW,
+            ]
+        ):
             workflow.add_node(node_name, node_map[node_name])
 
         workflow.add_edge(START, self.NODE_LOAD_PERSONA_MARKDOWN)
@@ -299,17 +324,17 @@ class CopilotLangGraph:
             [
                 self.NODE_OPPORTUNITY_RADAR,
                 self.NODE_TECHNICAL_POSITION,
+                self.NODE_NEWS_SENTIMENT,
+                self.NODE_FUNDAMENTAL_ANALYSIS,
                 self.NODE_FUNDAMENTAL_NEWS_REVIEW,
-                self.NODE_OPPORTUNITY_REVIEW,
+                self.NODE_TRADER,
             ],
         )
-        workflow.add_edge(self.NODE_OPPORTUNITY_RADAR, self.NODE_OPPORTUNITY_REVIEW)
-        workflow.add_edge(self.NODE_TECHNICAL_POSITION, self.NODE_OPPORTUNITY_REVIEW)
-        workflow.add_edge(
-            self.NODE_FUNDAMENTAL_NEWS_REVIEW,
-            self.NODE_OPPORTUNITY_REVIEW,
-        )
-        workflow.add_edge(self.NODE_OPPORTUNITY_REVIEW, self.NODE_TRADER)
+        workflow.add_edge(self.NODE_OPPORTUNITY_RADAR, self.NODE_TRADER)
+        workflow.add_edge(self.NODE_TECHNICAL_POSITION, self.NODE_TRADER)
+        workflow.add_edge(self.NODE_NEWS_SENTIMENT, self.NODE_TRADER)
+        workflow.add_edge(self.NODE_FUNDAMENTAL_ANALYSIS, self.NODE_TRADER)
+        workflow.add_edge(self.NODE_FUNDAMENTAL_NEWS_REVIEW, self.NODE_TRADER)
         workflow.add_edge(self.NODE_TRADER, self.NODE_RISK_CHECK)
         workflow.add_edge(self.NODE_RISK_CHECK, self.NODE_EXECUTION_ALERT)
         workflow.add_edge(self.NODE_EXECUTION_ALERT, self.NODE_EXPLAIN_RUN)
@@ -327,9 +352,8 @@ class CopilotLangGraph:
             *[
                 node
                 for node in self._route_analyst_nodes(current)
-                if node != self.NODE_OPPORTUNITY_REVIEW
+                if node != self.NODE_TRADER
             ],
-            self.NODE_OPPORTUNITY_REVIEW,
             self.NODE_TRADER,
             self.NODE_RISK_CHECK,
             self.NODE_EXECUTION_ALERT,
@@ -352,11 +376,19 @@ class CopilotLangGraph:
             routes.append(self.NODE_TECHNICAL_POSITION)
         else:
             self._skip_node(self.NODE_TECHNICAL_POSITION, "analyst not selected")
+        if AnalystType.NEWS_SENTIMENT in selected:
+            routes.append(self.NODE_NEWS_SENTIMENT)
+        else:
+            self._skip_node(self.NODE_NEWS_SENTIMENT, "analyst not selected")
+        if AnalystType.FUNDAMENTAL_ANALYSIS in selected:
+            routes.append(self.NODE_FUNDAMENTAL_ANALYSIS)
+        else:
+            self._skip_node(self.NODE_FUNDAMENTAL_ANALYSIS, "analyst not selected")
         if AnalystType.FUNDAMENTAL_NEWS in selected:
             routes.append(self.NODE_FUNDAMENTAL_NEWS_REVIEW)
         else:
             self._skip_node(self.NODE_FUNDAMENTAL_NEWS_REVIEW, "analyst not selected")
-        return routes or [self.NODE_OPPORTUNITY_REVIEW]
+        return routes or [self.NODE_TRADER]
 
     def _merge_state(
         self,
@@ -372,6 +404,7 @@ class CopilotLangGraph:
                 "agent_reports",
                 "market_reports_by_symbol",
                 "fundamental_news_reports_by_symbol",
+                "news_sentiment_reports_by_symbol",
                 "opportunity_reports_by_symbol",
             }:
                 merged[key] = {**merged.get(key, {}), **value}
@@ -386,8 +419,9 @@ class CopilotLangGraph:
             self.NODE_RETRIEVE_MEMORIES: self._retrieve_memories,
             self.NODE_OPPORTUNITY_RADAR: self._opportunity_radar,
             self.NODE_TECHNICAL_POSITION: self._technical_position,
+            self.NODE_NEWS_SENTIMENT: self._news_sentiment,
+            self.NODE_FUNDAMENTAL_ANALYSIS: self._fundamental_analysis,
             self.NODE_FUNDAMENTAL_NEWS_REVIEW: self._fundamental_news_review,
-            self.NODE_OPPORTUNITY_REVIEW: self._opportunity_review,
             self.NODE_TRADER: self._trader,
             self.NODE_RISK_CHECK: self._risk_check,
             self.NODE_EXECUTION_ALERT: self._execution_alert,
@@ -625,6 +659,7 @@ class CopilotLangGraph:
             )
 
         positions: Dict[str, TechnicalPosition] = {}
+        contexts: Dict[str, TechnicalContext] = {}
         reports_by_symbol: Dict[str, str] = {}
         events: List[TraceEvent] = []
         for symbol in state["subscription_symbols"]:
@@ -653,6 +688,8 @@ class CopilotLangGraph:
                     look_back_days=state.get("look_back_days", 90),
                 )
                 position = result.position
+                if result.context is not None:
+                    contexts[symbol] = result.context
                 reports_by_symbol[symbol] = result.report
                 tool_calls = result.tool_calls
             else:
@@ -688,9 +725,128 @@ class CopilotLangGraph:
             state,
             events,
             technical_positions=positions,
+            technical_contexts=contexts,
             analyst_reports={AnalystType.TECHNICAL_POSITION.value: report_path},
             agent_reports={AnalystType.TECHNICAL_POSITION.value: report_path},
             market_reports_by_symbol=reports_by_symbol,
+        )
+
+    def _news_sentiment(self, state: CopilotGraphState) -> CopilotGraphState:
+        if AnalystType.NEWS_SENTIMENT not in state["selected_analysts"]:
+            return self._with_trace(
+                state,
+                TraceEvent(
+                    node_name=self.NODE_NEWS_SENTIMENT,
+                    input_summary="analyst not selected",
+                    output_summary="news_sentiment_reports=0",
+                    route_reason="News sentiment analyst was not selected.",
+                    warnings=["analyst_skipped"],
+                ),
+                news_sentiment_by_symbol={},
+            )
+
+        reports: Dict[str, NewsSentimentReport] = {}
+        reports_by_symbol: Dict[str, str] = {}
+        tool_calls: List[str] = []
+        for symbol in state["subscription_symbols"]:
+            result = self.news_sentiment_agent.analyze_symbol(
+                symbol=symbol,
+                trade_date=state.get("trade_date"),
+                look_back_days=7,
+            )
+            reports[symbol] = result.report
+            reports_by_symbol[symbol] = result.markdown
+            tool_calls.extend(result.tool_calls)
+
+        report_path = self._save_analyst_report(
+            state=state,
+            analyst=AnalystType.NEWS_SENTIMENT,
+            content=(
+                _format_news_sentiment_report(
+                    subscription_symbols=state["subscription_symbols"],
+                    reports=reports,
+                )
+                + self._format_symbol_reports(reports_by_symbol)
+            ),
+        )
+        return self._with_trace(
+            state,
+            TraceEvent(
+                node_name=self.NODE_NEWS_SENTIMENT,
+                input_summary=f"symbols={state['subscription_symbols']}",
+                output_summary=f"news_sentiment_reports={len(reports)}",
+                route_reason="Finnhub news, social sentiment, and earnings-event evidence was reviewed.",
+                rule_hits=sorted(set(tool_calls)),
+            ),
+            news_sentiment_by_symbol=reports,
+            news_sentiment_reports_by_symbol=reports_by_symbol,
+            analyst_reports={AnalystType.NEWS_SENTIMENT.value: report_path},
+            agent_reports={AnalystType.NEWS_SENTIMENT.value: report_path},
+        )
+
+    def _fundamental_analysis(self, state: CopilotGraphState) -> CopilotGraphState:
+        if AnalystType.FUNDAMENTAL_ANALYSIS not in state["selected_analysts"]:
+            return self._with_trace(
+                state,
+                TraceEvent(
+                    node_name=self.NODE_FUNDAMENTAL_ANALYSIS,
+                    input_summary="analyst not selected",
+                    output_summary="fundamental_reports=0",
+                    route_reason="Fundamental analyst was not selected.",
+                    warnings=["analyst_skipped"],
+                ),
+                fundamental_news_by_symbol={},
+            )
+
+        reports: Dict[str, FundamentalNewsReport] = {}
+        reports_by_symbol: Dict[str, str] = {}
+        tool_calls: List[str] = []
+        provided_reports = {
+            symbol.strip().upper(): report
+            for symbol, report in state.get("fundamental_news_by_symbol", {}).items()
+            if symbol.strip().upper() in set(state["subscription_symbols"])
+        }
+        for symbol in state["subscription_symbols"]:
+            if (
+                symbol in provided_reports
+                and getattr(self.fundamental_analyst_agent, "llm", None) is None
+            ):
+                reports[symbol] = provided_reports[symbol]
+                reports_by_symbol[symbol] = _format_single_fundamental_news_report(
+                    provided_reports[symbol]
+                )
+                continue
+            result = self.fundamental_analyst_agent.analyze_symbol(
+                symbol=symbol,
+                trade_date=state.get("trade_date"),
+                look_back_days=state.get("look_back_days", 90),
+            )
+            reports[symbol] = result.report
+            reports_by_symbol[symbol] = result.markdown
+            tool_calls.extend(result.tool_calls)
+
+        report_path = self._save_analyst_report(
+            state=state,
+            analyst=AnalystType.FUNDAMENTAL_ANALYSIS,
+            content=self._format_fundamental_news_report(
+                subscription_symbols=state["subscription_symbols"],
+                reports=reports,
+            )
+            + self._format_symbol_reports(reports_by_symbol),
+        )
+        return self._with_trace(
+            state,
+            TraceEvent(
+                node_name=self.NODE_FUNDAMENTAL_ANALYSIS,
+                input_summary=f"symbols={state['subscription_symbols']}",
+                output_summary=f"fundamental_reports={len(reports)}",
+                route_reason="Fundamental analyst used financial tools and its own fundamental RAG tool.",
+                rule_hits=sorted(set(tool_calls)),
+            ),
+            fundamental_news_by_symbol=reports,
+            fundamental_news_reports_by_symbol=reports_by_symbol,
+            analyst_reports={AnalystType.FUNDAMENTAL_ANALYSIS.value: report_path},
+            agent_reports={AnalystType.FUNDAMENTAL_ANALYSIS.value: report_path},
         )
 
     def _fundamental_news_review(self, state: CopilotGraphState) -> CopilotGraphState:
@@ -719,19 +875,6 @@ class CopilotLangGraph:
             symbol: _format_single_fundamental_news_report(report)
             for symbol, report in reports.items()
         }
-        fundamental_rag_contexts: Dict[str, List[RagDocument]] = {}
-        if (
-            self.memory_agent is not None
-            and getattr(self.fundamental_news_agent, "llm", None) is not None
-            and hasattr(self.memory_agent, "retrieve_fundamental_rag_context")
-        ):
-            for symbol in state["subscription_symbols"]:
-                fundamental_rag_contexts[symbol] = self.memory_agent.retrieve_fundamental_rag_context(
-                    symbol=symbol,
-                    tags=["fundamentals"],
-                    query=_fundamental_rag_query_for_symbol(symbol),
-                    limit=5,
-                )
         tool_calls: List[str] = []
         if getattr(self.fundamental_news_agent, "llm", None) is not None:
             for symbol in state["subscription_symbols"]:
@@ -741,10 +884,7 @@ class CopilotLangGraph:
                     symbol=symbol,
                     trade_date=state.get("trade_date"),
                     look_back_days=7,
-                    rag_context=_fundamental_rag_context_for_symbol(
-                        fundamental_rag_contexts,
-                        symbol,
-                    ),
+                    rag_context="",
                 )
                 reports[symbol] = result.report
                 reports_by_symbol[symbol] = result.markdown
@@ -770,105 +910,82 @@ class CopilotLangGraph:
                 rule_hits=sorted(set(tool_calls)),
             ),
             fundamental_news_by_symbol=reports,
-            fundamental_rag_contexts=fundamental_rag_contexts,
             analyst_reports={AnalystType.FUNDAMENTAL_NEWS.value: report_path},
             agent_reports={AnalystType.FUNDAMENTAL_NEWS.value: report_path},
             fundamental_news_reports_by_symbol=reports_by_symbol,
         )
 
-    def _opportunity_review(self, state: CopilotGraphState) -> CopilotGraphState:
-        radar_by_symbol = {item.symbol: item for item in state.get("radar_items", [])}
-        technical_positions = state.get("technical_positions", {})
-        reports = state.get("fundamental_news_by_symbol", {})
-        reviewed: List[OpportunityRadarItem] = []
-        reports_by_symbol: Dict[str, str] = {}
-        events: List[TraceEvent] = []
-
-        for symbol in state["subscription_symbols"]:
-            before = radar_by_symbol.get(symbol)
-            if hasattr(self.opportunity_review_manager, "review_with_report"):
-                result = self.opportunity_review_manager.review_with_report(
-                    symbol=symbol,
-                    opportunity=before,
-                    technical_position=technical_positions.get(symbol),
-                    fundamental_news=reports.get(symbol),
-                    analyst_context=_analyst_context_for_symbol(state, symbol),
-                )
-                reviewed_item = result.item
-                reports_by_symbol[symbol] = result.report
-            else:
-                reviewed_item = self.opportunity_review_manager.review(
-                    symbol=symbol,
-                    opportunity=before,
-                    technical_position=technical_positions.get(symbol),
-                    fundamental_news=reports.get(symbol),
-                )
-            reviewed.append(reviewed_item)
-            rule_hits = []
-            if before is None:
-                rule_hits.append("missing_radar_default_observation")
-            if before is not None and reviewed_item.status != before.status:
-                rule_hits.append("review_status_changed")
-            events.append(
-                TraceEvent(
-                    node_name=self.NODE_OPPORTUNITY_REVIEW,
-                    symbol=symbol,
-                    input_summary=f"selected_analysts={[a.value for a in state['selected_analysts']]}",
-                    output_summary=f"状态={zh_label(reviewed_item.status)}",
-                    route_reason="机会复核管理器已合并所选分析师输出。",
-                    rule_hits=rule_hits,
-                )
-            )
-        report_path = self._save_agent_report(
-            state=state,
-            stage="2_opportunity_review",
-            agent_name="opportunity_review",
-            content=self._format_symbol_reports(reports_by_symbol)
-            or "# 机会复核报告\n\n未生成机会复核。\n",
-        )
-        return self._with_trace(
-            state,
-            events,
-            radar_items=reviewed,
-            agent_reports={"opportunity_review": report_path},
-        )
-
     def _trader(self, state: CopilotGraphState) -> CopilotGraphState:
+        return self._trader_from_analyst_evidence(state)
+
+    def _trader_from_analyst_evidence(self, state: CopilotGraphState) -> CopilotGraphState:
         plans: Dict[str, TradePlan] = {}
         reports_by_symbol: Dict[str, str] = {}
+        reviewed_items: List[OpportunityRadarItem] = []
         events: List[TraceEvent] = []
-        for item in state.get("radar_items", []):
-            position = state.get("technical_positions", {}).get(item.symbol)
-            if position is None:
-                position = _technical_position_from_radar(item)
-            if hasattr(self.trader_agent, "create_plan_with_report"):
-                result = self.trader_agent.create_plan_with_report(
-                    opportunity=item,
+        radar_by_symbol = {item.symbol: item for item in state.get("radar_items", [])}
+        for symbol in state.get("subscription_symbols", []):
+            item = radar_by_symbol.get(symbol)
+            position = state.get("technical_positions", {}).get(symbol)
+            technical_context = state.get("technical_contexts", {}).get(symbol)
+            news_sentiment = state.get("news_sentiment_by_symbol", {}).get(symbol)
+            fundamental_report = state.get("fundamental_news_by_symbol", {}).get(symbol)
+
+            if item is None and hasattr(self.trader_agent, "create_plan_from_evidence"):
+                result = self.trader_agent.create_plan_from_evidence(
+                    symbol=symbol,
                     technical_position=position,
+                    technical_context=technical_context,
+                    news_sentiment=news_sentiment,
+                    fundamental_news=fundamental_report,
                     persona=state["persona_config"],
-                    analyst_context=_analyst_context_for_symbol(state, item.symbol),
+                    analyst_context=_analyst_context_for_symbol(state, symbol),
                 )
                 plan = result.plan
-                reports_by_symbol[item.symbol] = result.report
+                item = result.opportunity or _opportunity_from_plan(plan)
+                reports_by_symbol[symbol] = result.report
+            elif item is not None:
+                if position is None:
+                    position = _technical_position_from_radar(item)
+                if hasattr(self.trader_agent, "create_plan_with_report"):
+                    result = self.trader_agent.create_plan_with_report(
+                        opportunity=item,
+                        technical_position=position,
+                        persona=state["persona_config"],
+                        analyst_context=_analyst_context_for_symbol(state, symbol),
+                        technical_context=technical_context,
+                        news_sentiment=news_sentiment,
+                        fundamental_news=fundamental_report,
+                    )
+                    plan = result.plan
+                    item = result.opportunity or item
+                    reports_by_symbol[symbol] = result.report
+                else:
+                    plan = self.trader_agent.create_plan(
+                        opportunity=item,
+                        technical_position=position,
+                        persona=state["persona_config"],
+                    )
             else:
-                plan = self.trader_agent.create_plan(
-                    opportunity=item,
-                    technical_position=position,
-                    persona=state["persona_config"],
-                )
-            plans[item.symbol] = plan
-            rule_hits = (
-                ["actionable_to_buy_plan"]
-                if item.status == SubscriptionStatus.ACTIONABLE
-                else ["non_actionable_to_alert_plan"]
-            )
+                continue
+
+            plans[symbol] = plan
+            reviewed_items.append(item)
+            rule_hits = ["market_state_first", "trader_internal_opportunity_review"]
+            if item.status == SubscriptionStatus.ACTIONABLE:
+                rule_hits.append("actionable_to_buy_plan")
+            else:
+                rule_hits.append("non_actionable_to_alert_plan")
             events.append(
                 TraceEvent(
                     node_name=self.NODE_TRADER,
-                    symbol=item.symbol,
-                    input_summary=f"状态={zh_label(item.status)}",
-                    output_summary=f"方向={zh_label(plan.direction)}",
-                    route_reason="交易员将复核后的机会转换为结构化计划。",
+                    symbol=symbol,
+                    input_summary=f"status={zh_label(item.status)}",
+                    output_summary=f"direction={zh_label(plan.direction)}",
+                    route_reason=(
+                        "Trader merged opportunity review, evaluates market regime first, "
+                        "then combines technical context, news sentiment, and fundamentals."
+                    ),
                     rule_hits=rule_hits,
                 )
             )
@@ -877,11 +994,12 @@ class CopilotLangGraph:
             stage="3_trader",
             agent_name="trader",
             content=self._format_symbol_reports(reports_by_symbol)
-            or "# 交易员报告\n\n未生成交易计划。\n",
+            or "# Trader Report\n\nNo trade plans were generated.\n",
         )
         return self._with_trace(
             state,
             events,
+            radar_items=reviewed_items,
             trade_plans=plans,
             agent_reports={"trader": report_path},
         )
@@ -961,6 +1079,8 @@ class CopilotLangGraph:
                     risk_assessment=assessment,
                     mode=state.get("execution_mode", ExecutionMode.SIMULATION),
                     user_confirmed=state.get("user_confirmed", False),
+                    broker_execution_enabled=state.get("broker_execution_enabled", False),
+                    run_id=state.get("run_id"),
                 )
                 decision = result.decision
                 reports_by_symbol[symbol] = result.report
@@ -970,6 +1090,8 @@ class CopilotLangGraph:
                     risk_assessment=assessment,
                     mode=state.get("execution_mode", ExecutionMode.SIMULATION),
                     user_confirmed=state.get("user_confirmed", False),
+                    broker_execution_enabled=state.get("broker_execution_enabled", False),
+                    run_id=state.get("run_id"),
                 )
             decisions[symbol] = decision
             events.append(
@@ -1226,6 +1348,14 @@ def _normalize_symbols(symbols: Iterable[str]) -> List[str]:
     return normalized
 
 
+def _unique_list(values: Iterable[str]) -> List[str]:
+    unique: List[str] = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return unique
+
+
 def _normalize_price_history(
     price_history_by_symbol: Dict[str, List[PriceBar]]
 ) -> Dict[str, List[PriceBar]]:
@@ -1250,12 +1380,61 @@ def _format_single_fundamental_news_report(report: FundamentalNewsReport) -> str
     )
 
 
+def _format_news_sentiment_report(
+    *,
+    subscription_symbols: List[str],
+    reports: Dict[str, NewsSentimentReport],
+) -> str:
+    lines = [
+        "# News Sentiment Agent Report",
+        "",
+        f"Generated at: {datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "| Symbol | Sentiment | Company News | Social | Earnings | Material Risk | Key Events | Alerts | Summary |",
+        "| --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+    ]
+    for symbol in subscription_symbols:
+        report = reports.get(symbol)
+        if report is None:
+            lines.append(f"| {symbol} | - | - | - | - | - | - | - | No report. |")
+            continue
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    symbol,
+                    _fmt_score(report.sentiment_score),
+                    _fmt_score(report.company_news_score),
+                    _fmt_score(report.social_sentiment_score),
+                    _fmt_score(report.earnings_event_score),
+                    zh_bool(report.material_risk),
+                    zh_join(report.key_events),
+                    zh_join(report.alerts),
+                    report.summary or "-",
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _fmt_score(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2f}"
+
+
 def _analyst_context_for_symbol(state: CopilotGraphState, symbol: str) -> str:
     sections = []
     for title, key in [
         ("机会雷达", "opportunity_reports_by_symbol"),
         ("技术位置", "market_reports_by_symbol"),
         ("基本面/新闻", "fundamental_news_reports_by_symbol"),
+    ]:
+        report = state.get(key, {}).get(symbol)
+        if report:
+            sections.append(f"## {title}\n\n{report}")
+    for title, key in [
+        ("News Sentiment", "news_sentiment_reports_by_symbol"),
+        ("Fundamental Analysis", "fundamental_news_reports_by_symbol"),
     ]:
         report = state.get(key, {}).get(symbol)
         if report:
@@ -1341,56 +1520,6 @@ def _memory_source_suffix(item: DistilledMemory) -> str:
     return "" if not details else " (" + "; ".join(details) + ")"
 
 
-def _fundamental_rag_query_for_symbol(symbol: str) -> str:
-    return (
-        f"{symbol} fundamentals earnings revenue gross margin guidance cash flow "
-        "risk factors management discussion balance sheet valuation"
-    )
-
-
-def _fundamental_rag_context_for_symbol(
-    contexts: Dict[str, List[RagDocument]],
-    symbol: str,
-) -> str:
-    items = contexts.get(symbol, [])
-    if not items:
-        return ""
-    lines = [
-        "## Fundamental RAG 基本面资料检索",
-        "",
-        "这些内容只来自公司基本面资料库，作为财报、指引和管理层表述背景；实时工具输出仍然优先。",
-    ]
-    for item in items:
-        tags = ", ".join(item.tags) or "-"
-        text = _rag_context_excerpt(item)
-        lines.append(
-            f"- {item.source_type} [{tags}]: {item.title or '-'} - {text}{_rag_source_suffix(item)}"
-        )
-    return "\n".join(lines)
-
-
-def _rag_context_excerpt(item: RagDocument) -> str:
-    matched = item.metadata.get("matched_child_texts")
-    if isinstance(matched, list) and matched:
-        text = " | ".join(str(part).strip() for part in matched if str(part).strip())
-    else:
-        text = item.text.strip()
-    text = text.replace("\n", " ")
-    limit = 900 if item.metadata.get("chunk_role") == "parent_context" else 360
-    if len(text) > limit:
-        text = text[: limit - 3].rstrip() + "..."
-    return text
-
-
-def _rag_source_suffix(item: RagDocument) -> str:
-    details = []
-    if item.score is not None:
-        details.append(f"score={item.score:.2f}")
-    if item.source:
-        details.append(f"source={item.source}")
-    return "" if not details else " (" + "; ".join(details) + ")"
-
-
 def _subscription_book_from_symbols(symbols: List[str]) -> SubscriptionBook:
     from ai_trading_copilot.copilot.domain.enums import MarketType
 
@@ -1422,4 +1551,20 @@ def _technical_position_from_radar(item: OpportunityRadarItem) -> TechnicalPosit
             SymbolTrendState.UPTREND,
             SymbolTrendState.UPTREND_PULLBACK,
         },
+    )
+
+
+def _opportunity_from_plan(plan: TradePlan) -> OpportunityRadarItem:
+    current_price = plan.support_level or plan.stop_loss or 0.0
+    target = plan.targets[0] if plan.targets else None
+    return OpportunityRadarItem(
+        symbol=plan.symbol,
+        status=plan.subscription_status,
+        current_price=current_price,
+        support_level=plan.support_level,
+        recent_high=target,
+        reward_risk_ratio=plan.reward_risk_ratio,
+        trend_state=SymbolTrendState.UNKNOWN,
+        suggested_action=plan.entry_logic,
+        reason=plan.entry_logic,
     )

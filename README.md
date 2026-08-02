@@ -56,24 +56,25 @@ ai-trading-copilot --select-symbols
 ai-trading-copilot --all-subscribed
 
 # Run a specific analyst combination
-ai-trading-copilot CRCL --analysts opportunity_radar,fundamental_news
+ai-trading-copilot CRCL --analysts news_sentiment,technical_position,fundamental_analysis
 ai-trading-copilot CRCL --select-analysts
 ```
 
 RAG memory:
 
 The copilot reads optional distilled trading memories from `config/memory.jsonl`
-and stores stock research chunks in a persistent Chroma database at
-`config/rag_chroma`. OpenAI embeddings use `OPENAI_API_KEY` and default to
-`text-embedding-3-small`. When Chroma or OpenAI embeddings are unavailable, the
+and stores fundamental research chunks in a persistent Chroma database at
+`config/rag_chroma`. OpenAI-compatible embeddings use `OPENAI_API_KEY` or
+`DASHSCOPE_API_KEY` and default to `text-embedding-v4`. When Chroma or
+embeddings are unavailable, the
 workflow degrades to the JSONL/keyword memory retrieval path instead of blocking
 the analysis.
 
 Retrieval uses a hybrid RAG pipeline: the original request is rewritten by the
 available LLM, expanded into base/risk/technical/fundamental queries, sent
 through vector recall and BM25 keyword recall, then merged with Reciprocal Rank
-Fusion (RRF). Analyst agents receive the fused Chroma results as background
-evidence.
+Fusion (RRF). The fundamental analyst receives the fused Chroma results as
+background evidence.
 
 Example line:
 
@@ -93,10 +94,16 @@ Add a local research note:
 ai-trading-copilot-rag ingest-text docs/my_aapl_note.md --symbols AAPL --tags earnings,risk
 ```
 
-Fetch online company news, global news, and fundamentals into Chroma:
+Fetch online fundamental text into Chroma:
 
 ```bash
 ai-trading-copilot-rag ingest-online --symbols AAPL,MSFT --look-back-days 7
+```
+
+Inspect or override the active Chroma database path:
+
+```bash
+ai-trading-copilot-rag --chroma-dir config/rag_chroma status
 ```
 
 Evaluation:
@@ -106,19 +113,20 @@ Evaluation:
 ai-trading-copilot-eval agent-smoke --symbols AAPL --format markdown
 
 # Standalone analyst evaluation
-ai-trading-copilot-eval analyst-smoke --analysts opportunity_radar,technical_position,fundamental_news --symbols AAPL --format markdown
+ai-trading-copilot-eval analyst-smoke --analysts news_sentiment,technical_position,fundamental_analysis --symbols AAPL --format markdown
 
 # RAG before/after comparison: single-query BM25 baseline vs optimized hybrid retrieval
 ai-trading-copilot-eval rag-compare --top-k 5 --format markdown
+
 ```
 
 `rag-compare` defaults to offline mode and disables external vector embedding calls.
 Pass `--use-vector` when `OPENAI_API_KEY`/compatible embedding credentials are
 configured and you want to include the vector recall channel in the optimized run.
 
-The Web UI also exposes these RAG actions in the run-control panel. Analyst
-agents receive Chroma results as background context; fresh tool data and hard
-risk rules remain authoritative.
+The Web UI also exposes these RAG actions in the run-control panel. The
+fundamental analyst receives Chroma results as background context; fresh tool
+data and hard risk rules remain authoritative.
 
 See `docs/vector_memory_plan.md` for the vector database design notes.
 

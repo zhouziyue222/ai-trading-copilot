@@ -11,6 +11,10 @@ from .portfolio import (
     format_portfolio_snapshot,
     get_futu_portfolio_snapshot,
 )
+from .futu_execution import (
+    FutuExecutionError,
+    FutuSimulatedExecutionAdapter,
+)
 from .stock_info import (
     FutuStockInfoError,
     format_stock_info,
@@ -23,6 +27,8 @@ __all__ = [
     "FutuStockInfoError",
     "FutuMarketDataAdapter",
     "FutuMarketDataError",
+    "FutuExecutionError",
+    "FutuSimulatedExecutionAdapter",
     "format_portfolio_snapshot",
     "format_stock_info",
     "get_futu_portfolio_snapshot",

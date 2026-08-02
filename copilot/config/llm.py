@@ -12,7 +12,7 @@ DEFAULT_ENV_PATH = PACKAGE_ROOT / ".env"
 DEFAULT_REPORT_OUTPUT_DIR = PACKAGE_ROOT / "reports"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
-DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-v4"
 
 
 def load_copilot_env(path: str | Path = DEFAULT_ENV_PATH) -> Dict[str, str]:

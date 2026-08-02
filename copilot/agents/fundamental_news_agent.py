@@ -11,11 +11,10 @@ from ai_trading_copilot.copilot.adapters.trading_tools import (
     tool_names,
 )
 from ai_trading_copilot.copilot.agents.llm_tools import (
-    collect_tool_evidence,
     extract_json_object,
-    run_tool_calling_llm,
     strip_trailing_json_object,
 )
+from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
 from ai_trading_copilot.copilot.domain.models import FundamentalNewsReport
 
 
@@ -61,9 +60,10 @@ class FundamentalNewsAgent:
         tools = self.tools or make_fundamental_news_tools()
         start_date, end_date = date_window(trade_date, look_back_days)
         tool_result_cache = {}
-        tool_evidence, pre_calls = collect_tool_evidence(
-            tools=tools,
-            requests=[
+        runner = ReActAgentRunner(llm=self.llm, tools=tools)
+        evidence_result = runner.run(
+            prompt="",
+            prefetch=[
                 ("get_news", {"ticker": symbol, "start_date": start_date, "end_date": end_date}),
                 (
                     "get_global_news",
@@ -92,17 +92,10 @@ class FundamentalNewsAgent:
             f"News window: {start_date} to {end_date}\n"
             f"Current date: {end_date}\n"
             f"Available tools: {tool_names(tools)}\n\n"
-            f"Prefetched tool evidence:\n{tool_evidence or '-'}\n\n"
-            "Fundamental RAG context. Treat stored company fundamental documents "
-            "as background only; fresh news/fundamental tool evidence remains authoritative:\n"
-            f"{rag_context or '-'}"
+            f"Prefetched tool evidence:\n{evidence_result.prefetched_evidence or '-'}"
         )
-        content, calls = run_tool_calling_llm(
-            llm=self.llm,
-            prompt=prompt,
-            tools=tools,
-            tool_result_cache=tool_result_cache,
-        )
+        react_result = runner.run(prompt=prompt, tool_result_cache=tool_result_cache)
+        content = react_result.content
         try:
             payload = extract_json_object(content)
             report = FundamentalNewsReport(
@@ -121,7 +114,7 @@ class FundamentalNewsAgent:
         return FundamentalNewsAnalysisResult(
             report=report,
             markdown=strip_trailing_json_object(content) or _markdown_from_report(report),
-            tool_calls=[*pre_calls, *calls],
+            tool_calls=[*evidence_result.prefetched_calls, *react_result.tool_calls],
         )
 
 

@@ -53,6 +53,61 @@ def get_global_news_text(curr_date: str, look_back_days: int = 7, limit: int = 5
     )
 
 
+def get_news_sentiment_text(ticker: str) -> str:
+    symbol = ticker.strip().upper()
+    data = _get_json("/news-sentiment", {"symbol": symbol})
+    if not isinstance(data, dict) or not data:
+        return f"No Finnhub news sentiment data found for {symbol}."
+    lines = [f"# {symbol} Finnhub news sentiment", ""]
+    for key in [
+        "buzz",
+        "companyNewsScore",
+        "sectorAverageBullishPercent",
+        "sectorAverageNewsScore",
+        "sentiment",
+    ]:
+        value = data.get(key)
+        if value not in (None, "", {}, []):
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def get_social_sentiment_text(ticker: str) -> str:
+    symbol = ticker.strip().upper()
+    data = _get_json("/stock/social-sentiment", {"symbol": symbol})
+    if not isinstance(data, dict) or not data:
+        return f"No Finnhub social sentiment data found for {symbol}."
+    lines = [f"# {symbol} Finnhub social sentiment", ""]
+    for source in ["reddit", "twitter"]:
+        rows = data.get(source, [])
+        lines.append(f"## {source}")
+        if not rows:
+            lines.append("No rows.")
+            continue
+        for row in rows[:10]:
+            lines.append(str(_clean_json_dict(row)))
+    return "\n".join(lines)
+
+
+def get_earnings_calendar_text(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+) -> str:
+    symbol = ticker.strip().upper()
+    data = _get_json(
+        "/calendar/earnings",
+        {"symbol": symbol, "from": start_date, "to": end_date},
+    )
+    rows = data.get("earningsCalendar", []) if isinstance(data, dict) else []
+    if not rows:
+        return f"No Finnhub earnings calendar rows found for {symbol} from {start_date} to {end_date}."
+    lines = [f"# {symbol} Finnhub earnings calendar ({start_date} to {end_date})", ""]
+    for row in rows[:10]:
+        lines.append(str(_clean_json_dict(row)))
+    return "\n".join(lines)
+
+
 def get_basic_fundamentals_text(ticker: str) -> str:
     symbol = ticker.strip().upper()
     profile = _get_json("/stock/profile2", {"symbol": symbol})
@@ -200,3 +255,7 @@ def _item_datetime(item: Dict[str, Any]):
         return datetime.fromtimestamp(float(value))
     except (TypeError, ValueError, OSError):
         return None
+
+
+def _clean_json_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {str(key): value for key, value in row.items() if value not in (None, "")}

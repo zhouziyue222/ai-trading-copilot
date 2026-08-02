@@ -654,7 +654,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     analyst = subparsers.add_parser("analyst-smoke")
     analyst.add_argument(
         "--analysts",
-        default="opportunity_radar,technical_position,fundamental_news",
+        default="news_sentiment,technical_position,fundamental_analysis",
         help="Comma-separated analysts to evaluate.",
     )
     analyst.add_argument("--symbols", default="AAPL")
@@ -709,11 +709,14 @@ def _default_required_nodes(state: Mapping[str, Any]) -> tuple[str, ...]:
         nodes.append(CopilotLangGraph.NODE_OPPORTUNITY_RADAR)
     if AnalystType.TECHNICAL_POSITION.value in selected:
         nodes.append(CopilotLangGraph.NODE_TECHNICAL_POSITION)
+    if AnalystType.NEWS_SENTIMENT.value in selected:
+        nodes.append(CopilotLangGraph.NODE_NEWS_SENTIMENT)
+    if AnalystType.FUNDAMENTAL_ANALYSIS.value in selected:
+        nodes.append(CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS)
     if AnalystType.FUNDAMENTAL_NEWS.value in selected:
         nodes.append(CopilotLangGraph.NODE_FUNDAMENTAL_NEWS_REVIEW)
     nodes.extend(
         [
-            CopilotLangGraph.NODE_OPPORTUNITY_REVIEW,
             CopilotLangGraph.NODE_TRADER,
             CopilotLangGraph.NODE_RISK_CHECK,
             CopilotLangGraph.NODE_EXECUTION_ALERT,
@@ -732,7 +735,6 @@ def _default_required_reports(state: Mapping[str, Any]) -> tuple[str, ...]:
         sorted(
             {
                 "futu_portfolio",
-                "opportunity_review",
                 "trader",
                 "risk_check",
                 "execution_alert",

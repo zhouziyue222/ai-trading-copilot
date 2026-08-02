@@ -47,6 +47,7 @@ DEFAULT_RERANK_CANDIDATE_FACTOR = 8
 DEFAULT_RERANK_MIN_CANDIDATES = 20
 DEFAULT_RERANK_MODEL = "local_cross_feature_v1"
 DEFAULT_EMBEDDING_BATCH_SIZE = 10
+DEFAULT_COLLECTION_GET_BATCH_SIZE = 1000
 DEFAULT_FUNDAMENTAL_SOURCE_TYPE = "fundamental_research_note"
 ALLOWED_FUNDAMENTAL_SOURCE_TYPES = frozenset(
     {
@@ -215,7 +216,7 @@ class RagQueryPlanner:
 
 
 class OpenAITextEmbedder:
-    """Small wrapper around OpenAI embeddings used by Chroma upsert/query."""
+    """Small wrapper around OpenAI-compatible embeddings used by RAG upsert/query."""
 
     name = "openai_embeddings"
 
@@ -265,7 +266,7 @@ class OpenAITextEmbedder:
 
 
 class ChromaRagStore:
-    """Persistent fundamental-only Chroma vector database."""
+    """Reference fundamental-only Chroma vector database."""
 
     def __init__(
         self,
@@ -613,14 +614,22 @@ class ChromaRagStore:
             return []
 
         rankings: List[tuple[str, List[RagDocument]]] = []
+        where = _chroma_symbol_where(symbol)
         for label, planned_query in _unique_query_items(plan.perspectives):
             if not planned_query.strip():
                 continue
-            result = collection.query(
-                query_embeddings=[embedder.embed_query(planned_query)],
-                n_results=recall_limit,
-                include=["documents", "metadatas", "distances"],
-            )
+            query_kwargs = {
+                "query_embeddings": [embedder.embed_query(planned_query)],
+                "n_results": recall_limit,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where:
+                query_kwargs["where"] = where
+            try:
+                result = collection.query(**query_kwargs)
+            except TypeError:
+                query_kwargs.pop("where", None)
+                result = collection.query(**query_kwargs)
             docs = _documents_from_query_result(result)
             docs = _filter_and_rank(docs, symbol=symbol, tags=tags, limit=recall_limit)
             docs = [
@@ -1162,10 +1171,36 @@ def rag_query_text(
 
 
 def _all_collection_documents(collection) -> List[RagDocument]:
+    include = ["documents", "metadatas"]
     try:
-        result = collection.get(include=["documents", "metadatas"])
+        total = int(collection.count())
+    except Exception:
+        total = 0
+
+    if total > 0:
+        output: List[RagDocument] = []
+        offset = 0
+        while offset < total:
+            try:
+                result = collection.get(
+                    include=include,
+                    limit=DEFAULT_COLLECTION_GET_BATCH_SIZE,
+                    offset=offset,
+                )
+            except TypeError:
+                break
+            batch = _documents_from_get_result(result)
+            if not batch:
+                break
+            output.extend(batch)
+            offset += len(batch)
+        if output:
+            return output
+
+    try:
+        result = collection.get(include=include)
     except TypeError:
-        result = collection.get(ids=None, include=["documents", "metadatas"])
+        result = collection.get(ids=None, include=include)
     return _documents_from_get_result(result)
 
 
@@ -1255,6 +1290,11 @@ def _metadata_matches(doc: RagDocument, requested_symbol: str | None) -> bool:
         and doc.symbols
         and requested_symbol not in doc.symbols
     )
+
+
+def _chroma_symbol_where(symbol: str | None) -> dict | None:
+    normalized = normalize_symbol(symbol) if symbol else ""
+    return {"symbols": normalized} if normalized else None
 
 
 def _metadata_boost(

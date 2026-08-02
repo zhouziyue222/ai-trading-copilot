@@ -56,6 +56,8 @@ class SubscriptionOpportunityWorkflow:
         mode: ExecutionMode = ExecutionMode.SIMULATION,
         portfolio_mode: ExecutionMode = ExecutionMode.SIMULATION,
         user_confirmed: bool = False,
+        broker_execution_enabled: bool = False,
+        run_id: str | None = None,
     ) -> SubscriptionOpportunityRun:
         state = self.graph.run(
             subscription_symbols=subscription_symbols,
@@ -71,6 +73,8 @@ class SubscriptionOpportunityWorkflow:
             mode=mode,
             portfolio_mode=portfolio_mode,
             user_confirmed=user_confirmed,
+            broker_execution_enabled=broker_execution_enabled,
+            run_id=run_id,
         )
         return SubscriptionOpportunityRun(
             items=[

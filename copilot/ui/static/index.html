@@ -120,10 +120,10 @@
           <fieldset>
             <legend>分析模块</legend>
             <label class="check module-check">
-              <input type="checkbox" name="analyst" value="opportunity_radar" checked />
+              <input type="checkbox" name="analyst" value="news_sentiment" checked />
               <span>
-                <strong>机会雷达</strong>
-                <small>趋势与机会状态</small>
+                <strong>新闻情绪</strong>
+                <small>新闻、社交情绪与财报日历</small>
               </span>
             </label>
             <label class="check module-check">
@@ -134,10 +134,10 @@
               </span>
             </label>
             <label class="check module-check">
-              <input type="checkbox" name="analyst" value="fundamental_news" checked />
+              <input type="checkbox" name="analyst" value="fundamental_analysis" checked />
               <span>
-                <strong>基本面/新闻风险</strong>
-                <small>风险点与催化剂</small>
+                <strong>基本面分析</strong>
+                <small>财务数据与基本面 RAG</small>
               </span>
             </label>
           </fieldset>
@@ -159,6 +159,13 @@
               <option value="simulation">模拟组合</option>
               <option value="live">Live 只读组合</option>
             </select>
+          </label>
+          <label class="check module-check execution-toggle">
+            <input id="brokerExecutionEnabled" type="checkbox" />
+            <span>
+              <strong>操控 Futu 模拟账户</strong>
+              <small>仅向 TrdEnv.SIMULATE 提交风控通过的模拟订单。</small>
+            </span>
           </label>
         </div>
       </section>

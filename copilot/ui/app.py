@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
-from typing import Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -34,6 +34,7 @@ from ai_trading_copilot.copilot.run import (
     DEFAULT_ANALYSTS,
     DEFAULT_MEMORY_FILE,
     DEFAULT_SUBSCRIPTIONS_FILE,
+    create_default_fundamental_research_retriever,
     create_default_memory_agent,
 )
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
@@ -52,6 +53,7 @@ class UISettings:
     graph_cls: type = CopilotLangGraph
     tracker_cls: type = RunTracker
     run_in_background: bool = True
+    fundamental_retriever_factory: Optional[Callable[["UISettings", bool], object]] = None
 
 
 class SubscriptionCreateRequest(BaseModel):
@@ -77,6 +79,7 @@ class RunCreateRequest(BaseModel):
     trade_date: Optional[str] = None
     look_back_days: int = Field(default=90, ge=1, le=1000)
     portfolio_mode: ExecutionMode = ExecutionMode.SIMULATION
+    broker_execution_enabled: bool = False
 
 
 class RagTextIngestRequest(BaseModel):
@@ -165,17 +168,17 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
 
     @app.get("/api/rag/status")
     def rag_status() -> dict:
-        return _memory_agent(resolved, auto_ingest_seed=False).rag_status()
+        return _fundamental_retriever(resolved, auto_ingest_seed=False).rag_status()
 
     @app.post("/api/rag/ingest-defaults")
     def rag_ingest_defaults() -> dict:
-        return _memory_agent(resolved, auto_ingest_seed=False).ingest_seed_knowledge()
+        return _fundamental_retriever(resolved, auto_ingest_seed=False).ingest_seed_knowledge()
 
     @app.post("/api/rag/ingest-text")
     def rag_ingest_text(request: RagTextIngestRequest) -> dict:
         if not request.text.strip():
             raise HTTPException(status_code=400, detail="Text is required.")
-        return _memory_agent(resolved, auto_ingest_seed=False).ingest_text_knowledge(
+        return _fundamental_retriever(resolved, auto_ingest_seed=False).ingest_text_knowledge(
             title=request.title,
             text=request.text,
             source_type=request.source_type,
@@ -189,7 +192,7 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
         symbols = _unique_symbols([*request.symbols, *_parse_symbol_text(request.manual_symbols)])
         if not symbols:
             raise HTTPException(status_code=400, detail="At least one symbol is required.")
-        return _memory_agent(resolved, auto_ingest_seed=False).ingest_online_fundamental_research(
+        return _fundamental_retriever(resolved, auto_ingest_seed=False).ingest_online_fundamental_research(
             symbols=symbols,
             trade_date=request.trade_date,
             look_back_days=request.look_back_days,
@@ -220,12 +223,15 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             "mode": ExecutionMode.SIMULATION,
             "portfolio_mode": request.portfolio_mode,
             "user_confirmed": False,
+            "broker_execution_enabled": request.broker_execution_enabled,
+            "run_id": run_id,
         }
         defaults = {
             "persona": DEFAULT_PERSONA_CONFIG,
             "selected_analysts": [analyst.value for analyst in request.selected_analysts],
             "execution_mode_default": ExecutionMode.SIMULATION.value,
             "portfolio_mode_default": ExecutionMode.SIMULATION.value,
+            "broker_execution_default": False,
             "look_back_days_default": 90,
         }
         tracker = resolved.tracker_cls(
@@ -318,6 +324,15 @@ def _memory_agent(settings: UISettings, *, auto_ingest_seed: bool = True):
     )
 
 
+def _fundamental_retriever(settings: UISettings, *, auto_ingest_seed: bool = True):
+    if settings.fundamental_retriever_factory is not None:
+        return settings.fundamental_retriever_factory(settings, auto_ingest_seed)
+    return create_default_fundamental_research_retriever(
+        settings.rag_chroma_dir or settings.memory_file.parent / "rag_chroma",
+        auto_ingest_seed=auto_ingest_seed,
+    )
+
+
 def _run_copilot_job(
     graph_cls: type,
     tracker: RunTracker,
@@ -328,6 +343,11 @@ def _run_copilot_job(
     state = None
     error = None
     try:
+        fundamental_rag_retriever = None
+        if _accepts_keyword(graph_cls, "fundamental_rag_retriever"):
+            fundamental_rag_retriever = create_default_fundamental_research_retriever(
+                rag_chroma_dir or memory_file.parent / "rag_chroma",
+            )
         graph = _create_graph(
             graph_cls,
             run_tracker=tracker,
@@ -335,6 +355,7 @@ def _run_copilot_job(
                 memory_file,
                 rag_chroma_dir=rag_chroma_dir or memory_file.parent / "rag_chroma",
             ),
+            fundamental_rag_retriever=fundamental_rag_retriever,
         )
         state = graph.run(**params)
     except Exception as exc:  # pragma: no cover - covered through API behavior
@@ -345,10 +366,22 @@ def _run_copilot_job(
         tracker.write_audit(state=state, error=error)
 
 
-def _create_graph(graph_cls: type, *, run_tracker: RunTracker, memory_agent):
+def _create_graph(
+    graph_cls: type,
+    *,
+    run_tracker: RunTracker,
+    memory_agent,
+    fundamental_rag_retriever=None,
+):
+    kwargs = {"run_tracker": run_tracker}
     if _accepts_keyword(graph_cls, "memory_agent"):
-        return graph_cls(run_tracker=run_tracker, memory_agent=memory_agent)
-    return graph_cls(run_tracker=run_tracker)
+        kwargs["memory_agent"] = memory_agent
+    if (
+        fundamental_rag_retriever is not None
+        and _accepts_keyword(graph_cls, "fundamental_rag_retriever")
+    ):
+        kwargs["fundamental_rag_retriever"] = fundamental_rag_retriever
+    return graph_cls(**kwargs)
 
 
 def _accepts_keyword(callable_obj, name: str) -> bool:

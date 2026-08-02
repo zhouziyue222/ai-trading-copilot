@@ -169,6 +169,36 @@ class TechnicalPosition(BaseModel):
     uptrend: bool
 
 
+class TechnicalDimension(BaseModel):
+    """Technical state for one scope: symbol, sector, or broad market."""
+
+    scope: str
+    symbol: str
+    label: str = ""
+    current_price: Optional[float] = None
+    moving_average_20: Optional[float] = None
+    moving_average_50: Optional[float] = None
+    moving_average_200: Optional[float] = None
+    rsi: Optional[float] = None
+    macd: Optional[float] = None
+    macd_signal: Optional[float] = None
+    macd_histogram: Optional[float] = None
+    trend_state: Optional[SymbolTrendState] = None
+    reason: str = ""
+    data_available: bool = True
+
+
+class TechnicalContext(BaseModel):
+    """Multi-dimensional technical context consumed by the Trader."""
+
+    symbol: str
+    stock: TechnicalDimension
+    sector: Optional[TechnicalDimension] = None
+    market: Optional[TechnicalDimension] = None
+    summary: str = ""
+    warnings: List[str] = Field(default_factory=list)
+
+
 class OpportunityRadarItem(BaseModel):
     symbol: str
     status: SubscriptionStatus
@@ -202,6 +232,10 @@ class FundamentalNewsReport(BaseModel):
     material_risk: bool = False
     risk_flags: List[str] = Field(default_factory=list)
     summary: str = ""
+    fundamental_score: Optional[float] = Field(default=None, ge=-1, le=1)
+    sentiment_score: Optional[float] = Field(default=None, ge=-1, le=1)
+    key_events: List[str] = Field(default_factory=list)
+    data_availability: Dict[str, str] = Field(default_factory=dict)
 
     @field_validator("symbol")
     @classmethod
@@ -210,6 +244,53 @@ class FundamentalNewsReport(BaseModel):
         if not normalized:
             raise ValueError("symbol is required")
         return normalized
+
+
+class NewsSentimentReport(BaseModel):
+    """Structured news, social sentiment, and event-risk signal."""
+
+    symbol: str
+    sentiment_score: float = Field(default=0.0, ge=-1, le=1)
+    company_news_score: Optional[float] = Field(default=None, ge=-1, le=1)
+    social_sentiment_score: Optional[float] = Field(default=None, ge=-1, le=1)
+    earnings_event_score: Optional[float] = Field(default=None, ge=-1, le=1)
+    material_risk: bool = False
+    risk_flags: List[str] = Field(default_factory=list)
+    key_events: List[str] = Field(default_factory=list)
+    alerts: List[str] = Field(default_factory=list)
+    summary: str = ""
+    data_availability: Dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol_field(cls, value: str) -> str:
+        normalized = normalize_symbol(value)
+        if not normalized:
+            raise ValueError("symbol is required")
+        return normalized
+
+
+class BrokerExecutionRequest(BaseModel):
+    """One broker action candidate. First implementation is SIMULATE only."""
+
+    idempotency_key: str
+    symbol: str
+    side: str
+    quantity: float = Field(gt=0)
+    price: Optional[float] = Field(default=None, gt=0)
+    order_type: str = "NORMAL"
+    trd_env: str = "SIMULATE"
+
+
+class BrokerExecutionResult(BaseModel):
+    """Result returned by a broker adapter."""
+
+    idempotency_key: str
+    submitted: bool
+    order_id: Optional[str] = None
+    status: str = ""
+    message: str = ""
+    raw: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TradePlan(BaseModel):
@@ -272,7 +353,11 @@ class RiskAssessment(BaseModel):
 
 
 class ExecutionDecision(BaseModel):
-    """Execution/alert manager output. It never places a real order by itself."""
+    """Execution/alert manager output.
+
+    Broker fields are populated only when simulated broker execution is
+    explicitly enabled for the run.
+    """
 
     symbol: str
     mode: ExecutionMode
@@ -281,6 +366,10 @@ class ExecutionDecision(BaseModel):
     approved_by_risk: bool
     requires_user_confirmation: bool
     message: str
+    submitted_to_broker: bool = False
+    broker_order_id: Optional[str] = None
+    broker_message: str = ""
+    broker_idempotency_key: str = ""
 
 
 class DistilledMemory(BaseModel):
@@ -368,6 +457,8 @@ class CopilotRunReport(BaseModel):
 
 __all__ = [
     "AnalystType",
+    "BrokerExecutionRequest",
+    "BrokerExecutionResult",
     "CopilotRunReport",
     "DistilledMemory",
     "ExecutionDecision",
@@ -384,9 +475,12 @@ __all__ = [
     "SymbolTrendState",
     "SymbolExplanation",
     "TechnicalPosition",
+    "TechnicalContext",
+    "TechnicalDimension",
     "TraceEvent",
     "TradePlan",
     "UserPersonaConfig",
+    "NewsSentimentReport",
     "ValidationError",
     "normalize_symbol",
 ]

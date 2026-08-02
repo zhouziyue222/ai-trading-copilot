@@ -202,6 +202,8 @@ class RunTracker:
                 "analyst_reports": state.get("analyst_reports", {}),
                 "radar_items": state.get("radar_items", []),
                 "technical_positions": state.get("technical_positions", {}),
+                "technical_contexts": state.get("technical_contexts", {}),
+                "news_sentiment_by_symbol": state.get("news_sentiment_by_symbol", {}),
                 "fundamental_news_by_symbol": state.get("fundamental_news_by_symbol", {}),
                 "trade_plans": state.get("trade_plans", {}),
                 "risk_assessments": state.get("risk_assessments", {}),
@@ -351,6 +353,10 @@ def _build_decision_summary(
                     _field(explanation, "execution_message"),
                     "",
                 ),
+                "submitted_to_broker": _field(execution, "submitted_to_broker"),
+                "broker_order_id": _field(execution, "broker_order_id"),
+                "broker_message": _field(execution, "broker_message", ""),
+                "broker_idempotency_key": _field(execution, "broker_idempotency_key", ""),
                 "suggested_action": _first_present(
                     _field(radar, "suggested_action"),
                     _field(plan, "entry_logic"),
@@ -374,6 +380,7 @@ def _build_decision_summary(
         if row["approved_by_risk"] is False
         or row["execution_status"] == "blocked_by_risk"
     )
+    broker_submitted = sum(1 for row in rows if row.get("submitted_to_broker") is True)
     actionable = sum(1 for row in rows if row["status"] == "actionable")
     summary = _first_present(_field(report, "summary"), "")
     if not summary:
@@ -393,6 +400,7 @@ def _build_decision_summary(
             "symbol_count": len(rows),
             "actionable_count": actionable,
             "risk_blocked_count": risk_blocked,
+            "broker_submitted_count": broker_submitted,
             "completed_nodes": sum(
                 1 for item in node_statuses if item in {NODE_SUCCEEDED, NODE_SKIPPED}
             ),
@@ -450,6 +458,8 @@ def _agent_io_sections(state: dict[str, Any]) -> list[tuple[str, Any, Any, str]]
     symbol = (state.get("subscription_symbols") or [""])[0]
     radar_item = (state.get("radar_items") or [None])[0]
     technical = state.get("technical_positions", {}).get(symbol)
+    technical_context = state.get("technical_contexts", {}).get(symbol)
+    news_sentiment = state.get("news_sentiment_by_symbol", {}).get(symbol)
     fundamental = state.get("fundamental_news_by_symbol", {}).get(symbol)
     trade_plan = state.get("trade_plans", {}).get(symbol)
     risk_assessment = state.get("risk_assessments", {}).get(symbol)
@@ -463,46 +473,37 @@ def _agent_io_sections(state: dict[str, Any]) -> list[tuple[str, Any, Any, str]]
             "futu_portfolio",
         ),
         (
-            "机会雷达智能体",
-            {
-                "symbol": symbol,
-                "price_history": state.get("price_history_by_symbol", {}).get(symbol),
-                "look_back_days": state.get("look_back_days"),
-                "trade_date": state.get("trade_date"),
-            },
-            radar_item,
-            "opportunity_radar",
-        ),
-        (
             "技术位置智能体",
             {
                 "symbol": symbol,
                 "price_history": state.get("price_history_by_symbol", {}).get(symbol),
             },
-            technical,
+            {
+                "technical_position": technical,
+                "technical_context": technical_context,
+            },
             "technical_position",
         ),
         (
-            "基本面/新闻智能体",
-            {"symbol": symbol, "provided_report": state.get("fundamental_news_by_symbol", {}).get(symbol)},
-            fundamental,
-            "fundamental_news",
+            "新闻情绪智能体",
+            {"symbol": symbol, "look_back_days": state.get("look_back_days")},
+            news_sentiment,
+            "news_sentiment",
         ),
         (
-            "机会复核管理器",
-            {
-                "radar_item": radar_item,
-                "technical_position": technical,
-                "fundamental_news": fundamental,
-            },
-            radar_item,
-            "opportunity_review",
+            "基本面分析智能体",
+            {"symbol": symbol, "fundamental_rag": "available_to_agent_tool"},
+            fundamental,
+            "fundamental_analysis",
         ),
         (
             "交易员智能体",
             {
                 "reviewed_opportunity": radar_item,
                 "technical_position": technical,
+                "technical_context": technical_context,
+                "news_sentiment": news_sentiment,
+                "fundamental": fundamental,
                 "persona": state.get("persona_config"),
             },
             trade_plan,
@@ -526,6 +527,7 @@ def _agent_io_sections(state: dict[str, Any]) -> list[tuple[str, Any, Any, str]]
                 "risk_assessment": risk_assessment,
                 "mode": state.get("execution_mode"),
                 "user_confirmed": state.get("user_confirmed"),
+                "broker_execution_enabled": state.get("broker_execution_enabled"),
             },
             execution,
             "execution_alert",

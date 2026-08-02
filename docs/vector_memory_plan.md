@@ -2,25 +2,25 @@
 
 ## Goal
 
-Add a retrieval layer that lets the fundamental/news agent reuse company
+Add a retrieval layer that lets the fundamental analyst reuse company
 fundamental documents instead of relying only on the latest run inputs. The
 default backend is OpenAI-compatible embeddings plus a persistent local Chroma
 database. Distilled post-trade lessons remain in JSONL memory and are not
-synced into Chroma.
+synced into the vector database.
 
 ## Current Implementation
 
 - Historical lesson source: `config/memory.jsonl`
 - Seed fundamental documents: `knowledge/fundamentals/`
-- Vector database: `config/rag_chroma`
+- Vector database: Chroma at `config/rag_chroma`
 - Runtime service: `copilot.services.FundamentalRagStore`
-- Embedding model: `text-embedding-3-small`
-- Agent entry point: `PostTradeReviewLearningAgent`
+- Embedding model: `text-embedding-v4`
+- Agent entry point: `FundamentalAnalystAgent`
 - Retrieval cap: 5 context items per symbol
 
-Only the fundamental/news analyst retrieves Chroma RAG context. Opportunity
-radar and technical position prompts use market tools and deterministic
-analysis, while post-trade lessons continue through JSONL memory retrieval.
+Only the fundamental analyst retrieves Chroma RAG context. News sentiment and
+technical position prompts use live tools and deterministic analysis, while
+post-trade lessons continue through JSONL memory retrieval.
 Retrieval is hybrid: embedding vector recall and BM25 keyword recall run as
 separate child-chunk recall channels, RRF merges the ranked lists, rerank orders
 the fused candidates, and results are aggregated back to parent context.
@@ -50,7 +50,7 @@ fetches are durable inputs. JSONL memories are separate durable inputs.
 ## Retrieval Flow
 
 1. Load distilled memories from JSONL for history-aware downstream decisions.
-2. In the fundamental/news node, build a base query from symbol, tags, and
+2. In the fundamental analyst node, build a base query from symbol, tags, and
    analyst query text.
 3. Ask the available LLM to rewrite the query into JSON fields:
    `rewritten_query`, `risk_query`, `technical_query`, and
@@ -62,8 +62,8 @@ fetches are durable inputs. JSONL memories are separate durable inputs.
 6. Filter/boost by symbol and tags, then fuse all vector and BM25 ranked lists
    with Reciprocal Rank Fusion (RRF).
 7. Rerank fused child candidates with `local_cross_feature_v1`.
-8. Aggregate child matches by `parent_id` and inject parent context only into
-   the fundamental/news prompt with a clear boundary: RAG is background; live
+8. Aggregate child matches by `parent_id` and expose parent context only through
+   the fundamental analyst RAG tool with a clear boundary: RAG is background; live
    tools remain authoritative.
 
 ## Update Paths

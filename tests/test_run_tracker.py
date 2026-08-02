@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from ai_trading_copilot.copilot.domain import PortfolioSnapshot
+from ai_trading_copilot.copilot.domain import AnalystType, PortfolioSnapshot
 from ai_trading_copilot.copilot.graph import CopilotLangGraph
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
 
@@ -55,7 +55,10 @@ def test_langgraph_tracker_records_reports_for_successful_run(tmp_path):
     tracker.write_audit(state=state)
 
     payload = json.loads((tmp_path / "run_status.json").read_text(encoding="utf-8"))
-    assert payload["nodes"][CopilotLangGraph.NODE_OPPORTUNITY_RADAR]["status"] == "succeeded"
+    assert payload["nodes"][CopilotLangGraph.NODE_TECHNICAL_POSITION]["status"] == "succeeded"
+    assert payload["nodes"][CopilotLangGraph.NODE_NEWS_SENTIMENT]["status"] == "succeeded"
+    assert payload["nodes"][CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS]["status"] == "succeeded"
+    assert payload["nodes"][CopilotLangGraph.NODE_OPPORTUNITY_RADAR]["status"] == "skipped"
     assert payload["reports"]["futu_portfolio"]["exists"] is True
     assert payload["reports"]["run_explanation"]["exists"] is True
     assert (tmp_path / "run_audit.md").exists()
@@ -136,6 +139,7 @@ def test_langgraph_tracker_records_failed_node(tmp_path):
         ).run(
             subscription_symbols=["AAPL"],
             portfolio=PortfolioSnapshot(),
+            selected_analysts=[AnalystType.OPPORTUNITY_RADAR],
             report_output_dir=tmp_path,
         )
     except RuntimeError:

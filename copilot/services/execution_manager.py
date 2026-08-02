@@ -27,12 +27,13 @@ def prepare_execution_decision(
     risk_assessment: RiskAssessment,
     mode: ExecutionMode = ExecutionMode.SIMULATION,
     user_confirmed: bool = False,
+    broker_execution_enabled: bool = False,
 ) -> ExecutionDecision:
     """Convert a risk-checked plan into an execution or alert state.
 
     This function intentionally does not call any broker API. It only decides
-    whether the next step is blocked, a reminder, a simulated order, or a live
-    order candidate that still requires explicit confirmation.
+    whether the next step is blocked, a reminder, a simulated order candidate,
+    or a live order candidate that still requires explicit confirmation.
     """
     if not risk_assessment.approved:
         return ExecutionDecision(
@@ -42,7 +43,7 @@ def prepare_execution_decision(
             direction=plan.direction,
             approved_by_risk=False,
             requires_user_confirmation=False,
-            message="硬性风险检查未通过，执行已被阻止。",
+            message="Hard risk checks failed; execution is blocked.",
         )
 
     if plan.direction not in _ORDER_DIRECTIONS:
@@ -53,10 +54,15 @@ def prepare_execution_decision(
             direction=plan.direction,
             approved_by_risk=True,
             requires_user_confirmation=False,
-            message="该计划仅用于提醒或观察，不是订单候选。",
+            message="This plan is an alert/watch decision, not an order candidate.",
         )
 
     if mode == ExecutionMode.SIMULATION:
+        suffix = (
+            " Simulated broker execution is enabled."
+            if broker_execution_enabled
+            else " No broker order has been submitted."
+        )
         return ExecutionDecision(
             symbol=plan.symbol,
             mode=mode,
@@ -64,7 +70,7 @@ def prepare_execution_decision(
             direction=plan.direction,
             approved_by_risk=True,
             requires_user_confirmation=False,
-            message="模拟执行已就绪，不会向实盘券商提交订单。",
+            message="Simulation candidate is ready." + suffix,
         )
 
     if not user_confirmed:
@@ -75,7 +81,7 @@ def prepare_execution_decision(
             direction=plan.direction,
             approved_by_risk=True,
             requires_user_confirmation=True,
-            message="实盘执行需要用户明确确认。",
+            message="Live execution requires explicit user confirmation.",
         )
 
     return ExecutionDecision(
@@ -85,5 +91,5 @@ def prepare_execution_decision(
         direction=plan.direction,
         approved_by_risk=True,
         requires_user_confirmation=False,
-        message="实盘订单候选已就绪，可交给券商适配器处理。",
+        message="Live order candidate is ready for a broker adapter.",
     )

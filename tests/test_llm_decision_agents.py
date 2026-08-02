@@ -4,11 +4,11 @@ from langchain_core.messages import AIMessage
 
 from ai_trading_copilot.copilot.agents import (
     ExecutionAlertManager,
-    OpportunityReviewManager,
     RiskAgent,
     TraderAgent,
 )
 from ai_trading_copilot.copilot.domain import (
+    BrokerExecutionResult,
     ExecutionMode,
     ExecutionStatus,
     FundamentalNewsReport,
@@ -34,6 +34,21 @@ class StaticLLM:
     def invoke(self, prompt):
         self.prompts.append(prompt)
         return AIMessage(content=self.content)
+
+
+class FakeExecutionAdapter:
+    def __init__(self):
+        self.requests = []
+
+    def place_order(self, request):
+        self.requests.append(request)
+        return BrokerExecutionResult(
+            idempotency_key=request.idempotency_key,
+            submitted=True,
+            order_id="SIM-1",
+            status="submitted",
+            message="fake simulated order submitted",
+        )
 
 
 def _opportunity(status=SubscriptionStatus.ACTIONABLE):
@@ -82,18 +97,21 @@ def _plan(**overrides):
     return TradePlan(**data)
 
 
-def test_opportunity_review_manager_uses_llm_report_and_structured_json():
+def test_trader_agent_internal_review_uses_llm_report_and_structured_json():
     llm = StaticLLM(
-        "# Opportunity review\n\n"
-        '{"status": "risk_elevated", "reason": "News risk is unresolved.", '
-        '"final_conclusion": "Risk elevated", '
-        '"review_reasons": ["news report"], '
-        '"risk_points": ["regulatory_probe"], '
-        '"suggested_action": "Avoid new entry."}'
+        "# Trader review\n\n"
+        '{"direction": "hold", "entry_logic": "News risk is unresolved.", '
+        '"market_regime": "uptrend", "support_level": 100, "stop_loss": null, '
+        '"targets": [], "reward_risk_ratio": 3, "position_weight": 0, '
+        '"holding_period": "No active holding period.", '
+        '"invalidation_conditions": ["Resolve regulatory probe"], '
+        '"persona_fit_reason": "Material risk blocks new entry.", '
+        '"uses_leverage": false, "uses_options": false, '
+        '"is_chasing": false, "breakout_confirmed": false, '
+        '"pullback_confirmed": false}'
     )
 
-    result = OpportunityReviewManager(llm=llm).review_with_report(
-        symbol="AAPL",
+    result = TraderAgent(llm=llm).create_plan_with_report(
         opportunity=_opportunity(),
         technical_position=_position(),
         fundamental_news=FundamentalNewsReport(
@@ -101,12 +119,15 @@ def test_opportunity_review_manager_uses_llm_report_and_structured_json():
             material_risk=True,
             risk_flags=["regulatory_probe"],
         ),
+        persona=UserPersonaConfig(),
         analyst_context="tool-derived reports",
     )
 
-    assert result.item.status == SubscriptionStatus.RISK_ELEVATED
-    assert result.item.risk_points == ["regulatory_probe"]
-    assert result.report.startswith("# Opportunity review")
+    assert result.opportunity is not None
+    assert result.opportunity.status == SubscriptionStatus.RISK_ELEVATED
+    assert result.opportunity.risk_points == ["regulatory_probe"]
+    assert result.plan.direction == TradeDirection.HOLD
+    assert result.report.startswith("# Trader review")
     assert llm.prompts
 
 
@@ -176,6 +197,41 @@ def test_execution_alert_manager_llm_report_keeps_live_confirmation_gate():
     assert result.decision.status == ExecutionStatus.CONFIRMATION_REQUIRED
     assert result.decision.requires_user_confirmation is True
     assert result.report.startswith("# Execution report")
+
+
+def test_execution_alert_manager_submits_only_when_simulated_broker_enabled():
+    adapter = FakeExecutionAdapter()
+    risk = RiskAgent().review(
+        persona=UserPersonaConfig(),
+        subscriptions=SubscriptionBook(
+            items=[Subscription(symbol="AAPL", market_type=MarketType.US_STOCK)]
+        ),
+        portfolio=PortfolioSnapshot(),
+        plan=_plan(),
+    )
+
+    disabled = ExecutionAlertManager(execution_adapter=adapter).prepare(
+        plan=_plan(),
+        risk_assessment=risk,
+        mode=ExecutionMode.SIMULATION,
+        broker_execution_enabled=False,
+        run_id="run_unit",
+    )
+    enabled = ExecutionAlertManager(execution_adapter=adapter).prepare(
+        plan=_plan(),
+        risk_assessment=risk,
+        mode=ExecutionMode.SIMULATION,
+        broker_execution_enabled=True,
+        run_id="run_unit",
+    )
+
+    assert disabled.status == ExecutionStatus.SIMULATION_READY
+    assert disabled.submitted_to_broker is False
+    assert enabled.status == ExecutionStatus.SIMULATED_ORDER_SUBMITTED
+    assert enabled.submitted_to_broker is True
+    assert enabled.broker_order_id == "SIM-1"
+    assert adapter.requests[0].trd_env == "SIMULATE"
+    assert adapter.requests[0].idempotency_key.startswith("run_unit:AAPL:BUY:")
 
 
 def test_agent_report_paths_are_workspace_reports(tmp_path):

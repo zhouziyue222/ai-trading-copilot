@@ -262,6 +262,122 @@ def make_fundamental_news_tools() -> List:
     ]
 
 
+def _safe_tool(fetcher: Callable[[], str]) -> str:
+    try:
+        return str(fetcher())
+    except Exception as exc:
+        return f"Tool data unavailable: {exc}"
+
+
+def make_news_sentiment_tools() -> List:
+    from langchain_core.tools import tool
+
+    @tool
+    def get_company_news(ticker: str, start_date: str, end_date: str) -> str:
+        """Retrieve Finnhub company news for a ticker."""
+        from ai_trading_copilot.copilot.adapters import finnhub
+
+        return _safe_tool(lambda: finnhub.get_company_news_text(ticker, start_date, end_date))
+
+    @tool
+    def get_market_news(curr_date: str, look_back_days: int = 7, limit: int = 5) -> str:
+        """Retrieve Finnhub broad market news."""
+        from ai_trading_copilot.copilot.adapters import finnhub
+
+        return _safe_tool(lambda: finnhub.get_global_news_text(curr_date, look_back_days, limit))
+
+    @tool
+    def get_news_sentiment(ticker: str) -> str:
+        """Retrieve Finnhub news sentiment for a ticker."""
+        from ai_trading_copilot.copilot.adapters import finnhub
+
+        return _safe_tool(lambda: finnhub.get_news_sentiment_text(ticker))
+
+    @tool
+    def get_social_sentiment(ticker: str) -> str:
+        """Retrieve Finnhub social sentiment for a ticker."""
+        from ai_trading_copilot.copilot.adapters import finnhub
+
+        return _safe_tool(lambda: finnhub.get_social_sentiment_text(ticker))
+
+    @tool
+    def get_earnings_calendar(ticker: str, start_date: str, end_date: str) -> str:
+        """Retrieve Finnhub earnings calendar rows for a ticker."""
+        from ai_trading_copilot.copilot.adapters import finnhub
+
+        return _safe_tool(lambda: finnhub.get_earnings_calendar_text(ticker, start_date, end_date))
+
+    return [
+        get_company_news,
+        get_market_news,
+        get_news_sentiment,
+        get_social_sentiment,
+        get_earnings_calendar,
+    ]
+
+
+def make_fundamental_tools(*, rag_retriever=None) -> List:
+    from langchain_core.tools import tool
+
+    @tool
+    def get_fundamentals(ticker: str, curr_date: str) -> str:
+        """Retrieve comprehensive company fundamentals."""
+        return get_fundamentals_text(ticker, curr_date)
+
+    @tool
+    def get_balance_sheet(
+        ticker: str,
+        freq: str = "quarterly",
+        curr_date: str | None = None,
+    ) -> str:
+        """Retrieve balance sheet data."""
+        return get_balance_sheet_text(ticker, freq, curr_date)
+
+    @tool
+    def get_cashflow(
+        ticker: str,
+        freq: str = "quarterly",
+        curr_date: str | None = None,
+    ) -> str:
+        """Retrieve cash flow statement data."""
+        return get_cashflow_text(ticker, freq, curr_date)
+
+    @tool
+    def get_income_statement(
+        ticker: str,
+        freq: str = "quarterly",
+        curr_date: str | None = None,
+    ) -> str:
+        """Retrieve income statement data."""
+        return get_income_statement_text(ticker, freq, curr_date)
+
+    tools = [get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement]
+
+    if rag_retriever is not None:
+
+        @tool
+        def retrieve_fundamental_rag(ticker: str, query: str, limit: int = 5) -> str:
+            """Retrieve company fundamental RAG documents."""
+            docs = rag_retriever.retrieve_fundamental_rag_context(
+                symbol=ticker,
+                tags=["fundamentals"],
+                query=query,
+                limit=limit,
+            )
+            if not docs:
+                return "No fundamental RAG documents found."
+            lines = [f"# Fundamental RAG for {ticker}", ""]
+            for item in docs:
+                title = getattr(item, "title", "") or getattr(item, "id", "")
+                text = str(getattr(item, "text", "")).replace("\n", " ")
+                lines.append(f"- {title}: {text[:800]}")
+            return "\n".join(lines)
+
+        tools.append(retrieve_fundamental_rag)
+
+    return tools
+
+
 def date_window(curr_date: str | None, look_back_days: int) -> tuple[str, str]:
     end = date.fromisoformat(curr_date) if curr_date else date.today()
     start = end - timedelta(days=look_back_days)

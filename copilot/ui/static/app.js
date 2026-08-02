@@ -47,6 +47,8 @@ const executionStatusLabels = {
   simulation_ready: "模拟就绪",
   confirmation_required: "需要确认",
   live_ready: "Live 就绪",
+  simulated_order_submitted: "模拟单已提交",
+  simulated_order_failed: "模拟单失败",
 };
 
 const preferredReportOrder = [
@@ -54,7 +56,8 @@ const preferredReportOrder = [
   "risk_check",
   "execution_alert",
   "trader",
-  "opportunity_review",
+  "news_sentiment",
+  "fundamental_analysis",
   "opportunity_radar",
   "technical_position",
   "fundamental_news",
@@ -63,10 +66,11 @@ const preferredReportOrder = [
 ];
 
 const workflowSteps = [
-  ["opportunity_radar", "机会雷达"],
   ["technical_position", "技术位置"],
+  ["news_sentiment", "新闻情绪"],
+  ["fundamental_analysis", "基本面分析"],
+  ["opportunity_radar", "机会雷达"],
   ["fundamental_news", "基本面/新闻"],
-  ["opportunity_review", "机会复核"],
   ["trader", "交易计划"],
   ["risk_check", "风控检查"],
   ["execution_alert", "执行提醒"],
@@ -115,8 +119,8 @@ function renderRagStatus(payload = {}) {
   const available = payload.available === true;
   const count = payload.document_count ?? 0;
   status.textContent = available
-    ? `Chroma 可用 · ${count} 条`
-    : `降级检索 · ${payload.error || "Chroma/OpenAI 不可用"}`;
+    ? `Chroma available · ${count} docs`
+    : `Fallback retrieval · ${payload.error || "Chroma/OpenAI unavailable"}`;
   status.className = available ? "status-success inline-status" : "status-warning inline-status";
 }
 
@@ -267,6 +271,7 @@ async function startRun() {
         trade_date: $("tradeDate").value || null,
         look_back_days: Number($("lookBackDays").value || 90),
         portfolio_mode: $("portfolioMode").value,
+        broker_execution_enabled: $("brokerExecutionEnabled")?.checked || false,
       }),
     });
     state.currentRunId = payload.run_id;
@@ -418,8 +423,8 @@ function renderDecisionRows(runStatus = {}) {
           <td>${escapeHtml(directionLabels[row.direction] || row.direction || "-")}</td>
           <td><span class="status-chip ${riskTone}">${riskLabel}</span></td>
           <td><span class="status-chip ${toneClass(executionStatus)}">${escapeHtml(executionStatusLabels[executionStatus] || executionStatus || "-")}</span></td>
-          <td class="action-cell" title="${escapeHtml(row.suggested_action || row.execution_message || "")}">
-            ${escapeHtml(row.suggested_action || row.execution_message || "-")}
+          <td class="action-cell" title="${escapeHtml(row.broker_message || row.execution_message || row.suggested_action || "")}">
+            ${escapeHtml(row.broker_message || row.suggested_action || row.execution_message || "-")}
           </td>
         </tr>
       `;
@@ -466,13 +471,13 @@ function statusLabel(value) {
 }
 
 function toneClass(value) {
-  if (["actionable", "succeeded", "simulation_ready", "live_ready"].includes(value)) {
+  if (["actionable", "succeeded", "simulation_ready", "live_ready", "simulated_order_submitted"].includes(value)) {
     return "status-success";
   }
   if (["near_opportunity", "running", "alert_only", "confirmation_required", "pending", "skipped"].includes(value)) {
     return "status-warning";
   }
-  if (["risk_elevated", "failed", "blocked_by_risk", "not_compatible"].includes(value)) {
+  if (["risk_elevated", "failed", "blocked_by_risk", "not_compatible", "simulated_order_failed"].includes(value)) {
     return "status-danger";
   }
   return "status-neutral";

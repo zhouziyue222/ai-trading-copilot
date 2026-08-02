@@ -7,14 +7,16 @@ import json
 from pathlib import Path
 from typing import Iterable, List
 
-from ai_trading_copilot.copilot.run import DEFAULT_MEMORY_FILE, create_default_memory_agent
+from ai_trading_copilot.copilot.run import (
+    DEFAULT_MEMORY_FILE,
+    create_default_fundamental_research_retriever,
+)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
-    agent = create_default_memory_agent(
-        args.memory_file,
-        rag_chroma_dir=args.chroma_dir,
+    agent = create_default_fundamental_research_retriever(
+        args.chroma_dir or args.memory_file.parent / "rag_chroma",
         auto_ingest_seed=False,
     )
 

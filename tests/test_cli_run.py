@@ -24,9 +24,9 @@ def test_resolve_analysts_defaults_to_all():
     args = run._parse_args(["CRCL"])
 
     assert run._resolve_analysts(args) == [
-        AnalystType.OPPORTUNITY_RADAR,
+        AnalystType.NEWS_SENTIMENT,
         AnalystType.TECHNICAL_POSITION,
-        AnalystType.FUNDAMENTAL_NEWS,
+        AnalystType.FUNDAMENTAL_ANALYSIS,
     ]
 
 
@@ -35,13 +35,13 @@ def test_resolve_analysts_accepts_subset():
         [
             "CRCL",
             "--analysts",
-            "opportunity_radar,fundamental_news",
+            "news_sentiment,fundamental_analysis",
         ]
     )
 
     assert run._resolve_analysts(args) == [
-        AnalystType.OPPORTUNITY_RADAR,
-        AnalystType.FUNDAMENTAL_NEWS,
+        AnalystType.NEWS_SENTIMENT,
+        AnalystType.FUNDAMENTAL_ANALYSIS,
     ]
 
 
@@ -132,7 +132,7 @@ def test_main_passes_multiple_symbols_and_selected_analysts(monkeypatch, tmp_pat
             "--symbols",
             "MSFT,CRCL",
             "--analysts",
-            "opportunity_radar,fundamental_news",
+            "news_sentiment,fundamental_analysis",
             "--output-dir",
             str(tmp_path),
         ]
@@ -142,13 +142,14 @@ def test_main_passes_multiple_symbols_and_selected_analysts(monkeypatch, tmp_pat
     assert calls["tracker"]["symbols"] == ["AAPL", "MSFT", "CRCL"]
     assert calls["tracker"]["params"]["subscription_symbols"] == ["AAPL", "MSFT", "CRCL"]
     assert calls["tracker"]["defaults"]["selected_analysts"] == [
-        "opportunity_radar",
-        "fundamental_news",
+        "news_sentiment",
+        "fundamental_analysis",
     ]
     assert calls["graph_run"]["selected_analysts"] == [
-        AnalystType.OPPORTUNITY_RADAR,
-        AnalystType.FUNDAMENTAL_NEWS,
+        AnalystType.NEWS_SENTIMENT,
+        AnalystType.FUNDAMENTAL_ANALYSIS,
     ]
+    assert calls["graph_run"]["broker_execution_enabled"] is False
     assert calls["memory_agent"] is not None
     payload = json.loads(capsys.readouterr().out)
     assert payload["output_dir"] == str(tmp_path)

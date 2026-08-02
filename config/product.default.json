@@ -1,24 +1,24 @@
 {
   "stock_source": "user_subscription_list",
   "agent_goal": "judge_entry_opportunities_for_subscribed_symbols",
-  "opportunity_radar_agent": "subscription_opportunity_radar_agent",
+  "news_sentiment_agent": "finnhub_news_sentiment_agent",
   "optional_analysts": [
-    "opportunity_radar",
+    "news_sentiment",
     "technical_position",
-    "fundamental_news"
+    "fundamental_analysis"
   ],
   "post_trade_review_agent": "post_trade_review_learning_agent",
   "learning_loop": {
     "enabled": true,
     "memory_strategy": "distilled_retrieval_memory",
-    "retrieval_backend": "fundamental_chroma_structured_parent_child_bm25_rrf_rerank",
+    "retrieval_backend": "fundamental_analyst_chroma_structured_parent_child_bm25_rrf_rerank",
     "vector_index": {
       "enabled": true,
       "chroma_path": "config/rag_chroma",
       "collection": "ai_trading_copilot_fundamentals",
       "scope": "fundamental_only",
       "embedding_provider": "openai",
-      "embedding_model": "text-embedding-3-small",
+      "embedding_model": "text-embedding-v4",
       "allowed_source_types": [
         "annual_report",
         "company_guidance",

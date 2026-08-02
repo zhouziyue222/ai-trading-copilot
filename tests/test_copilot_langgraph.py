@@ -10,14 +10,10 @@ from ai_trading_copilot.copilot.domain import (
     MemoryType,
     PortfolioSnapshot,
     PriceBar,
-    RagDocument,
     SubscriptionStatus,
 )
 from ai_trading_copilot.copilot.graph import CopilotLangGraph
-from ai_trading_copilot.copilot.graph.copilot_langgraph import (
-    _analyst_context_for_symbol,
-    _fundamental_rag_context_for_symbol,
-)
+from ai_trading_copilot.copilot.graph.copilot_langgraph import _analyst_context_for_symbol
 from ai_trading_copilot.copilot.agents import (
     FundamentalNewsAgent,
     OpportunityRadarAgent,
@@ -104,16 +100,6 @@ class RoutingLLM:
                     "# Fundamental report\n\n"
                     '{"thesis_intact": true, "material_risk": false, '
                     '"risk_flags": [], "summary": "No material tool-sourced risk."}'
-                )
-            )
-        if "Opportunity Review Manager" in text:
-            return AIMessage(
-                content=(
-                    "# Opportunity review\n\n"
-                    '{"status": "actionable", "reason": "Analyst reports agree.", '
-                    '"final_conclusion": "Actionable", '
-                    '"review_reasons": ["radar", "technical", "news"], '
-                    '"risk_points": [], "suggested_action": "Prepare a buy plan."}'
                 )
             )
         if "You are the Trader" in text:
@@ -325,58 +311,20 @@ def test_analyst_context_includes_retrieved_trading_memories():
     assert "run=run_AAPL_previous" in context
 
 
-def test_analyst_context_excludes_fundamental_rag_documents():
+def test_analyst_context_uses_fundamental_report_not_graph_rag_documents():
     context = _analyst_context_for_symbol(
         {
-            "fundamental_rag_contexts": {
-                "AAPL": [
-                    RagDocument(
-                        id="rag-1",
-                        title="AAPL earnings note",
-                        text="AAPL services revenue beat improved earnings quality.",
-                        source_type="earnings_report",
-                        source="unit:test",
-                        symbols=["AAPL"],
-                        tags=["earnings"],
-                        score=0.87,
-                    )
-                ]
-            }
+            "fundamental_news_reports_by_symbol": {
+                "AAPL": "# Fundamental Analysis\n\nRAG-informed thesis summary."
+            },
+            "unused_rag_contexts": {"AAPL": ["AAPL earnings note"]},
         },
         "AAPL",
     )
 
-    assert "Fundamental RAG 基本面资料检索" not in context
+    assert "Fundamental Analysis" in context
+    assert "RAG-informed thesis summary" in context
     assert "AAPL earnings note" not in context
-
-
-def test_fundamental_rag_context_formats_parent_documents():
-    context = _fundamental_rag_context_for_symbol(
-        {
-            "AAPL": [
-                RagDocument(
-                    id="rag-1",
-                    title="AAPL earnings note",
-                    text="AAPL services revenue beat improved earnings quality.",
-                    source_type="earnings_report",
-                    source="unit:test",
-                    symbols=["AAPL"],
-                    tags=["earnings"],
-                    score=0.87,
-                    metadata={
-                        "chunk_role": "parent_context",
-                        "matched_child_texts": ["Services revenue beat and gross margin expanded."],
-                    },
-                )
-            ]
-        },
-        "AAPL",
-    )
-
-    assert "Fundamental RAG 基本面资料检索" in context
-    assert "AAPL earnings note" in context
-    assert "Services revenue beat" in context
-    assert "score=0.87" in context
 
 
 def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
@@ -405,7 +353,6 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
         "technical_position": "1_analysts",
         "fundamental_news": "1_analysts",
         "futu_portfolio": "0_portfolio",
-        "opportunity_review": "2_opportunity_review",
         "trader": "3_trader",
         "risk_check": "4_risk_check",
         "execution_alert": "5_execution",

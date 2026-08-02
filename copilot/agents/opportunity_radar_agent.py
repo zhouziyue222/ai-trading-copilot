@@ -15,11 +15,10 @@ from ai_trading_copilot.copilot.analysis.opportunity_radar import (
     scan_subscription_opportunities,
 )
 from ai_trading_copilot.copilot.agents.llm_tools import (
-    collect_tool_evidence,
     extract_json_object,
-    run_tool_calling_llm,
     strip_trailing_json_object,
 )
+from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
 from ai_trading_copilot.copilot.domain.enums import SubscriptionStatus, SymbolTrendState
 from ai_trading_copilot.copilot.domain.models import (
     OpportunityRadarItem,
@@ -74,9 +73,11 @@ class OpportunityRadarAgent:
             kwargs["stock_info_getter"] = self.stock_info_getter
         tools = self.tools or make_market_tools(**kwargs)
         start_date, end_date = date_window(trade_date, look_back_days)
-        tool_evidence, pre_calls = collect_tool_evidence(
-            tools=tools,
-            requests=[
+        tool_result_cache = {}
+        runner = ReActAgentRunner(llm=self.llm, tools=tools)
+        evidence_result = runner.run(
+            prompt="",
+            prefetch=[
                 ("get_stock_info", {"symbol": symbol}),
                 ("get_stock_data", {"symbol": symbol, "start_date": start_date, "end_date": end_date}),
                 (
@@ -89,6 +90,7 @@ class OpportunityRadarAgent:
                     },
                 ),
             ],
+            tool_result_cache=tool_result_cache,
         )
         prompt = (
             "You are the Opportunity Radar analyst for an AI trading copilot. "
@@ -115,9 +117,10 @@ class OpportunityRadarAgent:
             f"trend={fallback.trend_state.value if fallback.trend_state else 'unknown'}, "
             f"reason={fallback.reason}\n"
             f"Available tools: {tool_names(tools)}\n\n"
-            f"Prefetched tool evidence:\n{tool_evidence or '-'}"
+            f"Prefetched tool evidence:\n{evidence_result.prefetched_evidence or '-'}"
         )
-        content, calls = run_tool_calling_llm(llm=self.llm, prompt=prompt, tools=tools)
+        react_result = runner.run(prompt=prompt, tool_result_cache=tool_result_cache)
+        content = react_result.content
         try:
             payload = extract_json_object(content)
             item = fallback.model_copy(
@@ -150,7 +153,7 @@ class OpportunityRadarAgent:
         return OpportunityRadarAnalysisResult(
             item=item,
             report=strip_trailing_json_object(content) or fallback_report,
-            tool_calls=[*pre_calls, *calls],
+            tool_calls=[*evidence_result.prefetched_calls, *react_result.tool_calls],
         )
 
     def scan(
