@@ -1,10 +1,12 @@
 const state = {
+  activeView: "analysis",
   subscriptions: [],
   selectedSymbols: new Set(),
   currentRunId: null,
   pollTimer: null,
   activeReportKey: null,
   ragStatus: null,
+  portfolio: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -38,29 +40,27 @@ const directionLabels = {
   hold: "持有",
   reduce: "减仓",
   sell: "卖出",
+  short: "Short",
+  cover: "Cover",
   watch: "观察",
 };
 
 const executionStatusLabels = {
-  blocked_by_risk: "风险阻断",
   alert_only: "仅提醒",
-  simulation_ready: "模拟就绪",
+  portfolio_decided: "组合决策",
   confirmation_required: "需要确认",
-  live_ready: "Live 就绪",
-  simulated_order_submitted: "模拟单已提交",
-  simulated_order_failed: "模拟单失败",
 };
 
 const preferredReportOrder = [
   "run_explanation",
   "risk_check",
-  "execution_alert",
+  "portfolio_manager",
+  "simulated_broker_orders",
   "trader",
   "news_sentiment",
   "fundamental_analysis",
   "opportunity_radar",
   "technical_position",
-  "fundamental_news",
   "futu_portfolio",
   "run_audit",
 ];
@@ -70,10 +70,9 @@ const workflowSteps = [
   ["news_sentiment", "新闻情绪"],
   ["fundamental_analysis", "基本面分析"],
   ["opportunity_radar", "机会雷达"],
-  ["fundamental_news", "基本面/新闻"],
   ["trader", "交易计划"],
   ["risk_check", "风控检查"],
-  ["execution_alert", "执行提醒"],
+  ["portfolio_manager", "Portfolio Manager"],
   ["run_explanation", "运行解释"],
 ];
 
@@ -96,15 +95,36 @@ async function api(path, options = {}) {
   return contentType.includes("application/json") ? response.json() : response.text();
 }
 
+function switchView(view) {
+  state.activeView = view;
+  document.querySelectorAll(".nav-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === view);
+  });
+  document.querySelectorAll(".view").forEach((section) => {
+    section.classList.toggle("active", section.id === `view-${view}`);
+  });
+  if (view === "portfolio" && !state.portfolio) {
+    loadPortfolio().catch(showError);
+  }
+}
+
 function showError(error) {
-  $("errors").textContent = error ? String(error.message || error) : "";
+  const errors = $("errors");
+  if (errors) {
+    errors.textContent = error ? String(error.message || error) : "";
+  }
 }
 
 async function loadSubscriptions() {
   showError("");
   const payload = await api("/api/subscriptions");
   state.subscriptions = payload.items || [];
+  const availableSymbols = new Set(state.subscriptions.map((item) => item.symbol));
+  state.selectedSymbols = new Set(
+    Array.from(state.selectedSymbols).filter((symbol) => availableSymbols.has(symbol)),
+  );
   renderSubscriptions();
+  renderSelectedCount();
 }
 
 async function loadRagStatus() {
@@ -119,8 +139,8 @@ function renderRagStatus(payload = {}) {
   const available = payload.available === true;
   const count = payload.document_count ?? 0;
   status.textContent = available
-    ? `Chroma available · ${count} docs`
-    : `Fallback retrieval · ${payload.error || "Chroma/OpenAI unavailable"}`;
+    ? `Chroma 可用 · ${count} docs`
+    : `Fallback 检索 · ${payload.error || "Chroma/OpenAI 不可用"}`;
   status.className = available ? "status-success inline-status" : "status-warning inline-status";
 }
 
@@ -189,12 +209,13 @@ async function ingestTextKnowledge() {
 
 function renderSubscriptions() {
   const list = $("subscriptionList");
+  if (!list) return;
   list.innerHTML = "";
   if (!state.subscriptions.length) {
     list.innerHTML = `
       <div class="empty-state">
-        <strong>暂无订阅</strong>
-        <span>先添加一个股票或 ETF，再启动机会扫描。</span>
+        <strong>暂无自选股</strong>
+        <span>先添加一只股票或 ETF，再到股票分析页启动机会扫描。</span>
       </div>
     `;
     return;
@@ -210,7 +231,7 @@ function renderSubscriptions() {
           <input type="checkbox" data-symbol="${escapeHtml(item.symbol)}" ${selected ? "checked" : ""} />
           <span>
             <strong>${escapeHtml(item.symbol)}</strong>
-            <small>${escapeHtml(item.market_type)}</small>
+            <small>${escapeHtml(marketLabel(item.market_type))}</small>
           </span>
         </label>
         <span class="status-chip ${toneClass(item.status)}">${statusLabel(item.status)}</span>
@@ -232,6 +253,13 @@ function renderSubscriptions() {
       </div>
     `;
     list.appendChild(row);
+  }
+}
+
+function renderSelectedCount() {
+  const counter = $("selectedCount");
+  if (counter) {
+    counter.textContent = `已选 ${state.selectedSymbols.size}`;
   }
 }
 
@@ -271,7 +299,6 @@ async function startRun() {
         trade_date: $("tradeDate").value || null,
         look_back_days: Number($("lookBackDays").value || 90),
         portfolio_mode: $("portfolioMode").value,
-        broker_execution_enabled: $("brokerExecutionEnabled")?.checked || false,
       }),
     });
     state.currentRunId = payload.run_id;
@@ -282,7 +309,7 @@ async function startRun() {
     startPolling();
   } finally {
     startButton.disabled = false;
-    startButton.textContent = "启动";
+    startButton.textContent = "启动分析";
   }
 }
 
@@ -313,7 +340,7 @@ function renderRun(payload) {
 
   renderSummaryCards(runStatus);
   renderProgress(payload.run_id, runStatus);
-  renderDecisionRows(runStatus);
+  renderDecisionRows(payload.run_id, runStatus);
 
   const errors = payload.errors || runStatus.errors || [];
   $("errors").textContent = errors.map((item) => item.message || item).join("\n");
@@ -333,25 +360,17 @@ function renderSummaryCards(runStatus = {}) {
   const reportCount =
     metrics.report_count ??
     Object.values(runStatus.reports || {}).filter((report) => report.exists).length;
-  const riskBlocked = metrics.risk_blocked_count ?? 0;
+  const riskAdjusted = metrics.risk_adjusted_count ?? 0;
+  const riskHeld = metrics.risk_held_count ?? 0;
 
   const cards = [
     { label: "标的", value: metrics.symbol_count ?? (runStatus.symbols || []).length, tone: "neutral" },
-    { label: "节点完成", value: `${completedNodes}/${nodeValues.length || 0}`, tone: "success" },
-    { label: "风险/失败", value: `${riskBlocked}/${failedNodes}`, tone: riskBlocked || failedNodes ? "danger" : "neutral" },
-    { label: "报告", value: reportCount, tone: "warning" },
+    { label: "节点完成", value: `${completedNodes}/${nodeValues.length || 0}`, tone: failedNodes ? "danger" : "success" },
+    { label: "风控调整/持平", value: `${riskAdjusted}/${riskHeld}`, tone: riskAdjusted || riskHeld || failedNodes ? "warning" : "neutral" },
+    { label: "报告", value: reportCount, tone: reportCount ? "success" : "neutral" },
   ];
 
-  $("summaryCards").innerHTML = cards
-    .map(
-      (card) => `
-        <article class="summary-card summary-${card.tone}">
-          <span>${card.label}</span>
-          <strong>${card.value}</strong>
-        </article>
-      `,
-    )
-    .join("");
+  $("summaryCards").innerHTML = cards.map(summaryCard).join("");
 }
 
 function renderProgress(runId, runStatus = {}) {
@@ -379,29 +398,15 @@ function renderProgress(runId, runStatus = {}) {
       </div>
       <strong>${escapeHtml((runStatus.symbols || []).join(", ") || "暂无标的")}</strong>
     </div>
-    <div class="run-meta">
-      <div>
-        <span>Run ID</span>
-        <strong>${escapeHtml(runId || "-")}</strong>
-      </div>
-      <div>
-        <span>Symbols</span>
-        <strong>${escapeHtml((runStatus.symbols || []).join(", ") || "-")}</strong>
-      </div>
-      <div>
-        <span>Current</span>
-        <strong>${escapeHtml(runStatus.current_node || "-")}</strong>
-      </div>
-    </div>
     <div class="node-grid">${nodeHtml}</div>
   `;
 }
 
-function renderDecisionRows(runStatus = {}) {
+function renderDecisionRows(runId, runStatus = {}) {
   const rows = runStatus.decision_summary?.symbols || [];
   if (!rows.length) {
     $("decisionRows").innerHTML =
-      '<tr><td colspan="9" class="empty-cell">启动一次运行后，决策摘要会显示在这里。</td></tr>';
+      '<tr><td colspan="11" class="empty-cell">启动一次分析后，决策摘要会显示在这里。</td></tr>';
     return;
   }
 
@@ -410,26 +415,90 @@ function renderDecisionRows(runStatus = {}) {
       const status = row.status || "observing";
       const executionStatus = row.execution_status || "";
       const riskLabel =
-        row.approved_by_risk === true ? "通过" : row.approved_by_risk === false ? "阻断" : "待复核";
+        row.approved_by_risk === true
+          ? row.risk_clamped
+            ? "已调整"
+            : "通过"
+          : row.approved_by_risk === false
+            ? "保持不动"
+            : "待复核";
       const riskTone =
-        row.approved_by_risk === true ? "status-success" : row.approved_by_risk === false ? "status-danger" : "status-neutral";
+        row.approved_by_risk === true
+          ? row.risk_clamped
+            ? "status-warning"
+            : "status-success"
+          : row.approved_by_risk === false
+            ? "status-warning"
+            : "status-neutral";
       return `
         <tr>
           <td><strong>${escapeHtml(row.symbol || "-")}</strong></td>
           <td><span class="status-chip ${toneClass(status)}">${escapeHtml(row.status_label || statusLabel(status))}</span></td>
           <td>${formatNumber(row.current_price)}</td>
-          <td>${formatNumber(row.support_level)}</td>
-          <td>${formatNumber(row.reward_risk_ratio)}</td>
+          <td>${formatPercent(row.target_weight)}</td>
+          <td>${formatPercent(row.final_weight)}</td>
+          <td>${formatPercent(row.delta_weight)}</td>
           <td>${escapeHtml(directionLabels[row.direction] || row.direction || "-")}</td>
           <td><span class="status-chip ${riskTone}">${riskLabel}</span></td>
           <td><span class="status-chip ${toneClass(executionStatus)}">${escapeHtml(executionStatusLabels[executionStatus] || executionStatus || "-")}</span></td>
-          <td class="action-cell" title="${escapeHtml(row.broker_message || row.execution_message || row.suggested_action || "")}">
-            ${escapeHtml(row.broker_message || row.suggested_action || row.execution_message || "-")}
+          <td class="broker-cell">${renderBrokerControl(runId, runStatus.status, row)}</td>
+          <td class="action-cell" title="${escapeHtml(row.execution_message || row.suggested_action || "")}">
+            ${escapeHtml(row.execution_message || row.suggested_action || "-")}
           </td>
         </tr>
       `;
     })
     .join("");
+}
+
+function renderBrokerControl(runId, runStatus, row) {
+  const title = escapeHtml(row.broker_message || row.broker_status || "");
+  if (row.submitted_to_broker) {
+    const label = row.broker_order_id
+      ? `Submitted #${row.broker_order_id}`
+      : `Submitted ${row.submitted_quantity || ""}`.trim();
+    return `<span class="status-chip status-success" title="${title}">${escapeHtml(label)}</span>`;
+  }
+  if (row.broker_idempotency_key) {
+    return `<span class="status-chip status-danger" title="${title}">${escapeHtml(row.broker_status || "Failed")}</span>`;
+  }
+  if (row.pending_broker_order && row.broker_confirmation_required) {
+    if (runStatus !== "succeeded") {
+      return '<span class="status-chip status-warning">Pending</span>';
+    }
+    return `
+      <button
+        class="confirm-order-button"
+        type="button"
+        data-confirm-simulated="${escapeHtml(row.symbol || "")}"
+        data-run-id="${escapeHtml(runId || "")}"
+      >
+        Confirm SIM
+      </button>
+    `;
+  }
+  return '<span class="empty-inline">-</span>';
+}
+
+async function confirmSimulatedOrder(symbol, button) {
+  if (!state.currentRunId || !symbol) return;
+  showError("");
+  button.disabled = true;
+  button.textContent = "Submitting";
+  try {
+    const payload = await api(
+      `/api/runs/${encodeURIComponent(state.currentRunId)}/orders/${encodeURIComponent(symbol)}/confirm-simulated`,
+      { method: "POST" },
+    );
+    renderRun(payload);
+    if (state.activeView === "portfolio") {
+      await loadPortfolio();
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Confirm SIM";
+    showError(error);
+  }
 }
 
 function renderReportTabs(runId, reports) {
@@ -452,7 +521,7 @@ function renderReportTabs(runId, reports) {
   for (const key of keys) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = key;
+    button.textContent = reportLabel(key);
     button.className = key === state.activeReportKey ? "active" : "";
     button.addEventListener("click", async () => {
       document.querySelectorAll("#reportTabs button").forEach((item) => item.classList.remove("active"));
@@ -466,21 +535,119 @@ function renderReportTabs(runId, reports) {
   }
 }
 
+async function loadPortfolio() {
+  const button = $("refreshPortfolio");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "刷新中";
+  }
+  try {
+    const payload = await api("/api/portfolio/simulated");
+    state.portfolio = payload;
+    renderPortfolio(payload);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "刷新账户";
+    }
+  }
+}
+
+function renderPortfolio(payload = {}) {
+  const status = $("portfolioStatus");
+  const cards = $("portfolioCards");
+  const positions = $("portfolioPositions");
+  if (!status || !cards || !positions) return;
+
+  const available = payload.available === true;
+  status.className = `portfolio-status ${available ? "status-success" : "status-warning"}`;
+  status.innerHTML = available
+    ? `<strong>Futu 模拟账户已连接</strong><span>更新时间 ${formatDateTime(payload.updated_at)}</span>`
+    : `<strong>Futu 模拟账户不可用</strong><span>${escapeHtml(payload.error || "无法读取账户快照")}</span>`;
+
+  cards.innerHTML = [
+    summaryCard({ label: "总资产", value: formatCurrency(payload.total_value), tone: available ? "success" : "neutral" }),
+    summaryCard({ label: "可用现金", value: formatCurrency(payload.cash), tone: "neutral" }),
+    summaryCard({ label: "现金占比", value: formatPercent(payload.cash_weight), tone: "neutral" }),
+    summaryCard({ label: "持仓数量", value: Object.keys(payload.position_weights || {}).length, tone: "neutral" }),
+  ].join("");
+
+  const entries = Object.entries(payload.position_weights || {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  if (!entries.length) {
+    positions.innerHTML = `
+      <div class="empty-state compact">
+        <strong>暂无持仓权重</strong>
+        <span>${available ? "账户当前没有可展示持仓。" : "连接 Futu OpenD 后会显示模拟账户持仓。"}</span>
+      </div>
+    `;
+    return;
+  }
+
+  positions.innerHTML = entries
+    .map(([symbol, weight]) => {
+      const normalized = Math.min(Math.abs(Number(weight) || 0), 1);
+      return `
+        <article class="position-row">
+          <div>
+            <strong>${escapeHtml(symbol)}</strong>
+            <span>${formatPercent(weight)}</span>
+          </div>
+          <div class="weight-track">
+            <span style="width: ${normalized * 100}%"></span>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function summaryCard(card) {
+  return `
+    <article class="summary-card summary-${card.tone}">
+      <span>${escapeHtml(card.label)}</span>
+      <strong>${escapeHtml(card.value)}</strong>
+    </article>
+  `;
+}
+
 function statusLabel(value) {
   return subscriptionStatusLabels[value] || nodeStatusLabels[value] || runStatusLabels[value] || value || "-";
 }
 
 function toneClass(value) {
-  if (["actionable", "succeeded", "simulation_ready", "live_ready", "simulated_order_submitted"].includes(value)) {
+  if (["actionable", "succeeded", "portfolio_decided"].includes(value)) {
     return "status-success";
   }
   if (["near_opportunity", "running", "alert_only", "confirmation_required", "pending", "skipped"].includes(value)) {
     return "status-warning";
   }
-  if (["risk_elevated", "failed", "blocked_by_risk", "not_compatible", "simulated_order_failed"].includes(value)) {
+  if (["risk_elevated", "failed", "not_compatible"].includes(value)) {
     return "status-danger";
   }
   return "status-neutral";
+}
+
+function marketLabel(value) {
+  return {
+    US_STOCK: "美股",
+    US_ETF: "美股 ETF",
+  }[value] || value || "-";
+}
+
+function reportLabel(value) {
+  return {
+    run_explanation: "运行解释",
+    risk_check: "风控检查",
+    portfolio_manager: "组合经理",
+    simulated_broker_orders: "模拟订单",
+    trader: "交易计划",
+    news_sentiment: "新闻情绪",
+    fundamental_analysis: "基本面分析",
+    opportunity_radar: "机会雷达",
+    technical_position: "技术位置",
+    futu_portfolio: "Futu 组合",
+    run_audit: "运行审计",
+  }[value] || value;
 }
 
 function formatNumber(value) {
@@ -488,6 +655,31 @@ function formatNumber(value) {
   const number = Number(value);
   if (Number.isNaN(number)) return String(value);
   return number.toFixed(Math.abs(number) >= 100 ? 1 : 2);
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const number = Number(value);
+  if (Number.isNaN(number)) return String(value);
+  return `${(number * 100).toFixed(1)}%`;
+}
+
+function formatCurrency(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const number = Number(value);
+  if (Number.isNaN(number)) return String(value);
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(number);
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function escapeHtml(value) {
@@ -505,63 +697,91 @@ function splitCsv(value) {
     .filter(Boolean);
 }
 
-$("subscriptionForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  showError("");
-  try {
-    await api("/api/subscriptions", {
-      method: "POST",
-      body: JSON.stringify({
-        symbol: $("subSymbol").value,
-        market_type: $("subMarket").value,
-        reason: $("subReason").value,
-        target_action: $("subAction").value,
-      }),
-    });
-    event.target.reset();
-    await loadSubscriptions();
-  } catch (error) {
-    showError(error);
-  }
-});
+function bindEvents() {
+  document.querySelectorAll(".nav-button").forEach((button) => {
+    button.addEventListener("click", () => switchView(button.dataset.view));
+  });
 
-$("subscriptionList").addEventListener("change", async (event) => {
-  const symbol = event.target.dataset.symbol;
-  if (!symbol) return;
-  if (event.target.type === "checkbox") {
-    event.target.checked ? state.selectedSymbols.add(symbol) : state.selectedSymbols.delete(symbol);
-    return;
-  }
-  try {
-    await updateSubscription(symbol);
-    await loadSubscriptions();
-  } catch (error) {
-    showError(error);
-  }
-});
+  $("subscriptionForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    showError("");
+    try {
+      await api("/api/subscriptions", {
+        method: "POST",
+        body: JSON.stringify({
+          symbol: $("subSymbol").value,
+          market_type: $("subMarket").value,
+          reason: $("subReason").value,
+          target_action: $("subAction").value,
+        }),
+      });
+      event.target.reset();
+      await loadSubscriptions();
+    } catch (error) {
+      showError(error);
+    }
+  });
 
-$("subscriptionList").addEventListener("click", async (event) => {
-  const symbol = event.target.dataset.delete;
-  if (!symbol) return;
-  showError("");
-  try {
-    await api(`/api/subscriptions/${encodeURIComponent(symbol)}`, { method: "DELETE" });
-    state.selectedSymbols.delete(symbol);
-    await loadSubscriptions();
-  } catch (error) {
-    showError(error);
-  }
-});
+  $("subscriptionList").addEventListener("change", async (event) => {
+    const symbol = event.target.dataset.symbol;
+    if (!symbol) return;
+    if (event.target.type === "checkbox") {
+      event.target.checked ? state.selectedSymbols.add(symbol) : state.selectedSymbols.delete(symbol);
+      renderSelectedCount();
+      return;
+    }
+    try {
+      await updateSubscription(symbol);
+      await loadSubscriptions();
+    } catch (error) {
+      showError(error);
+    }
+  });
 
-$("refreshSubscriptions").addEventListener("click", () => loadSubscriptions().catch(showError));
-$("startRun").addEventListener("click", () => startRun().catch(showError));
-$("refreshRun").addEventListener("click", () => refreshRun().catch(showError));
-$("refreshRag").addEventListener("click", () => loadRagStatus().catch(showError));
-$("ingestDefaults").addEventListener("click", () => ingestDefaults().catch(showError));
-$("ingestOnline").addEventListener("click", () => ingestOnlineResearch().catch(showError));
-$("ingestText").addEventListener("click", () => ingestTextKnowledge().catch(showError));
+  $("subscriptionList").addEventListener("click", async (event) => {
+    const symbol = event.target.dataset.delete;
+    if (!symbol) return;
+    showError("");
+    try {
+      await api(`/api/subscriptions/${encodeURIComponent(symbol)}`, { method: "DELETE" });
+      state.selectedSymbols.delete(symbol);
+      await loadSubscriptions();
+    } catch (error) {
+      showError(error);
+    }
+  });
 
-renderSummaryCards();
-renderProgress(null, {});
-loadSubscriptions().catch(showError);
-loadRagStatus().catch(showError);
+  $("refreshSubscriptions").addEventListener("click", () => loadSubscriptions().catch(showError));
+  $("startRun").addEventListener("click", () => startRun().catch(showError));
+  $("refreshRun").addEventListener("click", () => refreshRun().catch(showError));
+  $("decisionRows").addEventListener("click", (event) => {
+    const symbol = event.target.dataset.confirmSimulated;
+    if (!symbol) return;
+    confirmSimulatedOrder(symbol, event.target).catch(showError);
+  });
+  $("refreshRag").addEventListener("click", () => loadRagStatus().catch(showError));
+  $("ingestDefaults").addEventListener("click", () => ingestDefaults().catch(showError));
+  $("ingestOnline").addEventListener("click", () => ingestOnlineResearch().catch(showError));
+  $("ingestText").addEventListener("click", () => ingestTextKnowledge().catch(showError));
+  $("refreshPortfolio").addEventListener("click", () => loadPortfolio().catch(showError));
+}
+
+function init() {
+  bindEvents();
+  switchView("analysis");
+  renderSummaryCards();
+  renderProgress(null, {});
+  renderPortfolio({
+    available: false,
+    mode: "simulation",
+    total_value: null,
+    cash: null,
+    cash_weight: null,
+    position_weights: {},
+    error: "点击刷新账户读取 Futu 模拟账户。",
+  });
+  loadSubscriptions().catch(showError);
+  loadRagStatus().catch(showError);
+}
+
+init();
