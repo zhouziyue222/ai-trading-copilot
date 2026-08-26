@@ -33,11 +33,13 @@ from ai_trading_copilot.copilot.domain.enums import (
     AnalystType,
     ExecutionMode,
     MarketType,
+    MemoryStatus,
     SubscriptionStatus,
 )
 from ai_trading_copilot.copilot.domain.models import (
     BrokerExecutionRequest,
     BrokerExecutionResult,
+    RunOutcome,
     Subscription,
     SubscriptionBook,
     normalize_symbol,
@@ -129,6 +131,18 @@ class RagOnlineIngestRequest(BaseModel):
     look_back_days: int = Field(default=7, ge=1, le=60)
 
 
+class MemoryTransitionRequest(BaseModel):
+    status: MemoryStatus
+    actor: str = Field(default="local_user", min_length=1, max_length=100)
+    reason: str = Field(default="manual_review", min_length=1, max_length=500)
+
+
+class MemoryRollbackRequest(BaseModel):
+    version: int = Field(ge=1)
+    actor: str = Field(default="local_user", min_length=1, max_length=100)
+    reason: str = Field(default="manual_rollback", min_length=1, max_length=500)
+
+
 def create_app(settings: UISettings | None = None) -> FastAPI:
     resolved = settings or UISettings()
     static_dir = Path(__file__).resolve().parent / "static"
@@ -213,6 +227,99 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
     @app.get("/api/observability/status")
     def observability_status() -> dict:
         return get_observability_status()
+
+    @app.get("/api/memories")
+    def list_memories(status: Optional[MemoryStatus] = None, symbol: str | None = None) -> dict:
+        agent = _memory_agent(resolved, auto_ingest_seed=False)
+        statuses = [status] if status is not None else None
+        items = agent.list_memories(statuses=statuses, symbol=symbol)
+        return {
+            "database_path": str(resolved.memory_file.with_suffix(".sqlite3")),
+            "counts": agent.store.repository.counts_by_status(),
+            "items": [item.model_dump(mode="json") for item in items],
+        }
+
+    @app.get("/api/memories/{memory_id}")
+    def get_memory(memory_id: str) -> dict:
+        agent = _memory_agent(resolved, auto_ingest_seed=False)
+        memory = agent.store.repository.get(memory_id)
+        if memory is None:
+            raise HTTPException(status_code=404, detail="memory not found")
+        evaluation = agent.store.repository.latest_evaluation(memory_id)
+        return {
+            "item": memory.model_dump(mode="json"),
+            "versions": [
+                item.model_dump(mode="json")
+                for item in agent.store.repository.versions(memory_id)
+            ],
+            "evaluation": evaluation.model_dump(mode="json") if evaluation else None,
+        }
+
+    @app.post("/api/memories/{memory_id}/transition")
+    def transition_memory(memory_id: str, request: MemoryTransitionRequest) -> dict:
+        agent = _memory_agent(resolved, auto_ingest_seed=False)
+        try:
+            if request.status == MemoryStatus.APPROVED:
+                if agent.evaluator is None:
+                    raise ValueError("memory evaluator is unavailable")
+                memory = agent.evaluator.promote(
+                    memory_id,
+                    actor=request.actor,
+                    reason=request.reason,
+                )
+            else:
+                memory = agent.transition(
+                    memory_id,
+                    request.status,
+                    actor=request.actor,
+                    reason=request.reason,
+                )
+            agent.store.repository.export_jsonl(resolved.memory_file)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"item": memory.model_dump(mode="json")}
+
+    @app.post("/api/memories/{memory_id}/evaluate")
+    def evaluate_memory(memory_id: str) -> dict:
+        agent = _memory_agent(resolved, auto_ingest_seed=False)
+        try:
+            if agent.evaluator is None:
+                raise ValueError("memory evaluator is unavailable")
+            evaluation = agent.evaluator.evaluate(memory_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"evaluation": evaluation.model_dump(mode="json")}
+
+    @app.post("/api/memories/{memory_id}/rollback")
+    def rollback_memory(memory_id: str, request: MemoryRollbackRequest) -> dict:
+        agent = _memory_agent(resolved, auto_ingest_seed=False)
+        try:
+            memory = agent.store.repository.rollback(
+                memory_id,
+                request.version,
+                actor=request.actor,
+                reason=request.reason,
+            )
+            agent.store.repository.export_jsonl(resolved.memory_file)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"item": memory.model_dump(mode="json")}
+
+    @app.post("/api/memory-outcomes")
+    def record_memory_outcome(outcome: RunOutcome) -> dict:
+        agent = _memory_agent(resolved, auto_ingest_seed=False)
+        saved = agent.record_outcome(outcome)
+        return {"outcome": saved.model_dump(mode="json")}
+
+    @app.post("/api/memories/export")
+    def export_memories() -> dict:
+        agent = _memory_agent(resolved, auto_ingest_seed=False)
+        path = agent.store.repository.export_jsonl(resolved.memory_file)
+        return {"path": str(path), "counts": agent.store.repository.counts_by_status()}
 
     @app.post("/api/rag/ingest-defaults")
     def rag_ingest_defaults() -> dict:
@@ -905,17 +1012,24 @@ def _run_copilot_job(
                 memory_file,
                 rag_chroma_dir=rag_chroma_dir or memory_file.parent / "rag_chroma",
             )
+        memory_agent = create_default_memory_agent(
+            memory_file,
+            rag_chroma_dir=rag_chroma_dir or memory_file.parent / "rag_chroma",
+        )
         graph = _create_graph(
             graph_cls,
             run_tracker=tracker,
-            memory_agent=create_default_memory_agent(
-                memory_file,
-                rag_chroma_dir=rag_chroma_dir or memory_file.parent / "rag_chroma",
-            ),
+            memory_agent=memory_agent,
             fundamental_rag_retriever=fundamental_rag_retriever,
             cancellation_checker=lambda: cancel_event.is_set() or tracker.is_cancel_requested(),
         )
         state = graph.run(**params)
+        try:
+            candidates = memory_agent.learn_from_run(state)
+            if candidates:
+                state["memory_candidates"] = candidates
+        except Exception as learning_error:
+            tracker.add_error(f"memory reflection skipped: {learning_error}")
     except RunCancelled as exc:
         cancelled = True
         error = exc

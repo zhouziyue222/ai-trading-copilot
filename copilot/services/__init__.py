@@ -4,6 +4,14 @@ from .fundamental_research import (
     create_fundamental_research_retriever,
 )
 from .memory_store import DistilledMemoryStore
+from .memory_repository import MemoryRepository, SQLiteMemoryRepository
+from .memory_learning import (
+    LangMemCandidateExtractor,
+    MemoryReflector,
+    MemorySkillManager,
+    PostRunLearningService,
+)
+from .memory_evaluation import MemoryPromotionPolicy, MemoryShadowEvaluator
 from .rag_store import (
     ChromaRagStore,
     FundamentalRagStore,
@@ -21,6 +29,14 @@ from .vector_memory import HashingTextEmbedder, LocalVectorMemoryIndex
 
 __all__ = [
     "DistilledMemoryStore",
+    "MemoryRepository",
+    "SQLiteMemoryRepository",
+    "LangMemCandidateExtractor",
+    "MemoryReflector",
+    "MemorySkillManager",
+    "PostRunLearningService",
+    "MemoryPromotionPolicy",
+    "MemoryShadowEvaluator",
     "ChromaRagStore",
     "FundamentalRagStore",
     "FundamentalResearchRetriever",

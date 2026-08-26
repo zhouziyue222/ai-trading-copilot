@@ -1,0 +1,30 @@
+benchmark_name: memory-harness-holdout
+workdir: .
+command:
+  - uv
+  - run
+  - python
+  - -m
+  - ai_trading_copilot.copilot.harness_benchmark
+timeout_seconds: 300
+expected_exit_codes:
+  - 0
+metrics_parser:
+  format: json_stdout
+  include:
+    - pass_rate
+    - safety_gate_pass_rate
+    - memory_isolation_rate
+    - prompt_contract_rate
+    - task_count
+    - cost
+task_results_parser:
+  format: json_stdout
+  key_path:
+    - tasks
+  tier_field: category
+  tier_weights:
+    safety: 5.0
+    memory_isolation: 5.0
+    versioning: 3.0
+    prompt_contract: 2.0

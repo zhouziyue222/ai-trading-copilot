@@ -28,6 +28,7 @@
       <button class="nav-button active" type="button" data-view="analysis">股票分析</button>
       <button class="nav-button" type="button" data-view="watchlist">我的自选股</button>
       <button class="nav-button" type="button" data-view="rag">RAG 知识库</button>
+      <button class="nav-button" type="button" data-view="memory">记忆审批</button>
       <button class="nav-button" type="button" data-view="portfolio">模拟账户概况</button>
     </nav>
 
@@ -298,6 +299,70 @@
             </div>
           </section>
         </div>
+      </section>
+
+      <section class="view" id="view-memory" aria-labelledby="memoryTitle">
+        <div class="view-header">
+          <div>
+            <p class="eyebrow">Memory Harness</p>
+            <h2 id="memoryTitle">记忆审批与影子评测</h2>
+          </div>
+          <div class="view-actions">
+            <select id="memoryStatusFilter" aria-label="记忆状态筛选">
+              <option value="">全部状态</option>
+              <option value="candidate">Candidate</option>
+              <option value="shadow">Shadow</option>
+              <option value="approved">Approved</option>
+              <option value="deprecated">Deprecated</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <button id="refreshMemories" class="ghost-button" type="button">刷新</button>
+          </div>
+        </div>
+
+        <div id="memoryCounts" class="summary-grid"></div>
+        <div id="memoryFeedback" class="errors"></div>
+        <section class="panel">
+          <div class="section-heading">
+            <h3>生命周期队列</h3>
+            <span>只有 Approved 会进入生产 Prompt；Shadow 只记录命中</span>
+          </div>
+          <div class="table-wrap">
+            <table class="decision-table memory-table">
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>范围</th>
+                  <th>标的</th>
+                  <th>记忆</th>
+                  <th>证据</th>
+                  <th>置信度</th>
+                  <th>版本</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="memoryRows">
+                <tr><td colspan="8" class="empty-cell">正在加载记忆系统。</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel memory-outcome-panel">
+          <div class="section-heading">
+            <h3>登记延迟市场结果</h3>
+            <span>用于 Shadow 门禁，不会回写当时的分析输入</span>
+          </div>
+          <form id="memoryOutcomeForm" class="field-row memory-outcome-form">
+            <label>Run ID<input id="outcomeRunId" required placeholder="run_AAPL_..." /></label>
+            <label>标的<input id="outcomeSymbol" required placeholder="AAPL" /></label>
+            <label>周期（日）<input id="outcomeHorizon" type="number" min="1" value="5" /></label>
+            <label>实际收益<input id="outcomeReturn" type="number" step="0.0001" placeholder="0.032" /></label>
+            <label>基准收益<input id="outcomeBenchmark" type="number" step="0.0001" placeholder="0.011" /></label>
+            <label>最大回撤<input id="outcomeDrawdown" type="number" step="0.0001" placeholder="-0.045" /></label>
+            <button type="submit">保存结果</button>
+          </form>
+        </section>
       </section>
 
       <section class="view" id="view-portfolio" aria-labelledby="portfolioTitle">

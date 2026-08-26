@@ -586,6 +586,8 @@ class CopilotLangGraph:
 
     def _retrieve_memories(self, state: CopilotGraphState) -> CopilotGraphState:
         memories: Dict[str, List[DistilledMemory]] = {}
+        shadow_memories: Dict[str, List[DistilledMemory]] = {}
+        run_id = state.get("run_id")
         if self.memory_agent is not None:
             for symbol in state["subscription_symbols"]:
                 tags = _memory_tags_for_state(state)
@@ -595,11 +597,20 @@ class CopilotLangGraph:
                     tags=tags,
                     query=query,
                     limit=5,
+                    run_id=run_id,
+                )
+                shadow_memories[symbol] = self.memory_agent.retrieve_shadow_context(
+                    symbol=symbol,
+                    tags=tags,
+                    query=query,
+                    limit=5,
+                    run_id=run_id,
                 )
         total = sum(len(items) for items in memories.values())
-        updates = {"memories": memories}
+        shadow_total = sum(len(items) for items in shadow_memories.values())
+        updates = {"memories": memories, "shadow_memories": shadow_memories}
         if self.memory_agent is not None:
-            content = _format_memory_report(memories)
+            content = _format_memory_report(memories, shadow_memories=shadow_memories)
             updates["agent_reports"] = {
                 "post_trade_review_learning": self._save_agent_report(
                     state=state,
@@ -613,8 +624,16 @@ class CopilotLangGraph:
             TraceEvent(
                 node_name=self.NODE_RETRIEVE_MEMORIES,
                 input_summary=f"symbols={state['subscription_symbols']}",
-                output_summary=f"retrieved_context_items={total}",
-                route_reason="Inject distilled trade memories from JSONL, capped at 5 per symbol.",
+                output_summary=(
+                    f"approved_context_items={total}; "
+                    f"shadow_observation_items={shadow_total}; "
+                    f"approved_ids={_memory_ids(memories)}; "
+                    f"shadow_ids={_memory_ids(shadow_memories)}"
+                ),
+                route_reason=(
+                    "Inject only approved SQLite memories, capped at 5 per symbol; "
+                    "shadow memories are logged for evaluation and never enter prompts."
+                ),
             ),
             **updates,
         )
@@ -1607,7 +1626,11 @@ def _downstream_context_lines(symbol: str, item) -> List[str]:
     return lines + [""]
 
 
-def _format_memory_report(memories: Dict[str, List[DistilledMemory]]) -> str:
+def _format_memory_report(
+    memories: Dict[str, List[DistilledMemory]],
+    *,
+    shadow_memories: Dict[str, List[DistilledMemory]] | None = None,
+) -> str:
     lines = ["# Trading Memory Retrieval Report", ""]
     if not memories:
         lines.append("No relevant trading memories were retrieved.")
@@ -1618,9 +1641,32 @@ def _format_memory_report(memories: Dict[str, List[DistilledMemory]]) -> str:
             lines.append("- No relevant trading memories were retrieved.")
         for item in items:
             suffix = _memory_source_suffix(item)
-            lines.append(f"- {item.memory_type.value}: {item.lesson}{suffix}")
+            lines.append(
+                f"- `{item.memory_id}@{item.version}` {item.memory_type.value}: "
+                f"{item.lesson}{suffix}"
+            )
         lines.append("")
+    if shadow_memories:
+        lines.extend(
+            [
+                "# Shadow Memory Observations",
+                "",
+                "These items were measured but were not injected into any agent prompt.",
+                "",
+            ]
+        )
+        for symbol, items in sorted(shadow_memories.items()):
+            for item in items:
+                lines.append(f"- {symbol}: `{item.memory_id}@{item.version}`")
     return "\n".join(lines)
+
+
+def _memory_ids(memories: Dict[str, List[DistilledMemory]]) -> List[str]:
+    return [
+        f"{item.memory_id}@{item.version}"
+        for symbol in sorted(memories)
+        for item in memories[symbol]
+    ]
 
 
 def _memory_context_for_symbol(state: CopilotGraphState, symbol: str) -> str:

@@ -19,6 +19,41 @@ class MemoryType(str, Enum):
     SYMBOL_CHARACTERISTIC = "symbol_characteristic"
 
 
+class MemoryKind(str, Enum):
+    """How a memory is used by the copilot."""
+
+    USER_PROFILE = "user_profile"
+    EPISODIC = "episodic"
+    PROCEDURAL = "procedural"
+    SEMANTIC = "semantic"
+
+
+class MemoryStatus(str, Enum):
+    """Lifecycle state. Only approved memories may affect production context."""
+
+    CANDIDATE = "candidate"
+    SHADOW = "shadow"
+    APPROVED = "approved"
+    DEPRECATED = "deprecated"
+    REJECTED = "rejected"
+
+
+class MemoryScope(str, Enum):
+    GLOBAL = "global"
+    USER = "user"
+    SYMBOL = "symbol"
+    STRATEGY = "strategy"
+    MARKET_REGIME = "market_regime"
+
+
+class MemoryValidationTarget(str, Enum):
+    """Outcome direction a shadow memory claims and must validate."""
+
+    OUTPERFORM = "outperform"
+    UNDERPERFORM = "underperform"
+    RISK_REDUCTION = "risk_reduction"
+
+
 class AnalystType(str, Enum):
     OPPORTUNITY_RADAR = "opportunity_radar"
     TECHNICAL_POSITION = "technical_position"

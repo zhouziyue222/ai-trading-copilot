@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Iterable, List
 
 from ai_trading_copilot.copilot.agents import PostTradeReviewLearningAgent
-from ai_trading_copilot.copilot.config import DEFAULT_REPORT_OUTPUT_DIR
+from ai_trading_copilot.copilot.config import (
+    DEFAULT_REPORT_OUTPUT_DIR,
+    create_default_deepseek_llm,
+)
 from ai_trading_copilot.copilot.config.defaults import DEFAULT_PERSONA_CONFIG
 from ai_trading_copilot.copilot.domain.enums import AnalystType, ExecutionMode
 from ai_trading_copilot.copilot.graph import CopilotLangGraph
@@ -19,6 +22,16 @@ from ai_trading_copilot.copilot.services.fundamental_research import (
     FundamentalResearchRetriever,
 )
 from ai_trading_copilot.copilot.services.memory_store import DistilledMemoryStore
+from ai_trading_copilot.copilot.services.memory_learning import (
+    LangMemCandidateExtractor,
+    MemoryReflector,
+    MemorySkillManager,
+    PostRunLearningService,
+)
+from ai_trading_copilot.copilot.services.memory_evaluation import (
+    MemoryPromotionPolicy,
+    MemoryShadowEvaluator,
+)
 from ai_trading_copilot.copilot.services.rag_store import FundamentalRagStore
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
 from ai_trading_copilot.copilot.services.subscription_service import SubscriptionStore
@@ -71,10 +84,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         defaults=defaults,
         nodes=CopilotLangGraph.NODE_ORDER,
     )
+    memory_agent = create_default_memory_agent()
     graph = _create_graph(
         CopilotLangGraph,
         run_tracker=tracker,
-        memory_agent=create_default_memory_agent(),
+        memory_agent=memory_agent,
         fundamental_rag_retriever=(
             create_default_fundamental_research_retriever()
             if _enable_fundamental_rag()
@@ -86,6 +100,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     error = None
     try:
         state = graph.run(**params)
+        if not args.no_memory_learning:
+            try:
+                candidates = memory_agent.learn_from_run(state)
+                if candidates:
+                    state["memory_candidates"] = candidates
+            except Exception as learning_error:
+                tracker.add_error(f"memory reflection skipped: {learning_error}")
     except Exception as exc:  # pragma: no cover - exercised by integration style tests
         error = exc
         tracker.add_error(str(exc))
@@ -160,6 +181,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         "--portfolio-mode",
         choices=[ExecutionMode.SIMULATION.value, ExecutionMode.LIVE.value],
         default=ExecutionMode.SIMULATION.value,
+    )
+    parser.add_argument(
+        "--no-memory-learning",
+        action="store_true",
+        help="Skip post-run LangMem candidate extraction for this run.",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -319,7 +345,30 @@ def create_default_memory_agent(
     auto_ingest_seed: bool = True,
 ) -> PostTradeReviewLearningAgent:
     memory_path = Path(path)
-    return PostTradeReviewLearningAgent(DistilledMemoryStore(memory_path))
+    store = DistilledMemoryStore(memory_path)
+    extractor = LangMemCandidateExtractor(create_default_deepseek_llm())
+    learning_service = PostRunLearningService(
+        MemoryReflector(extractor),
+        MemorySkillManager(store),
+    )
+    evaluator = (
+        MemoryShadowEvaluator(
+            store.repository,
+            MemoryPromotionPolicy(
+                allow_auto_promotion=os.getenv(
+                    "COPILOT_MEMORY_AUTO_PROMOTE", ""
+                ).strip().lower()
+                in {"1", "true", "yes", "on"}
+            ),
+        )
+        if hasattr(store.repository, "save_evaluation")
+        else None
+    )
+    return PostTradeReviewLearningAgent(
+        store,
+        learning_service=learning_service,
+        evaluator=evaluator,
+    )
 
 
 def create_default_fundamental_research_retriever(

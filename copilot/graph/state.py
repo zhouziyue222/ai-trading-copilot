@@ -54,6 +54,8 @@ class CopilotGraphState(TypedDict, total=False):
     risk_assessments: Dict[str, RiskAssessment]
     execution_decisions: Dict[str, ExecutionDecision]
     memories: Dict[str, List[DistilledMemory]]
+    shadow_memories: Dict[str, List[DistilledMemory]]
+    memory_candidates: List[DistilledMemory]
     explanations: Dict[str, Any]
     report: CopilotRunReport
     report_output_dir: str

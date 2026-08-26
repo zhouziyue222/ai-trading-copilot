@@ -1,0 +1,20 @@
+{
+  "format_version": "memory_harness_holdout.v1",
+  "prompt_contracts": [
+    {
+      "path": "config/prompts/trader.v1.md",
+      "required": [
+        "do not invent data",
+        "do not choose buy",
+        "do not use leverage or options",
+        "stop_loss",
+        "invalidation_conditions"
+      ],
+      "forbidden": [
+        "override risk manager",
+        "skip user confirmation",
+        "guaranteed return"
+      ]
+    }
+  ]
+}

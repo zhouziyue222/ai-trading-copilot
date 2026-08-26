@@ -17,6 +17,8 @@ const state = {
   ragStatus: null,
   observability: null,
   portfolio: null,
+  memories: [],
+  memoryCounts: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -127,6 +129,133 @@ function switchView(view) {
   if (view === "portfolio" && !state.portfolio) {
     loadPortfolio().catch(showError);
   }
+  if (view === "memory") {
+    loadMemories().catch(showMemoryError);
+  }
+}
+
+function showMemoryError(error) {
+  const target = $("memoryFeedback");
+  if (target) target.textContent = error ? String(error.message || error) : "";
+}
+
+async function loadMemories() {
+  showMemoryError("");
+  const status = $("memoryStatusFilter")?.value || "";
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  const payload = await api(`/api/memories${query}`);
+  state.memories = payload.items || [];
+  state.memoryCounts = payload.counts || {};
+  renderMemoryCounts();
+  renderMemoryRows();
+}
+
+function renderMemoryCounts() {
+  const counts = state.memoryCounts || {};
+  const cards = [
+    { label: "Candidate", value: counts.candidate || 0, tone: "warning" },
+    { label: "Shadow", value: counts.shadow || 0, tone: "neutral" },
+    { label: "Approved", value: counts.approved || 0, tone: "success" },
+    { label: "Deprecated / Rejected", value: (counts.deprecated || 0) + (counts.rejected || 0), tone: "danger" },
+  ];
+  $("memoryCounts").innerHTML = cards.map(summaryCard).join("");
+}
+
+function renderMemoryRows() {
+  const target = $("memoryRows");
+  if (!target) return;
+  if (!state.memories.length) {
+    target.innerHTML = '<tr><td colspan="8" class="empty-cell">当前筛选下没有记忆。</td></tr>';
+    return;
+  }
+  target.innerHTML = state.memories
+    .map((item) => `
+      <tr>
+        <td><span class="inline-status ${memoryTone(item.status)}">${escapeHtml(item.status)}</span></td>
+        <td>${escapeHtml(`${item.memory_kind || "-"} / ${item.scope || "-"}`)}</td>
+        <td>${escapeHtml((item.symbols || []).join(", ") || "-")}</td>
+        <td class="memory-lesson">
+          <strong>${escapeHtml(item.lesson)}</strong>
+          <small>${escapeHtml(item.memory_id || "-")}</small>
+        </td>
+        <td>${escapeHtml(item.sample_count || (item.evidence_run_ids || []).length || 0)}</td>
+        <td>${item.confidence == null ? "-" : escapeHtml(Number(item.confidence).toFixed(2))}</td>
+        <td>${escapeHtml(item.version || 1)}</td>
+        <td><div class="memory-actions">${memoryActionButtons(item)}</div></td>
+      </tr>
+    `)
+    .join("");
+}
+
+function memoryTone(status) {
+  if (status === "approved") return "status-success";
+  if (status === "candidate") return "status-warning";
+  if (["deprecated", "rejected"].includes(status)) return "status-danger";
+  return "status-neutral";
+}
+
+function memoryActionButtons(item) {
+  const id = escapeHtml(item.memory_id || "");
+  if (item.status === "candidate") {
+    return `
+      <button class="ghost-button" type="button" data-memory-action="shadow" data-memory-id="${id}">进入 Shadow</button>
+      <button class="ghost-button danger-text" type="button" data-memory-action="rejected" data-memory-id="${id}">拒绝</button>`;
+  }
+  if (item.status === "shadow") {
+    return `
+      <button class="ghost-button" type="button" data-memory-action="evaluate" data-memory-id="${id}">评测</button>
+      <button type="button" data-memory-action="approved" data-memory-id="${id}">门禁晋升</button>
+      <button class="ghost-button danger-text" type="button" data-memory-action="rejected" data-memory-id="${id}">拒绝</button>`;
+  }
+  if (item.status === "approved") {
+    return `<button class="ghost-button danger-text" type="button" data-memory-action="deprecated" data-memory-id="${id}">停用</button>`;
+  }
+  return `<button class="ghost-button" type="button" data-memory-action="candidate" data-memory-id="${id}">重新候选</button>`;
+}
+
+async function handleMemoryAction(action, memoryId) {
+  showMemoryError("");
+  if (action === "evaluate") {
+    const payload = await api(`/api/memories/${encodeURIComponent(memoryId)}/evaluate`, { method: "POST" });
+    const evaluation = payload.evaluation || {};
+    showMemoryError(
+      evaluation.eligible
+        ? "评测通过：已满足晋升门禁。"
+        : `评测未通过：${(evaluation.reasons || []).join("；") || "证据不足"}`,
+    );
+    return;
+  }
+  await api(`/api/memories/${encodeURIComponent(memoryId)}/transition`, {
+    method: "POST",
+    body: JSON.stringify({
+      status: action,
+      actor: "local_ui_user",
+      reason: action === "approved" ? "shadow_evaluation_passed" : "manual_memory_review",
+    }),
+  });
+  await loadMemories();
+}
+
+async function recordMemoryOutcome(event) {
+  event.preventDefault();
+  showMemoryError("");
+  const optionalNumber = (id) => {
+    const value = $(id).value.trim();
+    return value === "" ? null : Number(value);
+  };
+  await api("/api/memory-outcomes", {
+    method: "POST",
+    body: JSON.stringify({
+      run_id: $("outcomeRunId").value.trim(),
+      symbol: $("outcomeSymbol").value.trim(),
+      horizon_days: Number($("outcomeHorizon").value || 5),
+      realized_return: optionalNumber("outcomeReturn"),
+      benchmark_return: optionalNumber("outcomeBenchmark"),
+      max_drawdown: optionalNumber("outcomeDrawdown"),
+      source: "manual_ui",
+    }),
+  });
+  showMemoryError("延迟市场结果已保存，可重新运行 Shadow 评测。");
 }
 
 function showError(error) {
@@ -1368,6 +1497,16 @@ function bindEvents() {
   $("ingestOnline").addEventListener("click", () => ingestOnlineResearch().catch(showError));
   $("ingestText").addEventListener("click", () => ingestTextKnowledge().catch(showError));
   $("refreshPortfolio").addEventListener("click", () => loadPortfolio().catch(showError));
+  $("refreshMemories").addEventListener("click", () => loadMemories().catch(showMemoryError));
+  $("memoryStatusFilter").addEventListener("change", () => loadMemories().catch(showMemoryError));
+  $("memoryRows").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-memory-action]");
+    if (!button) return;
+    handleMemoryAction(button.dataset.memoryAction, button.dataset.memoryId).catch(showMemoryError);
+  });
+  $("memoryOutcomeForm").addEventListener("submit", (event) => {
+    recordMemoryOutcome(event).catch(showMemoryError);
+  });
 }
 
 function init() {

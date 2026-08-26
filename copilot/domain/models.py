@@ -12,7 +12,11 @@ from .enums import (
     ExecutionMode,
     ExecutionStatus,
     ForbiddenInstrument,
+    MemoryKind,
+    MemoryScope,
+    MemoryStatus,
     MemoryType,
+    MemoryValidationTarget,
     MarketRegime,
     MarketType,
     SymbolTrendState,
@@ -420,16 +424,43 @@ class ExecutionDecision(BaseModel):
 
 
 class DistilledMemory(BaseModel):
-    """Compact, retrieval-oriented trading lesson."""
+    """Versioned, retrieval-oriented trading lesson.
 
+    Legacy JSONL entries remain valid: they default to ``approved`` so a
+    migration does not silently change existing production behaviour.
+    Newly reflected memories must explicitly be created as ``candidate``.
+    """
+
+    memory_id: str = ""
     memory_type: MemoryType
+    memory_kind: MemoryKind = MemoryKind.PROCEDURAL
+    status: MemoryStatus = MemoryStatus.APPROVED
+    scope: MemoryScope = MemoryScope.SYMBOL
+    validation_target: MemoryValidationTarget = MemoryValidationTarget.OUTPERFORM
     lesson: str = Field(min_length=1, max_length=500)
+    trigger: str = Field(default="", max_length=300)
+    rationale: str = Field(default="", max_length=500)
     symbols: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
+    market_regimes: List[str] = Field(default_factory=list)
+    timeframes: List[str] = Field(default_factory=list)
     source_run_id: Optional[str] = None
     source_path: Optional[str] = None
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+    last_validated_at: Optional[str] = None
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    version: int = Field(default=1, ge=1)
+    supersedes: Optional[str] = None
+    evidence_run_ids: List[str] = Field(default_factory=list)
+    counter_evidence_run_ids: List[str] = Field(default_factory=list)
+    sample_count: int = Field(default=0, ge=0)
+    outcome_metrics: Dict[str, float] = Field(default_factory=dict)
+    created_by: str = "system"
+    approved_by: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("symbols")
     @classmethod
@@ -440,6 +471,58 @@ class DistilledMemory(BaseModel):
     @classmethod
     def normalize_tags(cls, value: List[str]) -> List[str]:
         return sorted({tag.strip().lower() for tag in value if tag.strip()})
+
+    @field_validator("market_regimes", "timeframes", "evidence_run_ids", "counter_evidence_run_ids")
+    @classmethod
+    def normalize_string_lists(cls, value: List[str]) -> List[str]:
+        return sorted({item.strip().lower() for item in value if item.strip()})
+
+
+class RunOutcome(BaseModel):
+    """Delayed market outcome used to validate memories without hindsight leakage."""
+
+    run_id: str = Field(min_length=1)
+    symbol: str = Field(min_length=1)
+    horizon_days: int = Field(default=5, gt=0)
+    evaluated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    realized_return: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    max_favorable_excursion: Optional[float] = None
+    benchmark_return: Optional[float] = None
+    stopped_out: Optional[bool] = None
+    source: str = "manual"
+    notes: str = Field(default="", max_length=1000)
+    recorded_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_outcome_symbol(cls, value: str) -> str:
+        normalized = normalize_symbol(value)
+        if not normalized:
+            raise ValueError("symbol is required")
+        return normalized
+
+
+class MemoryEvaluation(BaseModel):
+    """Auditable shadow-evaluation result for a candidate memory."""
+
+    memory_id: str
+    memory_version: int
+    eligible: bool = False
+    passed_safety_gate: bool = False
+    evidence_runs: int = 0
+    outcome_samples: int = 0
+    mean_realized_return: Optional[float] = None
+    mean_excess_return: Optional[float] = None
+    worst_drawdown: Optional[float] = None
+    reasons: List[str] = Field(default_factory=list)
+    evaluated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
 
 class RagDocument(BaseModel):
@@ -509,6 +592,7 @@ __all__ = [
     "ClampEvent",
     "CopilotRunReport",
     "DistilledMemory",
+    "MemoryEvaluation",
     "ExecutionDecision",
     "FundamentalAnalysisReport",
     "MarketRegimeReport",
@@ -519,6 +603,7 @@ __all__ = [
     "RagDocument",
     "RiskAssessment",
     "RiskLimits",
+    "RunOutcome",
     "Subscription",
     "SubscriptionBook",
     "SymbolTrendState",

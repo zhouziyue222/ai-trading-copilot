@@ -16,6 +16,8 @@ Implemented MVP slices:
 - Fundamental-only Chroma RAG knowledge base with OpenAI embeddings, BM25 keyword recall, RRF fusion, rerank, and structured semantic parent-child chunking
 - Futu/yfinance market data adapters and OHLCV CSV parsing
 - End-to-end subscription opportunity workflow
+- Versioned SQLite memory lifecycle with LangMem reflection, shadow evaluation, manual approval, and rollback
+- Bounded Autoharness prompt optimization with fixed holdout and Git promotion gates
 
 Install:
 
@@ -79,15 +81,14 @@ ai-trading-copilot CRCL --analysts news_sentiment,technical_position,fundamental
 ai-trading-copilot CRCL --select-analysts
 ```
 
-RAG memory:
+Memory and RAG:
 
-The copilot reads optional distilled trading memories from `config/memory.jsonl`
-and stores fundamental research chunks in a persistent Chroma database at
-`config/rag_chroma`. OpenAI-compatible embeddings use `OPENAI_API_KEY` or
-`DASHSCOPE_API_KEY` and default to `text-embedding-v4`. When Chroma or
-embeddings are unavailable, the
-workflow degrades to the JSONL/keyword memory retrieval path instead of blocking
-the analysis.
+The copilot stores versioned trading memories in `config/memory.sqlite3`.
+Legacy `config/memory.jsonl` entries are migrated automatically; JSONL is now an
+audit/export format. Post-run LangMem reflection creates `candidate` memories,
+shadow memories are measured without prompt injection, and only `approved`
+memories can be retrieved by production agents. Fundamental research remains in
+the persistent Chroma database at `config/rag_chroma`.
 
 Retrieval uses a hybrid RAG pipeline: the original request is rewritten by the
 available LLM, expanded into base/risk/technical/fundamental queries, sent
@@ -99,6 +100,22 @@ Example line:
 
 ```json
 {"memory_type":"strategy_performance","lesson":"Wait for support confirmation before adding size on AAPL pullbacks.","symbols":["AAPL"],"tags":["pullback","risk"],"source_run_id":"run_AAPL_20260514_090000","source_path":"reports/run_AAPL_20260514_090000/run_audit.md","created_at":"2026-05-14T09:00:00+08:00","confidence":0.8}
+```
+
+Memory operations:
+
+```bash
+ai-trading-copilot-memory status
+ai-trading-copilot-memory list --status candidate
+ai-trading-copilot-memory transition MEMORY_ID shadow
+ai-trading-copilot-memory evaluate MEMORY_ID
+```
+
+Run the fixed harness gate or create a path-scoped Git promotion commit:
+
+```bash
+ai-trading-copilot-harness benchmark
+ai-trading-copilot-harness promote
 ```
 
 Seed the default stock-research knowledge base:
@@ -174,6 +191,8 @@ fundamental analyst receives Chroma results as background context; fresh tool
 data and Risk Manager limits remain authoritative inputs to the Portfolio Manager.
 
 See `docs/vector_memory_plan.md` for the vector database design notes.
+See `docs/memory_harness.md` for the complete memory lifecycle, approval,
+delayed-outcome, Autoharness, and rollback workflow.
 
 Safety boundary:
 

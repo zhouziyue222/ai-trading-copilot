@@ -556,6 +556,52 @@ button.secondary:hover:not(:disabled),
   background: var(--surface-soft);
 }
 
+.memory-table {
+  min-width: 1080px;
+}
+
+.memory-lesson {
+  max-width: 420px;
+  min-width: 280px;
+}
+
+.memory-lesson strong,
+.memory-lesson small {
+  display: block;
+}
+
+.memory-lesson strong {
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.memory-lesson small {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-top: 5px;
+}
+
+.memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 190px;
+}
+
+.memory-actions button {
+  font-size: 11px;
+  padding: 7px 9px;
+}
+
+.memory-outcome-panel {
+  margin-top: 12px;
+}
+
+.memory-outcome-form {
+  align-items: end;
+  grid-template-columns: 1.5fr 0.7fr repeat(4, minmax(110px, 0.8fr)) auto;
+}
+
 .progress {
   border-bottom: 1px solid var(--border);
   color: var(--muted);

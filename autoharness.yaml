@@ -1,0 +1,35 @@
+format_version: autoharness.project.v1
+target_root: .
+workspace:
+  id: ai-trading-copilot-memory
+  root: .autoharness/workspaces
+  track_id: memory-prompts
+  objective: Improve memory-aware prompt quality without weakening deterministic trading safety
+  benchmark: memory-harness-holdout
+  domain: trading-agent-memory
+benchmark:
+  adapter: generic_command
+  config: benchmarks/memory-screening.yaml
+  stage: screening
+generator:
+  id: codex_cli
+  intervention_class: prompt
+  options:
+    sandbox: read-only
+campaign:
+  stage: screening
+  generator: codex_cli
+  intervention_classes:
+    - prompt
+  max_iterations: 5
+autonomy:
+  mode: bounded
+  settings_path: .autoharness/settings.yaml
+  editable_surfaces:
+    - config/prompts
+  protected_surfaces:
+    - config/memory_harness_holdout.json
+    - copilot/agents/risk_agent.py
+    - copilot/agents/portfolio_manager.py
+    - copilot/services/memory_evaluation.py
+    - tests

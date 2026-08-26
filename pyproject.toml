@@ -15,6 +15,7 @@ dependencies = [
     "langchain-core>=0.3.81",
     "langchain-openai>=0.3.23",
     "langgraph>=0.4.8",
+    "langmem>=0.0.30",
     "opentelemetry-api>=1.44.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
@@ -45,6 +46,9 @@ ai-trading-copilot = "ai_trading_copilot.copilot.run:main"
 ai-trading-copilot-ui = "ai_trading_copilot.copilot.ui.server:main"
 ai-trading-copilot-rag = "ai_trading_copilot.copilot.rag:main"
 ai-trading-copilot-eval = "ai_trading_copilot.copilot.evaluation:main"
+ai-trading-copilot-memory = "ai_trading_copilot.copilot.memory:main"
+ai-trading-copilot-harness-benchmark = "ai_trading_copilot.copilot.harness_benchmark:main"
+ai-trading-copilot-harness = "ai_trading_copilot.copilot.harness_control:main"
 
 [tool.setuptools]
 package-dir = { "ai_trading_copilot" = "." }
