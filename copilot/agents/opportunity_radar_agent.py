@@ -19,6 +19,7 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
+from ai_trading_copilot.copilot.config.prompts import render_prompt
 from ai_trading_copilot.copilot.domain.enums import SubscriptionStatus, SymbolTrendState
 from ai_trading_copilot.copilot.domain.models import (
     OpportunityRadarItem,
@@ -92,32 +93,16 @@ class OpportunityRadarAgent:
             ],
             tool_result_cache=tool_result_cache,
         )
-        prompt = (
-            "You are the Opportunity Radar analyst for an AI trading copilot. "
-            "Your role mirrors TradingAgents' market analyst, but narrowed to one job: "
-            "decide whether this subscribed symbol is worth escalating as an entry setup. "
-            "Use Futu stock information, price data, and indicators only. Prefer a clear "
-            "stance over a broad market essay.\n\n"
-            "高效报告格式：\n"
-            "1. 结论：用一句话说明机会状态和原因。\n"
-            "2. 证据：2-4 条来自工具的具体价格/趋势事实。\n"
-            "3. 观察/否决原因：说明改善或失效该设置的单一关键条件。\n"
-            "4. 缺失数据：列出不可用的工具证据，不要用猜测补全。\n\n"
-            "Do not repeat raw tool output. Do not discuss non-subscribed symbols. "
-            "Write the entire Markdown report and all JSON string values in Simplified Chinese. "
-            "Enum values such as status and trend_state must still use the allowed English values. "
-            "Return the Markdown report followed by one JSON object with keys: status, trend_state, reason, "
-            "current_price, support_level, reward_risk_ratio, trend_reason. "
-            "Allowed status values: observing, near_opportunity, actionable, "
-            "risk_elevated, not_compatible. Allowed trend_state values: uptrend, "
-            "downtrend, uptrend_pullback, unknown. JSON must be the final object in the response.\n\n"
-            f"Symbol: {symbol}\n"
-            f"Date window: {start_date} to {end_date}\n"
-            f"Fallback classification: status={fallback.status.value}, "
-            f"trend={fallback.trend_state.value if fallback.trend_state else 'unknown'}, "
-            f"reason={fallback.reason}\n"
-            f"Available tools: {tool_names(tools)}\n\n"
-            f"Prefetched tool evidence:\n{evidence_result.prefetched_evidence or '-'}"
+        prompt = render_prompt(
+            "opportunity_radar.v1",
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            fallback_status=fallback.status.value,
+            fallback_trend=fallback.trend_state.value if fallback.trend_state else "unknown",
+            fallback_reason=fallback.reason,
+            available_tools=tool_names(tools),
+            tool_evidence=evidence_result.prefetched_evidence or "-",
         )
         react_result = runner.run(prompt=prompt, tool_result_cache=tool_result_cache)
         content = react_result.content

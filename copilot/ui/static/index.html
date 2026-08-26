@@ -12,7 +12,7 @@
         <div class="brand-mark">AI</div>
         <div class="brand-copy">
           <h1>AI Trading Copilot</h1>
-          <p>股票分析 / 自选股管理 / 模拟账户概况</p>
+          <p>股票分析 / 自选股管理 / RAG 知识库 / 模拟账户</p>
         </div>
       </div>
       <div class="shell-actions">
@@ -27,6 +27,7 @@
     <nav class="page-nav" aria-label="主页面">
       <button class="nav-button active" type="button" data-view="analysis">股票分析</button>
       <button class="nav-button" type="button" data-view="watchlist">我的自选股</button>
+      <button class="nav-button" type="button" data-view="rag">RAG 知识库</button>
       <button class="nav-button" type="button" data-view="portfolio">模拟账户概况</button>
     </nav>
 
@@ -39,6 +40,7 @@
           </div>
           <div class="view-actions">
             <button id="startRun" type="button">启动分析</button>
+            <button id="cancelRun" class="ghost-button danger-text" type="button" disabled>取消运行</button>
             <button id="refreshRun" class="ghost-button" type="button" disabled>刷新进度</button>
           </div>
         </div>
@@ -107,47 +109,26 @@
                 </select>
               </label>
             </div>
-
-            <section class="rag-box">
-              <div class="section-heading compact-heading">
-                <h3>RAG 知识库</h3>
-                <span id="ragStatus">未加载</span>
-              </div>
-              <div class="rag-actions">
-                <button id="ingestDefaults" class="ghost-button" type="button">导入默认资料</button>
-                <button id="refreshRag" class="ghost-button" type="button">刷新状态</button>
-              </div>
-              <div class="field-row">
-                <label>
-                  在线代码
-                  <input id="ragSymbols" placeholder="AAPL, MSFT" />
-                </label>
-                <label>
-                  天数
-                  <input id="ragLookBackDays" type="number" min="1" max="60" value="7" />
-                </label>
-              </div>
-              <button id="ingestOnline" class="ghost-button" type="button">抓取基本面资料</button>
-              <label>
-                资料标题
-                <input id="ragTitle" placeholder="AAPL earnings note" />
-              </label>
-              <label>
-                标签
-                <input id="ragTags" placeholder="earnings,risk,fundamental_research_note" />
-              </label>
-              <label>
-                新资料
-                <textarea id="ragText" rows="4" placeholder="粘贴财报、业绩会纪要、公司指引或基本面研究摘要"></textarea>
-              </label>
-              <button id="ingestText" class="ghost-button" type="button">写入知识库</button>
-            </section>
           </aside>
 
           <section class="panel results-panel">
+            <div id="runHistory" class="run-history"></div>
             <div id="summaryCards" class="summary-grid"></div>
             <div id="progress" class="progress"></div>
+            <div id="nodeGuide" class="node-guide"></div>
             <div id="errors" class="errors"></div>
+
+            <section class="trace-section">
+              <div class="section-heading">
+                <h3>Trace</h3>
+                <span>节点、工具调用与耗时明细</span>
+              </div>
+              <div id="observabilityStatus" class="observability-status"></div>
+              <div class="trace-layout">
+                <div id="traceTimeline" class="trace-timeline"></div>
+                <pre id="traceDetails" class="trace-details">运行完成后选择一个 trace span 查看详情。</pre>
+              </div>
+            </section>
 
             <section class="decision-section">
               <div class="section-heading">
@@ -244,6 +225,77 @@
               <span id="selectedCount" class="inline-status">已选 0</span>
             </div>
             <div id="subscriptionList" class="list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-rag" aria-labelledby="ragTitlePage">
+        <div class="view-header">
+          <div>
+            <p class="eyebrow">Fundamental RAG</p>
+            <h2 id="ragTitlePage">RAG 知识库</h2>
+          </div>
+          <button id="refreshRag" class="ghost-button" type="button">刷新状态</button>
+        </div>
+
+        <div class="rag-layout">
+          <section class="panel rag-status-panel">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">Status</p>
+                <h3>状态诊断</h3>
+              </div>
+              <span id="ragStatus" class="inline-status">未加载</span>
+            </div>
+            <div id="ragStatusSummary" class="rag-status-summary"></div>
+            <div id="ragDiagnostics" class="diagnostic-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">Ingest</p>
+                <h3>资料导入</h3>
+              </div>
+            </div>
+            <div class="rag-actions">
+              <button id="ingestDefaults" type="button">导入默认资料</button>
+              <button id="ingestOnline" class="ghost-button" type="button">抓取基本面资料</button>
+            </div>
+            <div class="field-row">
+              <label>
+                在线代码
+                <input id="ragSymbols" placeholder="AAPL, MSFT" />
+              </label>
+              <label>
+                天数
+                <input id="ragLookBackDays" type="number" min="1" max="60" value="7" />
+              </label>
+            </div>
+          </section>
+
+          <section class="panel rag-manual-panel">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">Manual Note</p>
+                <h3>手动写入</h3>
+              </div>
+            </div>
+            <div class="stack">
+              <label>
+                资料标题
+                <input id="ragTitle" placeholder="AAPL earnings note" />
+              </label>
+              <label>
+                标签
+                <input id="ragTags" placeholder="earnings,risk,fundamental_research_note" />
+              </label>
+              <label>
+                新资料
+                <textarea id="ragText" rows="8" placeholder="粘贴财报、业绩会纪要、公司指引或基本面研究摘要"></textarea>
+              </label>
+              <button id="ingestText" type="button">写入知识库</button>
+            </div>
           </section>
         </div>
       </section>

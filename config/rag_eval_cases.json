@@ -1,0 +1,115 @@
+[
+  {
+    "name": "micron_hbm4_supply_booked",
+    "user_input": "What does the reviewed Yahoo Finance research say about Micron HBM4 supply in calendar 2026?",
+    "symbol": "MU",
+    "tags": ["hbm", "memory"],
+    "reference": "Micron-focused Yahoo Finance coverage described AI-driven memory demand as outstripping supply through 2026, with HBM4 shipments starting early and calendar-2026 HBM supply described as sold out.",
+    "expected_answer": "Micron's AI memory demand was described as exceeding supply through 2026, with early HBM4 shipments and calendar-2026 HBM supply sold out.",
+    "reference_contexts": [
+      "Micron-focused Yahoo Finance coverage described AI-driven memory demand as outstripping supply through 2026, with HBM4 shipments starting early and Micron's calendar-2026 HBM supply described as sold out."
+    ],
+    "reference_context_ids": [
+      "rag:07784c844f4d77580821bf4428f69e51764d3377d4f421ed15a9a1bca389cab6"
+    ],
+    "annotation_granularity": "parent_context",
+    "annotation_source": "curated_from_seed_markdown",
+    "annotation_notes": "Gold parent section: HBM and Memory Supply Thesis.",
+    "reference_source_substrings": ["semiconductor_hbm_yfinance_2026-07-18.md"],
+    "reference_title_substrings": ["Yahoo Finance / yfinance Semiconductor and HBM Brief"]
+  },
+  {
+    "name": "samsung_hbm4e_samples",
+    "user_input": "Which reviewed research context describes Samsung HBM4E sample shipments?",
+    "symbol": "005930.KS",
+    "tags": ["hbm"],
+    "reference": "Yahoo Finance-hosted coverage reported that Samsung began shipping 12-layer HBM4E samples to major global customers in late May 2026.",
+    "expected_answer": "Samsung reportedly began shipping 12-layer HBM4E samples to major global customers in late May 2026.",
+    "reference_contexts": [
+      "Samsung Electronics (005930.KS): Yahoo Finance-hosted Reuters/Quartz coverage reported that Samsung began shipping 12-layer HBM4E samples to major global customers in late May 2026."
+    ],
+    "reference_context_ids": [
+      "rag:79e86e238e64fb64941b260e232778fc5cda4c1d4c4911944ea2107d8d41382b"
+    ],
+    "annotation_granularity": "parent_context",
+    "annotation_source": "curated_from_seed_markdown",
+    "annotation_notes": "Gold parent section: Company Notes. Current parent chunk also contains Micron, SK Hynix, Broadcom notes.",
+    "reference_source_substrings": ["semiconductor_hbm_yfinance_2026-07-18.md"],
+    "reference_title_substrings": ["Yahoo Finance / yfinance Semiconductor and HBM Brief"]
+  },
+  {
+    "name": "sk_hynix_capacity_oversupply_risk",
+    "user_input": "What reviewed context links SK Hynix wafer capacity expansion to future oversupply risk?",
+    "symbol": "000660.KS",
+    "tags": ["hbm", "risk"],
+    "reference": "SK Hynix planned to double wafer capacity over five years, which belongs in both bullish HBM demand queries and risk queries about supply growth and future oversupply.",
+    "expected_answer": "The reviewed note says SK Hynix planned to double wafer capacity over five years, creating both HBM demand visibility and future oversupply/capex risk.",
+    "reference_contexts": [
+      "SK Hynix (000660.KS): Yahoo Finance-hosted Reuters coverage reported SK Hynix's plan to double wafer capacity over five years as AI demand puts the company at the center of the memory boom."
+    ],
+    "reference_context_ids": [
+      "rag:79e86e238e64fb64941b260e232778fc5cda4c1d4c4911944ea2107d8d41382b"
+    ],
+    "annotation_granularity": "parent_context",
+    "annotation_source": "curated_from_seed_markdown",
+    "annotation_notes": "Gold parent section: Company Notes. Current parent chunk also contains Micron, Samsung, Broadcom notes.",
+    "reference_source_substrings": ["semiconductor_hbm_yfinance_2026-07-18.md"],
+    "reference_title_substrings": ["Yahoo Finance / yfinance Semiconductor and HBM Brief"]
+  },
+  {
+    "name": "broadcom_custom_ai_accelerators",
+    "user_input": "How does reviewed research connect Broadcom custom AI accelerators to HBM demand?",
+    "symbol": "AVGO",
+    "tags": ["ai_chips"],
+    "reference": "Broadcom's custom AI accelerator and AI networking growth expands the set of AI compute platforms that can consume advanced memory.",
+    "expected_answer": "Broadcom is a read-through for non-GPU HBM demand because custom AI accelerators and AI networking expand advanced-memory consumption.",
+    "reference_contexts": [
+      "Broadcom (AVGO): Yahoo Finance coverage of Broadcom's Q2 2026 earnings described AI chip revenue more than doubling year-over-year and highlighted custom AI accelerators plus AI networking as major growth drivers."
+    ],
+    "reference_context_ids": [
+      "rag:79e86e238e64fb64941b260e232778fc5cda4c1d4c4911944ea2107d8d41382b"
+    ],
+    "annotation_granularity": "parent_context",
+    "annotation_source": "curated_from_seed_markdown",
+    "annotation_notes": "Gold parent section: Company Notes. Current parent chunk also contains Micron, Samsung, SK Hynix notes.",
+    "reference_source_substrings": ["semiconductor_hbm_yfinance_2026-07-18.md"],
+    "reference_title_substrings": ["Yahoo Finance / yfinance Semiconductor and HBM Brief"]
+  },
+  {
+    "name": "memory_drawdown_risk_context",
+    "user_input": "What reviewed context warns about memory stock drawdown and valuation pressure?",
+    "symbol": "MU",
+    "tags": ["risk", "memory"],
+    "reference": "The reviewed Yahoo Finance context warned that memory stocks were under pressure from geopolitical tension, profit-taking, demand questions, and valuation pressure after a large prior rally.",
+    "expected_answer": "The note cites pressure from geopolitical tension, profit-taking, demand questions, and valuation pressure after a large memory-stock rally.",
+    "reference_contexts": [
+      "The MU quote page carried a Yahoo Scout-style summary that memory stocks were under pressure from geopolitical tension, profit-taking, demand questions, and valuation pressure after a large prior rally."
+    ],
+    "reference_context_ids": [
+      "rag:6e75a8c4db6b162f1d01d2d39e0cdd170de2f543183cb707b288b2ef217dd10c"
+    ],
+    "annotation_granularity": "parent_context",
+    "annotation_source": "curated_from_seed_markdown",
+    "annotation_notes": "Gold parent section: Board-Level Market Context.",
+    "reference_source_substrings": ["semiconductor_hbm_yfinance_2026-07-18.md"],
+    "reference_title_substrings": ["Yahoo Finance / yfinance Semiconductor and HBM Brief"]
+  },
+  {
+    "name": "pullback_entry_risk_checklist",
+    "user_input": "What reviewed stock RAG seed context describes pullback entry discipline and risk review?",
+    "tags": ["risk"],
+    "reference": "The reviewed US stock seed note says pullback setups are stronger above a rising 50-day moving average near support, and hard risk gates remain authoritative.",
+    "expected_answer": "The seed note emphasizes pullbacks above a rising 50-day moving average, support confirmation, reward/risk above 2.0, and hard risk gates.",
+    "reference_contexts": [
+      "For swing trading in liquid US stocks and ETFs, a pullback setup is stronger when price remains above a rising 50-day moving average, holds a visible support zone, and offers a reward/risk ratio above 2.0 before position sizing is considered."
+    ],
+    "reference_context_ids": [
+      "rag:4e14c99695342bdd50c9dde1ade33a30bfc7e33aa605d76b3773ba8c6916fec7"
+    ],
+    "annotation_granularity": "parent_context",
+    "annotation_source": "curated_from_seed_markdown",
+    "annotation_notes": "Gold parent section: Pullback Entry Discipline.",
+    "reference_source_substrings": ["us_stock_rag_seed.md"],
+    "reference_title_substrings": ["US Stock RAG Seed Knowledge"]
+  }
+]

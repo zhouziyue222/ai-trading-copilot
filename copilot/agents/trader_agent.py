@@ -8,6 +8,12 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     extract_json_object,
     strip_trailing_json_object,
 )
+from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.services.cancellation import RunCancelled, check_cancelled
+from ai_trading_copilot.copilot.services.tracing import (
+    get_current_trace_recorder,
+    summarize_text,
+)
 from ai_trading_copilot.copilot.domain.enums import (
     MarketRegime,
     SubscriptionStatus,
@@ -15,7 +21,7 @@ from ai_trading_copilot.copilot.domain.enums import (
     TradeDirection,
 )
 from ai_trading_copilot.copilot.domain.models import (
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     NewsSentimentReport,
     OpportunityRadarItem,
     TechnicalContext,
@@ -52,7 +58,7 @@ class TraderAgent:
         reviewed = _review_opportunity(
             opportunity=opportunity,
             technical_position=technical_position,
-            fundamental_news=None,
+            fundamental_analysis=None,
             news_sentiment=None,
         )
         resolved_regime = market_regime or _market_regime_from_trend(reviewed.trend_state)
@@ -93,7 +99,7 @@ class TraderAgent:
         technical_position: TechnicalPosition | None = None,
         technical_context: TechnicalContext | None = None,
         news_sentiment: NewsSentimentReport | None = None,
-        fundamental_news: FundamentalNewsReport | None = None,
+        fundamental_analysis: FundamentalAnalysisReport | None = None,
         persona: UserPersonaConfig | None = None,
         analyst_context: str = "",
     ) -> TraderAnalysisResult:
@@ -103,7 +109,7 @@ class TraderAgent:
             technical_position=position,
             technical_context=technical_context,
             news_sentiment=news_sentiment,
-            fundamental_news=fundamental_news,
+            fundamental_analysis=fundamental_analysis,
         )
         return self.create_plan_with_report(
             opportunity=opportunity,
@@ -113,7 +119,7 @@ class TraderAgent:
             analyst_context=analyst_context,
             technical_context=technical_context,
             news_sentiment=news_sentiment,
-            fundamental_news=fundamental_news,
+            fundamental_analysis=fundamental_analysis,
         )
 
     def _buy_plan(
@@ -175,12 +181,12 @@ class TraderAgent:
         analyst_context: str = "",
         technical_context: TechnicalContext | None = None,
         news_sentiment: NewsSentimentReport | None = None,
-        fundamental_news: FundamentalNewsReport | None = None,
+        fundamental_analysis: FundamentalAnalysisReport | None = None,
     ) -> TraderAnalysisResult:
         reviewed = _review_opportunity(
             opportunity=opportunity,
             technical_position=technical_position,
-            fundamental_news=fundamental_news,
+            fundamental_analysis=fundamental_analysis,
             news_sentiment=news_sentiment,
         )
         resolved_regime = market_regime or _market_regime_from_context(
@@ -202,14 +208,33 @@ class TraderAgent:
             technical_position=technical_position,
             technical_context=technical_context,
             news_sentiment=news_sentiment,
-            fundamental_news=fundamental_news,
+            fundamental_analysis=fundamental_analysis,
             persona=persona or UserPersonaConfig(),
             fallback=fallback,
             analyst_context=analyst_context,
         )
         try:
-            response = self.llm.invoke(prompt)
-            content = str(getattr(response, "content", response) or "").strip()
+            recorder = get_current_trace_recorder()
+            llm_attrs = {
+                "llm.model": _llm_model_name(self.llm),
+                "llm.round": 1,
+                "llm.max_rounds": 1,
+                "llm.message_count": 1,
+                **summarize_text(prompt, "prompt"),
+            }
+            if recorder is not None:
+                with recorder.start_span("llm.invoke", kind="client", attributes=llm_attrs) as span:
+                    check_cancelled()
+                    response = self.llm.invoke(prompt)
+                    check_cancelled()
+                    content = str(getattr(response, "content", response) or "").strip()
+                    for key, value in summarize_text(content, "llm.response").items():
+                        span.set_attribute(key, value)
+            else:
+                check_cancelled()
+                response = self.llm.invoke(prompt)
+                check_cancelled()
+                content = str(getattr(response, "content", response) or "").strip()
             payload = extract_json_object(content)
             plan = _plan_from_payload(payload, fallback)
             report = strip_trailing_json_object(content) or _report_from_plan(
@@ -218,6 +243,8 @@ class TraderAgent:
                 "LLM trader plan",
             )
             return TraderAnalysisResult(plan, report, [], reviewed)
+        except RunCancelled:
+            raise
         except Exception:
             return TraderAnalysisResult(fallback, fallback_report, [], reviewed)
 
@@ -226,12 +253,12 @@ def _review_opportunity(
     *,
     opportunity: OpportunityRadarItem,
     technical_position: TechnicalPosition,
-    fundamental_news: FundamentalNewsReport | None,
+    fundamental_analysis: FundamentalAnalysisReport | None,
     news_sentiment: NewsSentimentReport | None,
 ) -> OpportunityRadarItem:
-    if fundamental_news is not None and fundamental_news.symbol != opportunity.symbol:
+    if fundamental_analysis is not None and fundamental_analysis.symbol != opportunity.symbol:
         raise ValueError(
-            f"Fundamental report symbol {fundamental_news.symbol} does not match {opportunity.symbol}"
+            f"Fundamental report symbol {fundamental_analysis.symbol} does not match {opportunity.symbol}"
         )
     if news_sentiment is not None and news_sentiment.symbol != opportunity.symbol:
         raise ValueError(
@@ -256,13 +283,13 @@ def _review_opportunity(
             updates["status"] = SubscriptionStatus.RISK_ELEVATED
             risk_points.extend(news_sentiment.risk_flags or ["negative_news_sentiment"])
 
-    if fundamental_news is not None:
-        score = fundamental_news.fundamental_score
+    if fundamental_analysis is not None:
+        score = fundamental_analysis.fundamental_score
         if score is not None:
             review_reasons.append(f"Fundamental score={score:.2f}.")
-        if fundamental_news.material_risk or not fundamental_news.thesis_intact:
+        if fundamental_analysis.material_risk or not fundamental_analysis.thesis_intact:
             updates["status"] = SubscriptionStatus.RISK_ELEVATED
-            risk_points.extend(fundamental_news.risk_flags or ["fundamental_thesis_risk"])
+            risk_points.extend(fundamental_analysis.risk_flags or ["fundamental_thesis_risk"])
 
     status = updates.get("status", opportunity.status)
     return opportunity.model_copy(
@@ -282,7 +309,7 @@ def _opportunity_from_evidence(
     technical_position: TechnicalPosition,
     technical_context: TechnicalContext | None,
     news_sentiment: NewsSentimentReport | None,
-    fundamental_news: FundamentalNewsReport | None,
+    fundamental_analysis: FundamentalAnalysisReport | None,
 ) -> OpportunityRadarItem:
     trend_state = _stock_trend_state(technical_context, technical_position)
     status = SubscriptionStatus.OBSERVING
@@ -313,7 +340,7 @@ def _opportunity_from_evidence(
     return _review_opportunity(
         opportunity=item,
         technical_position=technical_position,
-        fundamental_news=fundamental_news,
+        fundamental_analysis=fundamental_analysis,
         news_sentiment=news_sentiment,
     )
 
@@ -386,33 +413,26 @@ def _trader_prompt(
     technical_position: TechnicalPosition,
     technical_context: TechnicalContext | None,
     news_sentiment: NewsSentimentReport | None,
-    fundamental_news: FundamentalNewsReport | None,
+    fundamental_analysis: FundamentalAnalysisReport | None,
     persona: UserPersonaConfig,
     fallback: TradePlan,
     analyst_context: str,
 ) -> str:
-    return (
-        "You are the Trader in an AI trading copilot. Follow this strict order: "
-        "1) classify market state as uptrend, downtrend, range_bound, reversal_point, or unclear "
-        "from the multi-dimensional technical context; 2) check stock/sector/broad-market "
-        "technical alignment; 3) combine news sentiment and fundamental score; 4) produce "
-        "a concrete trade plan. Use only supplied analyst/tool reports. Do not invent data.\n\n"
-        "Return Markdown followed by one final JSON object with keys: direction, entry_logic, "
-        "market_regime, support_level, stop_loss, targets, reward_risk_ratio, "
-        "position_weight, holding_period, invalidation_conditions, persona_fit_reason, "
-        "uses_leverage, uses_options, is_chasing, breakout_confirmed, pullback_confirmed. "
-        "Allowed direction values: buy, hold, reduce, sell, watch. Allowed market_regime "
-        "values: bull_market, uptrend, downtrend, range_bound, reversal_point, tradable_range, "
-        "unclear, weakening, bear_risk. JSON must be the final object.\n\n"
-        f"Persona: {persona.model_dump_json()}\n"
-        f"Reviewed opportunity: {opportunity.model_dump_json()}\n"
-        f"Technical position: {technical_position.model_dump_json()}\n"
-        f"Technical context: {technical_context.model_dump_json() if technical_context else '-'}\n"
-        f"News sentiment: {news_sentiment.model_dump_json() if news_sentiment else '-'}\n"
-        f"Fundamental report: {fundamental_news.model_dump_json() if fundamental_news else '-'}\n"
-        f"Fallback safe plan: {fallback.model_dump_json()}\n"
-        f"Analyst context:\n{analyst_context or '-'}"
+    return render_prompt(
+        "trader.v1",
+        persona=persona.model_dump_json(),
+        opportunity=opportunity.model_dump_json(),
+        technical_position=technical_position.model_dump_json(),
+        technical_context=technical_context.model_dump_json() if technical_context else "-",
+        news_sentiment=news_sentiment.model_dump_json() if news_sentiment else "-",
+        fundamental_analysis=fundamental_analysis.model_dump_json() if fundamental_analysis else "-",
+        fallback=fallback.model_dump_json(),
+        analyst_context=analyst_context or "-",
     )
+
+
+def _llm_model_name(llm) -> str:
+    return str(getattr(llm, "model_name", None) or getattr(llm, "model", "") or "")
 
 
 def _plan_from_payload(payload: dict, fallback: TradePlan) -> TradePlan:
@@ -477,3 +497,5 @@ def _unique_strings(values: list[str]) -> list[str]:
             output.append(cleaned)
             seen.add(cleaned)
     return output
+
+

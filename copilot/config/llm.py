@@ -11,7 +11,8 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_PATH = PACKAGE_ROOT / ".env"
 DEFAULT_REPORT_OUTPUT_DIR = PACKAGE_ROOT / "reports"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEFAULT_DEEPSEEK_REASONING_EFFORT = "high"
 DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-v4"
 
 
@@ -50,4 +51,9 @@ def create_default_deepseek_llm():
         model=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL),
         api_key=api_key,
         base_url=os.getenv("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL),
+        reasoning_effort=os.getenv(
+            "DEEPSEEK_REASONING_EFFORT",
+            DEFAULT_DEEPSEEK_REASONING_EFFORT,
+        ),
+        extra_body={"thinking": {"type": os.getenv("DEEPSEEK_THINKING_TYPE", "enabled")}},
     )

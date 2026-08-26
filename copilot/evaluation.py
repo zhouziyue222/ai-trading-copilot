@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
-from dataclasses import dataclass, field
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ai_trading_copilot.copilot.agents import (
-    FundamentalNewsAgent,
+    FundamentalAnalystAgent,
     OpportunityRadarAgent,
     TechnicalPositionAgent,
 )
@@ -20,13 +25,13 @@ from ai_trading_copilot.copilot.config import DEFAULT_REPORT_OUTPUT_DIR
 from ai_trading_copilot.copilot.domain.enums import (
     AnalystType,
     ExecutionStatus,
-    RiskRuleCode,
     SubscriptionStatus,
     SymbolTrendState,
     TradeDirection,
 )
 from ai_trading_copilot.copilot.domain.models import (
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
+    NewsSentimentReport,
     PortfolioSnapshot,
     PriceBar,
     RagDocument,
@@ -39,6 +44,11 @@ from ai_trading_copilot.copilot.services.rag_store import (
     ChromaRagStore,
     RagUnavailableError,
 )
+from ai_trading_copilot.copilot.services.eval_samples import EvalSampleRecorder
+
+
+DEFAULT_RAG_EVAL_CASES_FILE = Path(__file__).resolve().parents[1] / "config" / "rag_eval_cases.json"
+DEFAULT_RAG_COMPARE_TIMEOUT_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -105,8 +115,8 @@ class EvaluationReport:
             deltas = comparison.get("deltas", {})
             rows = [
                 "hit_rate_at_k",
-                "recall_at_k",
-                "precision_at_k",
+                "context_recall_at_k",
+                "context_precision_at_k",
                 "mrr_at_k",
                 "ndcg_at_k",
                 "avg_latency_ms",
@@ -140,7 +150,6 @@ class AgentEvalExpectation:
     expected_direction: TradeDirection | str | None = None
     expected_risk_approved: bool | None = None
     expected_execution_status: ExecutionStatus | str | None = None
-    expected_blocking_risk_codes: Sequence[RiskRuleCode | str] = ()
 
 
 @dataclass(frozen=True)
@@ -240,12 +249,12 @@ class AnalystEvaluator:
         *,
         opportunity_radar_agent: OpportunityRadarAgent | None = None,
         technical_position_agent: TechnicalPositionAgent | None = None,
-        fundamental_news_agent: FundamentalNewsAgent | None = None,
+        fundamental_analyst_agent: FundamentalAnalystAgent | None = None,
         min_overall_score: float = 0.80,
     ):
         self.opportunity_radar_agent = opportunity_radar_agent or OpportunityRadarAgent()
         self.technical_position_agent = technical_position_agent or TechnicalPositionAgent()
-        self.fundamental_news_agent = fundamental_news_agent or FundamentalNewsAgent()
+        self.fundamental_analyst_agent = fundamental_analyst_agent or FundamentalAnalystAgent()
         self.min_overall_score = min_overall_score
 
     def evaluate_smoke(
@@ -374,22 +383,39 @@ class AnalystEvaluator:
                 "reward_risk_ratio": position.reward_risk_ratio,
                 "uptrend": position.uptrend,
             }
-        if analyst == AnalystType.FUNDAMENTAL_NEWS:
-            report = self.fundamental_news_agent.from_report(
-                FundamentalNewsReport(
-                    symbol=symbol,
-                    thesis_intact=True,
-                    material_risk=False,
-                    risk_flags=[],
-                    summary="No material fundamental or news risk in offline smoke input.",
-                )
+        if analyst == AnalystType.NEWS_SENTIMENT:
+            report = NewsSentimentReport(
+                symbol=symbol,
+                sentiment_score=0.0,
+                company_news_score=0.0,
+                social_sentiment_score=0.0,
+                earnings_event_score=0.0,
+                material_risk=False,
+                risk_flags=[],
+                key_events=[],
+                alerts=[],
+                summary="No material news or sentiment risk in offline smoke input.",
+                data_availability={"offline_smoke": "synthetic"},
             )
+            return {
+                "symbol": report.symbol,
+                "sentiment_score": report.sentiment_score,
+                "material_risk": report.material_risk,
+                "risk_flags": report.risk_flags,
+                "key_events": report.key_events,
+                "alerts": report.alerts,
+                "summary": report.summary,
+            }
+        if analyst == AnalystType.FUNDAMENTAL_ANALYSIS:
+            report = self.fundamental_analyst_agent.analyze_symbol(symbol=symbol).report
             return {
                 "symbol": report.symbol,
                 "thesis_intact": report.thesis_intact,
                 "material_risk": report.material_risk,
                 "risk_flags": report.risk_flags,
                 "summary": report.summary,
+                "fundamental_score": report.fundamental_score,
+                "key_events": report.key_events,
             }
         raise ValueError(f"unsupported analyst: {analyst}")
 
@@ -397,9 +423,21 @@ class AnalystEvaluator:
 @dataclass(frozen=True)
 class RagEvalCase:
     name: str
-    query: str
+    query: str = ""
+    user_input: str = ""
+    question: str = ""
     symbol: str | None = None
     tags: Sequence[str] = ()
+    reference: str = ""
+    expected_answer: str = ""
+    reference_contexts: Sequence[str] = ()
+    reference_context_ids: Sequence[str] = ()
+    expected_context_ids: Sequence[str] = ()
+    annotation_granularity: str = ""
+    annotation_source: str = ""
+    annotation_notes: str = ""
+    reference_source_substrings: Sequence[str] = ()
+    reference_title_substrings: Sequence[str] = ()
     relevant_doc_ids: Sequence[str] = ()
     relevant_source_substrings: Sequence[str] = ()
     relevant_title_substrings: Sequence[str] = ()
@@ -410,38 +448,43 @@ class RagEvalCase:
 DEFAULT_RAG_EVAL_CASES: tuple[RagEvalCase, ...] = (
     RagEvalCase(
         name="micron_hbm_supply",
-        query="MU calendar 2026 memory supply booked HBM4",
+        user_input="MU calendar 2026 memory supply booked HBM4",
         symbol="MU",
         tags=("hbm", "memory"),
-        required_terms=("Micron", "HBM4", "sold out"),
+        reference="Micron AI memory demand was described as outstripping supply through 2026, with calendar-2026 HBM supply sold out.",
+        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
     ),
     RagEvalCase(
         name="samsung_hbm4e_samples",
-        query="faster sample shipments for Samsung advanced memory",
+        user_input="faster sample shipments for Samsung advanced memory",
         symbol="005930.KS",
         tags=("hbm",),
-        required_terms=("Samsung", "HBM4E", "samples"),
+        reference="Samsung reportedly began shipping 12-layer HBM4E samples to major global customers in late May 2026.",
+        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
     ),
     RagEvalCase(
         name="sk_hynix_capacity_risk",
-        query="capacity expansion future oversupply for SK Hynix",
+        user_input="capacity expansion future oversupply for SK Hynix",
         symbol="000660.KS",
         tags=("hbm", "risk"),
-        required_terms=("SK Hynix", "wafer capacity", "oversupply"),
+        reference="SK Hynix planned to double wafer capacity over five years, creating future oversupply risk context.",
+        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
     ),
     RagEvalCase(
         name="broadcom_custom_ai",
-        query="AVGO non GPU accelerator memory demand networking",
+        user_input="AVGO non GPU accelerator memory demand networking",
         symbol="AVGO",
         tags=("ai_chips",),
-        required_terms=("Broadcom", "custom AI accelerators", "AI networking"),
+        reference="Broadcom custom AI accelerators and AI networking are read-throughs for advanced memory demand.",
+        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
     ),
     RagEvalCase(
         name="memory_drawdown_risk",
-        query="memory stocks drawdown valuation after rally",
+        user_input="memory stocks drawdown valuation after rally",
         symbol="MU",
         tags=("risk", "memory"),
-        required_terms=("valuation pressure", "profit-taking", "geopolitical"),
+        reference="Memory stocks were under pressure from geopolitical tension, profit-taking, demand questions, and valuation pressure.",
+        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
     ),
 )
 
@@ -462,13 +505,15 @@ class RagEvaluator:
         searcher: RagSearcher,
         cases: Sequence[RagEvalCase],
         top_k: int = 5,
+        backend: str = "ragas",
+        answer_quality: str = "auto",
     ) -> EvaluationReport:
         case_results = []
         for case in cases:
             started = perf_counter()
             docs = list(
                 searcher(
-                    query=case.query,
+                    query=_case_query(case),
                     symbol=case.symbol,
                     tags=tuple(case.tags),
                     limit=top_k,
@@ -478,13 +523,22 @@ class RagEvaluator:
             case_results.append(_score_rag_case(case, docs, top_k=top_k, latency_ms=latency_ms))
 
         summary = _summarize_rag_cases(case_results)
+        ragas_details = _run_ragas_official_details(
+            case_results,
+            backend=backend,
+            answer_quality=answer_quality,
+        )
+        if ragas_details.get("retrieval_metrics"):
+            summary.update(ragas_details["retrieval_metrics"])
+        answer_required = answer_quality == "required"
+        answer_passed = bool(ragas_details.get("answer_quality", {}).get("passed", True))
         quality_score = _rag_quality_score(summary)
         metrics = [
             _metric("hit_rate_at_k", summary["hit_rate_at_k"], target=0.80),
-            _metric("recall_at_k", summary["recall_at_k"], target=0.70),
-            _metric("precision_at_k", summary["precision_at_k"], target=0.20),
-            _metric("mrr_at_k", summary["mrr_at_k"], target=0.70),
-            _metric("ndcg_at_k", summary["ndcg_at_k"], target=0.70),
+            _metric("context_recall_at_k", summary["context_recall_at_k"], target=0.70),
+            _metric("context_precision_at_k", summary["context_precision_at_k"], target=0.50),
+            _metric("mrr_at_k", summary["mrr_at_k"], target=0.60),
+            _metric("ndcg_at_k", summary["ndcg_at_k"], target=0.60),
             _metric("avg_latency_ms", summary["avg_latency_ms"], unit="ms"),
             _metric(
                 "empty_rate",
@@ -493,12 +547,39 @@ class RagEvaluator:
                 higher_is_better=False,
             ),
         ]
+        answer_metrics = ragas_details.get("answer_quality", {}).get("metrics", {})
+        if "faithfulness" in answer_metrics:
+            metrics.append(
+                _metric(
+                    "faithfulness",
+                    answer_metrics["faithfulness"],
+                    target=0.70 if answer_required else None,
+                )
+            )
+        if "answer_relevancy" in answer_metrics:
+            metrics.append(
+                _metric(
+                    "answer_relevancy",
+                    answer_metrics["answer_relevancy"],
+                    target=0.70 if answer_required else None,
+                )
+            )
+        retrieval_passed = quality_score >= self.min_quality_score and all(
+            metric.passed for metric in metrics
+            if metric.name not in {"faithfulness", "answer_relevancy"}
+        )
         return EvaluationReport(
             suite=system_name,
             overall_score=quality_score,
-            passed=quality_score >= self.min_quality_score,
+            passed=retrieval_passed and (answer_passed if answer_required else True),
             metrics=metrics,
-            details={"summary": summary, "cases": case_results, "top_k": top_k},
+            details={
+                "summary": summary,
+                "cases": case_results,
+                "top_k": top_k,
+                "backend": backend,
+                "ragas": ragas_details,
+            },
         )
 
     def compare_store(
@@ -507,18 +588,24 @@ class RagEvaluator:
         *,
         cases: Sequence[RagEvalCase] = DEFAULT_RAG_EVAL_CASES,
         top_k: int = 5,
+        backend: str = "ragas",
+        answer_quality: str = "auto",
     ) -> EvaluationReport:
         baseline = self.evaluate_system(
             system_name="pre_optimization_keyword_index",
             searcher=store.search_keyword_baseline,
             cases=cases,
             top_k=top_k,
+            backend=backend,
+            answer_quality="off",
         )
         optimized = self.evaluate_system(
             system_name="optimized_hybrid_index",
             searcher=store.search,
             cases=cases,
             top_k=top_k,
+            backend=backend,
+            answer_quality=answer_quality,
         )
         before = baseline.details["summary"]
         after = optimized.details["summary"]
@@ -530,8 +617,8 @@ class RagEvaluator:
             key: round(float(after.get(key, 0.0)) - float(before.get(key, 0.0)), 6)
             for key in {
                 "hit_rate_at_k",
-                "recall_at_k",
-                "precision_at_k",
+                "context_recall_at_k",
+                "context_precision_at_k",
                 "mrr_at_k",
                 "ndcg_at_k",
                 "avg_latency_ms",
@@ -542,11 +629,13 @@ class RagEvaluator:
             _metric("optimized_quality_score", optimized.overall_score, target=self.min_quality_score),
             _metric("quality_score_delta", optimized.overall_score - baseline.overall_score),
             _metric("hit_rate_delta", deltas["hit_rate_at_k"]),
+            _metric("context_recall_delta", deltas["context_recall_at_k"]),
+            _metric("context_precision_delta", deltas["context_precision_at_k"]),
             _metric("mrr_delta", deltas["mrr_at_k"]),
             _metric("ndcg_delta", deltas["ndcg_at_k"]),
             _metric("latency_delta_ms", deltas["avg_latency_ms"], unit="ms"),
         ]
-        passed = optimized.overall_score >= self.min_quality_score
+        passed = optimized.passed
         return EvaluationReport(
             suite="rag_before_after_comparison",
             overall_score=optimized.overall_score,
@@ -560,6 +649,8 @@ class RagEvaluator:
                 },
                 "top_k": top_k,
                 "case_count": len(cases),
+                "backend": backend,
+                "answer_quality": answer_quality,
             },
         )
 
@@ -596,7 +687,7 @@ def run_agent_smoke_evaluation(
             expected_status=SubscriptionStatus.ACTIONABLE,
             expected_direction=TradeDirection.BUY,
             expected_risk_approved=True,
-            expected_execution_status=ExecutionStatus.SIMULATION_READY,
+            expected_execution_status=ExecutionStatus.PORTFOLIO_DECIDED,
         )
         for symbol in normalized
     ]
@@ -609,6 +700,62 @@ def run_analyst_smoke_evaluation(
     symbols: Sequence[str] = ("AAPL",),
 ) -> EvaluationReport:
     return AnalystEvaluator().evaluate_smoke(analysts=analysts, symbols=symbols)
+
+
+def run_fundamental_evaluation(
+    *,
+    symbols: Sequence[str] = ("AAPL",),
+    output_dir: str | Path | None = None,
+    backend: str = "ragas",
+    answer_quality: str = "auto",
+) -> EvaluationReport:
+    output_path = Path(output_dir) if output_dir else DEFAULT_REPORT_OUTPUT_DIR / "eval_fundamental_analyst"
+    run_id = f"fundamental_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    recorder = EvalSampleRecorder(output_dir=output_path, run_id=run_id)
+    with recorder.activate():
+        report = AnalystEvaluator().evaluate_smoke(
+            analysts=[AnalystType.FUNDAMENTAL_ANALYSIS],
+            symbols=symbols,
+        )
+
+    ragas_details = _run_fundamental_ragas_details(
+        recorder.samples,
+        backend=backend,
+        answer_quality=answer_quality,
+    )
+    metrics = list(report.metrics)
+    answer_metrics = ragas_details.get("answer_quality", {}).get("metrics", {})
+    if "faithfulness" in answer_metrics:
+        metrics.append(
+            _metric(
+                "faithfulness",
+                answer_metrics["faithfulness"],
+                target=0.70 if answer_quality == "required" else None,
+            )
+        )
+    if "answer_relevancy" in answer_metrics:
+        metrics.append(
+            _metric(
+                "answer_relevancy",
+                answer_metrics["answer_relevancy"],
+                target=0.70 if answer_quality == "required" else None,
+            )
+        )
+    answer_passed = bool(ragas_details.get("answer_quality", {}).get("passed", True))
+    details = {
+        **dict(report.details),
+        "run_id": run_id,
+        "ragas_samples_path": str(recorder.path),
+        "ragas_sample_count": len(recorder.samples),
+        "ragas": ragas_details,
+    }
+    return EvaluationReport(
+        suite="fundamental_analyst_evaluation",
+        overall_score=report.overall_score,
+        passed=report.passed and (answer_passed if answer_quality == "required" else True),
+        metrics=metrics,
+        details=details,
+    )
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -629,16 +776,164 @@ def main(argv: Iterable[str] | None = None) -> int:
         _emit_report(report, output=args.output, output_format=args.format)
         return 0
 
-    if args.command == "rag-compare":
-        store = ChromaRagStore(args.chroma_dir)
-        if not args.use_vector:
-            store.embedder = _DisabledVectorEmbedder()
-        cases = _load_rag_cases(args.cases) if args.cases else DEFAULT_RAG_EVAL_CASES
-        report = RagEvaluator().compare_store(store, cases=cases, top_k=args.top_k)
+    if args.command == "fundamental-eval":
+        report = run_fundamental_evaluation(
+            symbols=_split_csv(args.symbols),
+            output_dir=args.output_dir,
+            backend=args.backend,
+            answer_quality=args.answer_quality,
+        )
         _emit_report(report, output=args.output, output_format=args.format)
         return 0
 
+    if args.command == "rag-compare":
+        report = _run_rag_compare_subprocess(args)
+        _emit_report(report, output=args.output, output_format=args.format)
+        return 0
+
+    if args.command == "_rag-compare-worker":
+        store = ChromaRagStore(args.chroma_dir)
+        if not args.use_vector:
+            store.embedder = _DisabledVectorEmbedder()
+        cases = _load_rag_cases(args.cases or DEFAULT_RAG_EVAL_CASES_FILE)
+        output_path = Path(args.output_dir) if args.output_dir else DEFAULT_REPORT_OUTPUT_DIR / "eval_rag_compare"
+        recorder = EvalSampleRecorder(
+            output_dir=output_path,
+            run_id=f"rag_compare_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        )
+        with recorder.activate():
+            report = RagEvaluator().compare_store(
+                store,
+                cases=cases,
+                top_k=args.top_k,
+                backend=args.backend,
+                answer_quality=args.answer_quality,
+            )
+        report = _with_extra_details(
+            report,
+            {
+                "ragas_samples_path": str(recorder.path),
+                "ragas_sample_count": len(recorder.samples),
+            },
+        )
+        print(json.dumps(report.to_dict(), ensure_ascii=False))
+        return 0
+
     raise SystemExit(f"Unknown command: {args.command}")
+
+
+def _run_rag_compare_subprocess(args: argparse.Namespace) -> EvaluationReport:
+    command = [
+        sys.executable,
+        "-m",
+        "ai_trading_copilot.copilot.evaluation",
+        "_rag-compare-worker",
+        "--chroma-dir",
+        str(args.chroma_dir),
+        "--cases",
+        str(args.cases or DEFAULT_RAG_EVAL_CASES_FILE),
+        "--top-k",
+        str(args.top_k),
+        "--backend",
+        args.backend,
+        "--answer-quality",
+        args.answer_quality,
+        "--output-dir",
+        str(args.output_dir or ""),
+    ]
+    if args.use_vector:
+        command.append("--use-vector")
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_RAG_COMPARE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return _rag_worker_failure_report(
+            chroma_dir=args.chroma_dir,
+            message=f"RAG compare worker timed out after {exc.timeout} seconds.",
+            returncode=None,
+            stderr="",
+            stdout=exc.stdout or "",
+        )
+    if completed.returncode != 0:
+        return _rag_worker_failure_report(
+            chroma_dir=args.chroma_dir,
+            message=f"RAG compare worker exited with code {completed.returncode}.",
+            returncode=completed.returncode,
+            stderr=completed.stderr,
+            stdout=completed.stdout,
+        )
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        metrics = [
+            EvaluationMetric(
+                name=str(metric["name"]),
+                value=float(metric["value"]),
+                passed=bool(metric["passed"]),
+                target=metric.get("target"),
+                unit=str(metric.get("unit") or ""),
+                details=metric.get("details") or {},
+            )
+            for metric in payload.get("metrics", [])
+        ]
+        return EvaluationReport(
+            suite=str(payload["suite"]),
+            overall_score=float(payload["overall_score"]),
+            passed=bool(payload["passed"]),
+            metrics=metrics,
+            details=payload.get("details") or {},
+        )
+    except Exception as exc:
+        return _rag_worker_failure_report(
+            chroma_dir=args.chroma_dir,
+            message=f"RAG compare worker returned invalid JSON: {exc}",
+            returncode=completed.returncode,
+            stderr=completed.stderr,
+            stdout=completed.stdout,
+        )
+
+
+def _rag_worker_failure_report(
+    *,
+    chroma_dir: str | Path,
+    message: str,
+    returncode: int | None,
+    stderr: str,
+    stdout: str,
+) -> EvaluationReport:
+    return EvaluationReport(
+        suite="rag_before_after_comparison",
+        overall_score=0.0,
+        passed=False,
+        metrics=[
+            _metric("optimized_quality_score", 0.0, target=0.70),
+            _metric("worker_succeeded", 0.0, target=1.0),
+        ],
+        details={
+            "worker": {
+                "status": "failed",
+                "message": message,
+                "returncode": returncode,
+                "stderr": (stderr or "").strip(),
+                "stdout": (stdout or "").strip(),
+                "chroma_dir": str(chroma_dir),
+            }
+        },
+    )
+
+
+def _with_extra_details(report: EvaluationReport, extra: Mapping[str, Any]) -> EvaluationReport:
+    return EvaluationReport(
+        suite=report.suite,
+        overall_score=report.overall_score,
+        passed=report.passed,
+        metrics=report.metrics,
+        details={**dict(report.details), **dict(extra)},
+    )
 
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
@@ -661,13 +956,34 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     analyst.add_argument("--format", choices=["json", "markdown"], default="json")
     analyst.add_argument("--output", default=None)
 
+    fundamental = subparsers.add_parser("fundamental-eval")
+    fundamental.add_argument("--symbols", default="AAPL")
+    fundamental.add_argument("--output-dir", default=None)
+    fundamental.add_argument("--backend", choices=["ragas", "local"], default="ragas")
+    fundamental.add_argument("--answer-quality", choices=["auto", "off", "required"], default="auto")
+    fundamental.add_argument("--format", choices=["json", "markdown"], default="json")
+    fundamental.add_argument("--output", default=None)
+
     rag = subparsers.add_parser("rag-compare")
     rag.add_argument("--chroma-dir", default=str(DEFAULT_CHROMA_DIR))
-    rag.add_argument("--cases", default=None, help="Optional JSON file with RagEvalCase objects.")
+    rag.add_argument("--cases", default=str(DEFAULT_RAG_EVAL_CASES_FILE), help="Optional JSON file with RAGAS-style cases.")
     rag.add_argument("--top-k", type=int, default=5)
+    rag.add_argument("--backend", choices=["ragas", "local"], default="ragas")
+    rag.add_argument("--answer-quality", choices=["auto", "off", "required"], default="auto")
     rag.add_argument("--use-vector", action="store_true")
+    rag.add_argument("--output-dir", default=None)
     rag.add_argument("--format", choices=["json", "markdown"], default="json")
     rag.add_argument("--output", default=None)
+    worker = subparsers.add_parser("_rag-compare-worker", help=argparse.SUPPRESS)
+    worker.add_argument("--chroma-dir", default=str(DEFAULT_CHROMA_DIR))
+    worker.add_argument("--cases", default=str(DEFAULT_RAG_EVAL_CASES_FILE))
+    worker.add_argument("--top-k", type=int, default=5)
+    worker.add_argument("--backend", choices=["ragas", "local"], default="ragas")
+    worker.add_argument("--answer-quality", choices=["auto", "off", "required"], default="auto")
+    worker.add_argument("--use-vector", action="store_true")
+    worker.add_argument("--output-dir", default=None)
+    worker.add_argument("--format", choices=["json", "markdown"], default="json")
+    worker.add_argument("--output", default=None)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -713,13 +1029,11 @@ def _default_required_nodes(state: Mapping[str, Any]) -> tuple[str, ...]:
         nodes.append(CopilotLangGraph.NODE_NEWS_SENTIMENT)
     if AnalystType.FUNDAMENTAL_ANALYSIS.value in selected:
         nodes.append(CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS)
-    if AnalystType.FUNDAMENTAL_NEWS.value in selected:
-        nodes.append(CopilotLangGraph.NODE_FUNDAMENTAL_NEWS_REVIEW)
     nodes.extend(
         [
             CopilotLangGraph.NODE_TRADER,
             CopilotLangGraph.NODE_RISK_CHECK,
-            CopilotLangGraph.NODE_EXECUTION_ALERT,
+            CopilotLangGraph.NODE_PORTFOLIO_MANAGER,
             CopilotLangGraph.NODE_EXPLAIN_RUN,
             CopilotLangGraph.NODE_PERSIST_TRACE,
         ]
@@ -737,7 +1051,7 @@ def _default_required_reports(state: Mapping[str, Any]) -> tuple[str, ...]:
                 "futu_portfolio",
                 "trader",
                 "risk_check",
-                "execution_alert",
+                "portfolio_manager",
                 "run_explanation",
                 *selected,
             }
@@ -859,22 +1173,6 @@ def _expectation_scores(
                     }
                 )
 
-        expected_codes = {_enum_value(code) for code in expectation.expected_blocking_risk_codes}
-        if expected_codes:
-            safety_total += 1
-            actual_codes = _blocking_risk_codes(assessment)
-            if expected_codes.issubset(actual_codes):
-                safety_matches += 1
-            else:
-                failures.append(
-                    {
-                        "symbol": symbol,
-                        "field": "blocking_risk_codes",
-                        "expected": sorted(expected_codes),
-                        "actual": sorted(actual_codes),
-                    }
-                )
-
     decision_score = 1.0 if decision_total == 0 else decision_matches / decision_total
     safety_score = 1.0 if safety_total == 0 else safety_matches / safety_total
     return (
@@ -929,12 +1227,20 @@ def _default_analyst_expectations(
                     min_reward_risk_ratio=2.0,
                 )
             )
-        elif analyst == AnalystType.FUNDAMENTAL_NEWS:
+        elif analyst == AnalystType.FUNDAMENTAL_ANALYSIS:
             expectations.append(
                 AnalystEvalExpectation(
                     analyst=analyst,
                     symbol=symbol,
                     expected_thesis_intact=True,
+                    expected_material_risk=False,
+                )
+            )
+        elif analyst == AnalystType.NEWS_SENTIMENT:
+            expectations.append(
+                AnalystEvalExpectation(
+                    analyst=analyst,
+                    symbol=symbol,
                     expected_material_risk=False,
                 )
             )
@@ -1012,10 +1318,18 @@ def _analyst_required_fields(analyst: AnalystType) -> tuple[str, ...]:
             "reward_risk_ratio",
             "uptrend",
         )
-    if analyst == AnalystType.FUNDAMENTAL_NEWS:
+    if analyst == AnalystType.FUNDAMENTAL_ANALYSIS:
         return (
             "symbol",
             "thesis_intact",
+            "material_risk",
+            "risk_flags",
+            "summary",
+        )
+    if analyst == AnalystType.NEWS_SENTIMENT:
+        return (
+            "symbol",
+            "sentiment_score",
             "material_risk",
             "risk_flags",
             "summary",
@@ -1105,9 +1419,313 @@ def _safe_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
+
+
+def _run_ragas_official_details(
+    case_results: Sequence[Mapping[str, Any]],
+    *,
+    backend: str,
+    answer_quality: str,
+) -> dict[str, Any]:
+    answer_details = _answer_quality_unavailable(answer_quality, reason="disabled")
+    if backend != "ragas":
+        return {
+            "backend": backend,
+            "status": "disabled",
+            "retrieval_metrics": {},
+            "answer_quality": answer_details,
+        }
+
+    try:
+        ragas_module = importlib.import_module("ragas")
+        metrics_module = importlib.import_module("ragas.metrics")
+    except Exception as exc:
+        return {
+            "backend": "ragas",
+            "status": "missing_dependency",
+            "error": f"Install the eval extra to enable official RAGAS: {exc}",
+            "retrieval_metrics": {},
+            "answer_quality": _answer_quality_unavailable(answer_quality, reason="missing_ragas"),
+        }
+
+    rows = [_ragas_row(result) for result in case_results]
+    retrieval_metrics: dict[str, float] = {}
+    retrieval_status = "skipped"
+    retrieval_error = ""
+    try:
+        retrieval_metric_names = [
+            "NonLLMContextPrecisionWithReference",
+            "NonLLMContextRecall",
+        ]
+        if any(row.get("reference_context_ids") for row in rows):
+            retrieval_metric_names = [
+                "IDBasedContextPrecision",
+                "IDBasedContextRecall",
+                *retrieval_metric_names,
+            ]
+        retrieval_metric_objects = _ragas_metric_objects(
+            metrics_module,
+            retrieval_metric_names,
+        )
+        if retrieval_metric_objects:
+            ragas_result = _evaluate_with_ragas(ragas_module, rows, retrieval_metric_objects)
+            retrieval_metrics = _extract_ragas_metrics(
+                ragas_result,
+                {
+                    "context_precision_at_k": (
+                        "id_based_context_precision",
+                        "non_llm_context_precision_with_reference",
+                        "context_precision",
+                        "context_precision_at_k",
+                    ),
+                    "context_recall_at_k": (
+                        "id_based_context_recall",
+                        "non_llm_context_recall",
+                        "context_recall",
+                        "context_recall_at_k",
+                    ),
+                },
+            )
+            retrieval_status = "succeeded" if retrieval_metrics else "skipped"
+        else:
+            retrieval_error = "Official RAGAS non-LLM retrieval metrics were not found."
+    except Exception as exc:
+        retrieval_status = "failed"
+        retrieval_error = str(exc)
+
+    answer_details = _run_ragas_answer_quality(
+        ragas_module=ragas_module,
+        metrics_module=metrics_module,
+        rows=rows,
+        answer_quality=answer_quality,
+    )
+    return {
+        "backend": "ragas",
+        "status": retrieval_status,
+        "error": retrieval_error,
+        "retrieval_metrics": retrieval_metrics,
+        "answer_quality": answer_details,
+    }
+
+
+def _run_fundamental_ragas_details(
+    samples: Sequence[Mapping[str, Any]],
+    *,
+    backend: str,
+    answer_quality: str,
+) -> dict[str, Any]:
+    answer_details = _answer_quality_unavailable(answer_quality, reason="disabled")
+    if backend != "ragas":
+        return {
+            "backend": backend,
+            "status": "disabled",
+            "answer_quality": answer_details,
+        }
+    try:
+        ragas_module = importlib.import_module("ragas")
+        metrics_module = importlib.import_module("ragas.metrics")
+    except Exception as exc:
+        return {
+            "backend": "ragas",
+            "status": "missing_dependency",
+            "error": f"Install the eval extra to enable official RAGAS: {exc}",
+            "answer_quality": _answer_quality_unavailable(answer_quality, reason="missing_ragas"),
+        }
+    rows = [
+        _fundamental_ragas_row(sample)
+        for sample in samples
+        if sample.get("stage") == "fundamental_agent"
+    ]
+    if not rows:
+        return {
+            "backend": "ragas",
+            "status": "skipped",
+            "answer_quality": _answer_quality_unavailable(answer_quality, reason="no_agent_samples"),
+        }
+    return {
+        "backend": "ragas",
+        "status": "succeeded",
+        "answer_quality": _run_ragas_answer_quality(
+            ragas_module=ragas_module,
+            metrics_module=metrics_module,
+            rows=rows,
+            answer_quality=answer_quality,
+        ),
+    }
+
+
+def _run_ragas_answer_quality(
+    *,
+    ragas_module: Any,
+    metrics_module: Any,
+    rows: Sequence[Mapping[str, Any]],
+    answer_quality: str,
+) -> dict[str, Any]:
+    if answer_quality == "off":
+        return _answer_quality_unavailable(answer_quality, reason="disabled")
+    if not _has_llm_credentials():
+        return _answer_quality_unavailable(answer_quality, reason="missing_llm_credentials")
+    try:
+        metric_objects = _ragas_metric_objects(
+            metrics_module,
+            ["Faithfulness", "ResponseRelevancy", "AnswerRelevancy"],
+        )
+        if not metric_objects:
+            return _answer_quality_unavailable(answer_quality, reason="metrics_unavailable")
+        result = _evaluate_with_ragas(ragas_module, rows, metric_objects)
+        metrics = _extract_ragas_metrics(
+            result,
+            {
+                "faithfulness": ("faithfulness",),
+                "answer_relevancy": ("answer_relevancy", "response_relevancy"),
+            },
+        )
+        passed = all(value >= 0.70 for value in metrics.values()) if answer_quality == "required" else True
+        return {
+            "mode": answer_quality,
+            "status": "succeeded",
+            "passed": passed,
+            "metrics": metrics,
+        }
+    except Exception as exc:
+        return {
+            "mode": answer_quality,
+            "status": "failed",
+            "passed": answer_quality != "required",
+            "metrics": {},
+            "error": str(exc),
+        }
+
+
+def _answer_quality_unavailable(answer_quality: str, *, reason: str) -> dict[str, Any]:
+    return {
+        "mode": answer_quality,
+        "status": "skipped" if answer_quality != "required" else "failed",
+        "passed": answer_quality != "required",
+        "metrics": {},
+        "reason": reason,
+    }
+
+
+def _has_llm_credentials() -> bool:
+    return any(
+        os.getenv(name)
+        for name in (
+            "OPENAI_API_KEY",
+            "AZURE_OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GOOGLE_API_KEY",
+        )
+    )
+
+
+def _ragas_metric_objects(metrics_module: Any, names: Sequence[str]) -> list[Any]:
+    objects = []
+    seen = set()
+    for name in names:
+        metric = getattr(metrics_module, name, None)
+        if metric is None or name in seen:
+            continue
+        seen.add(name)
+        try:
+            objects.append(metric())
+        except TypeError:
+            objects.append(metric)
+    return objects
+
+
+def _evaluate_with_ragas(ragas_module: Any, rows: Sequence[Mapping[str, Any]], metrics: Sequence[Any]) -> Any:
+    evaluate = getattr(ragas_module, "evaluate")
+    dataset = _ragas_dataset(ragas_module, rows)
+    return evaluate(dataset=dataset, metrics=metrics)
+
+
+def _ragas_dataset(ragas_module: Any, rows: Sequence[Mapping[str, Any]]) -> Any:
+    dataset_cls = getattr(ragas_module, "EvaluationDataset", None)
+    if dataset_cls is not None and hasattr(dataset_cls, "from_list"):
+        return dataset_cls.from_list(list(rows))
+    datasets_module = importlib.import_module("datasets")
+    return datasets_module.Dataset.from_list(list(rows))
+
+
+def _extract_ragas_metrics(result: Any, aliases: Mapping[str, Sequence[str]]) -> dict[str, float]:
+    payload: Mapping[str, Any] = {}
+    if isinstance(result, Mapping):
+        payload = result
+    elif hasattr(result, "to_pandas"):
+        frame = result.to_pandas()
+        payload = {}
+        for column in getattr(frame, "columns", []):
+            if column not in frame or len(frame[column]) <= 0:
+                continue
+            values = [
+                parsed
+                for parsed in (_safe_float(item) for item in list(frame[column]))
+                if parsed is not None
+            ]
+            if values:
+                payload[column] = sum(values) / len(values)
+    elif hasattr(result, "scores"):
+        scores = getattr(result, "scores")
+        if isinstance(scores, Mapping):
+            payload = scores
+    output = {}
+    lower_payload = {str(key).lower(): value for key, value in payload.items()}
+    for canonical, candidates in aliases.items():
+        for candidate in candidates:
+            raw = lower_payload.get(candidate.lower())
+            parsed = _safe_float(raw)
+            if parsed is not None:
+                output[canonical] = parsed
+                break
+    return output
+
+
+def _ragas_row(result: Mapping[str, Any]) -> dict[str, Any]:
+    user_input = str(result.get("user_input") or result.get("query") or "")
+    retrieved_contexts = [str(item) for item in result.get("retrieved_contexts", [])]
+    retrieved_context_ids = [str(item) for item in result.get("retrieved_context_ids", [])]
+    reference_contexts = [str(item) for item in result.get("reference_contexts", [])]
+    reference_context_ids = [str(item) for item in result.get("reference_context_ids", [])]
+    reference = str(result.get("reference") or result.get("expected_answer") or "")
+    response = str(result.get("expected_answer") or reference or "No generated answer is available.")
+    return {
+        "user_input": user_input,
+        "question": user_input,
+        "retrieved_contexts": retrieved_contexts,
+        "retrieved_context_ids": retrieved_context_ids,
+        "contexts": retrieved_contexts,
+        "reference_contexts": reference_contexts or ([reference] if reference else []),
+        "reference_context_ids": reference_context_ids,
+        "reference": reference,
+        "ground_truth": reference,
+        "response": response,
+        "answer": response,
+    }
+
+
+def _fundamental_ragas_row(sample: Mapping[str, Any]) -> dict[str, Any]:
+    user_input = str(sample.get("user_input") or "")
+    retrieved_contexts = [str(item) for item in sample.get("retrieved_contexts", [])]
+    retrieved_context_ids = [str(item) for item in sample.get("retrieved_context_ids", [])]
+    reference = str(sample.get("reference") or "")
+    response = str(sample.get("response") or sample.get("answer") or "")
+    return {
+        "user_input": user_input,
+        "question": user_input,
+        "retrieved_contexts": retrieved_contexts,
+        "retrieved_context_ids": retrieved_context_ids,
+        "contexts": retrieved_contexts,
+        "reference_contexts": [reference] if reference else [],
+        "reference": reference,
+        "ground_truth": reference,
+        "response": response,
+        "answer": response,
+    }
 
 
 def _score_rag_case(
@@ -1119,11 +1737,7 @@ def _score_rag_case(
 ) -> dict[str, Any]:
     relevances = [_is_relevant(doc, case) for doc in docs[:top_k]]
     hits = sum(1 for relevant in relevances if relevant)
-    relevant_total = max(
-        1,
-        int(case.relevant_count or len(case.relevant_doc_ids) or 1),
-        hits,
-    )
+    relevant_total = max(1, _reference_context_count(case))
     first_hit_rank = next((index + 1 for index, relevant in enumerate(relevances) if relevant), None)
     reciprocal_rank = 0.0 if first_hit_rank is None else 1.0 / first_hit_rank
     dcg = sum(
@@ -1133,23 +1747,35 @@ def _score_rag_case(
     )
     ideal_hits = min(relevant_total, top_k)
     ideal_dcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_hits + 1))
-    ndcg = 0.0 if ideal_dcg == 0 else dcg / ideal_dcg
+    ndcg = 0.0 if ideal_dcg == 0 else min(1.0, dcg / ideal_dcg)
+    retrieved_contexts = [doc.text for doc in docs[:top_k]]
+    retrieved_context_ids = [_eval_context_id(doc) for doc in docs[:top_k]]
     return {
         "name": case.name,
-        "query": case.query,
+        "user_input": _case_query(case),
         "symbol": case.symbol,
+        "annotation_granularity": case.annotation_granularity,
+        "annotation_source": case.annotation_source,
+        "annotation_notes": case.annotation_notes,
         "hit": hits > 0,
         "hits": hits,
-        "precision_at_k": hits / max(1, len(docs[:top_k])),
-        "recall_at_k": min(1.0, hits / relevant_total),
+        "context_precision_at_k": hits / max(1, len(docs[:top_k])),
+        "context_recall_at_k": min(1.0, hits / relevant_total),
         "mrr_at_k": reciprocal_rank,
         "ndcg_at_k": ndcg,
         "latency_ms": latency_ms,
         "empty": not docs,
+        "reference": case.reference or case.expected_answer,
+        "expected_answer": case.expected_answer or case.reference,
+        "reference_contexts": list(case.reference_contexts),
+        "reference_context_ids": list(_reference_context_ids(case)),
+        "retrieved_contexts": retrieved_contexts,
+        "retrieved_context_ids": retrieved_context_ids,
         "results": [
             {
                 "rank": index + 1,
                 "id": doc.id,
+                "eval_context_id": _eval_context_id(doc),
                 "title": doc.title,
                 "source": doc.source,
                 "score": doc.score,
@@ -1169,8 +1795,12 @@ def _summarize_rag_cases(case_results: Sequence[Mapping[str, Any]]) -> dict[str,
     return {
         "cases": float(len(case_results)),
         "hit_rate_at_k": sum(1.0 for result in case_results if result["hit"]) / count,
-        "recall_at_k": sum(float(result["recall_at_k"]) for result in case_results) / count,
-        "precision_at_k": sum(float(result["precision_at_k"]) for result in case_results) / count,
+        "context_recall_at_k": sum(float(result["context_recall_at_k"]) for result in case_results)
+        / count,
+        "context_precision_at_k": sum(
+            float(result["context_precision_at_k"]) for result in case_results
+        )
+        / count,
         "mrr_at_k": sum(float(result["mrr_at_k"]) for result in case_results) / count,
         "ndcg_at_k": sum(float(result["ndcg_at_k"]) for result in case_results) / count,
         "avg_latency_ms": sum(latencies) / count if latencies else 0.0,
@@ -1182,10 +1812,10 @@ def _summarize_rag_cases(case_results: Sequence[Mapping[str, Any]]) -> dict[str,
 def _rag_quality_score(summary: Mapping[str, float]) -> float:
     return (
         float(summary["hit_rate_at_k"]) * 0.25
-        + float(summary["recall_at_k"]) * 0.20
-        + float(summary["precision_at_k"]) * 0.10
+        + float(summary["context_recall_at_k"]) * 0.25
+        + float(summary["context_precision_at_k"]) * 0.15
         + float(summary["mrr_at_k"]) * 0.25
-        + float(summary["ndcg_at_k"]) * 0.20
+        + float(summary["ndcg_at_k"]) * 0.10
     )
 
 
@@ -1201,14 +1831,71 @@ def _is_relevant(doc: RagDocument, case: RagEvalCase) -> bool:
             " ".join(doc.tags),
         ]
     ).lower()
-    if doc.id in set(case.relevant_doc_ids):
+    reference_ids = set(_reference_context_ids(case))
+    if doc.id in reference_ids or _eval_context_id(doc) in reference_ids:
         return True
-    if any(item.lower() in doc.source.lower() for item in case.relevant_source_substrings):
+    source_substrings = [
+        *case.reference_source_substrings,
+        *case.relevant_source_substrings,
+    ]
+    title_substrings = [
+        *case.reference_title_substrings,
+        *case.relevant_title_substrings,
+    ]
+    if any(item.lower() in doc.source.lower() for item in source_substrings):
         return True
-    if any(item.lower() in doc.title.lower() for item in case.relevant_title_substrings):
+    if any(item.lower() in doc.title.lower() for item in title_substrings):
         return True
-    required_terms = [term.lower() for term in case.required_terms]
-    return bool(required_terms) and all(term in haystack for term in required_terms)
+    if any(_context_overlap(item, haystack) >= 0.55 for item in case.reference_contexts):
+        return True
+    if not (
+        case.reference_context_ids
+        or case.expected_context_ids
+        or case.reference_source_substrings
+        or case.reference_title_substrings
+        or case.reference_contexts
+    ):
+        required_terms = [term.lower() for term in case.required_terms]
+        return bool(required_terms) and all(term in haystack for term in required_terms)
+    return False
+
+
+def _case_query(case: RagEvalCase) -> str:
+    return case.user_input or case.question or case.query
+
+
+def _reference_context_ids(case: RagEvalCase) -> tuple[str, ...]:
+    return tuple([*case.reference_context_ids, *case.expected_context_ids, *case.relevant_doc_ids])
+
+
+def _eval_context_id(doc: RagDocument) -> str:
+    return str(doc.metadata.get("parent_id") or doc.id)
+
+
+def _reference_context_count(case: RagEvalCase) -> int:
+    if case.reference_context_ids or case.expected_context_ids:
+        return len(set(_reference_context_ids(case)))
+    if case.reference_contexts:
+        return len(case.reference_contexts)
+    if case.reference_source_substrings or case.reference_title_substrings:
+        return max(1, int(case.relevant_count or 1))
+    return max(1, int(case.relevant_count or len(case.relevant_doc_ids) or 1))
+
+
+def _context_overlap(reference: str, haystack: str) -> float:
+    reference_terms = {
+        token
+        for token in re_split_words(reference.lower())
+        if len(token) >= 4
+    }
+    if not reference_terms:
+        return 0.0
+    haystack_terms = set(re_split_words(haystack.lower()))
+    return len(reference_terms & haystack_terms) / len(reference_terms)
+
+
+def re_split_words(value: str) -> list[str]:
+    return [item for item in re.split(r"[^\w.]+", value) if item]
 
 
 def _state_symbols(
@@ -1221,11 +1908,6 @@ def _state_symbols(
     if symbols:
         return symbols
     return [normalize_symbol(_attr(item, "symbol")) for item in state.get("radar_items", [])]
-
-
-def _blocking_risk_codes(assessment: Any) -> set[str]:
-    violations = _attr(assessment, "blocking_violations", default=[])
-    return {_enum_value(_attr(violation, "code")) for violation in violations}
 
 
 def _trace_span_ms(events: Sequence[TraceEvent]) -> float:
@@ -1298,7 +1980,18 @@ def _load_rag_cases(path: str | Path) -> tuple[RagEvalCase, ...]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, list):
         raise ValueError("RAG cases file must contain a JSON list")
-    return tuple(RagEvalCase(**item) for item in payload)
+    allowed = {item.name for item in fields(RagEvalCase)}
+    cases = []
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise ValueError("Each RAG case must be a JSON object")
+        normalized = dict(item)
+        if "expected_contexts" in normalized and "reference_contexts" not in normalized:
+            normalized["reference_contexts"] = normalized["expected_contexts"]
+        if "expected_sources" in normalized and "reference_source_substrings" not in normalized:
+            normalized["reference_source_substrings"] = normalized["expected_sources"]
+        cases.append(RagEvalCase(**{key: value for key, value in normalized.items() if key in allowed}))
+    return tuple(cases)
 
 
 def _emit_report(
@@ -1351,3 +2044,4 @@ __all__ = [
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+

@@ -1,13 +1,13 @@
 """Futu simulated trading adapter.
 
 This adapter is intentionally scoped to ``TrdEnv.SIMULATE``. It never unlocks
-trading, never submits real orders, and keeps broker SDK details out of agents.
+trading and never submits real orders.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Tuple
 
 from ai_trading_copilot.copilot.adapters.stock_info import normalize_futu_symbol
 from ai_trading_copilot.copilot.domain.models import (
@@ -37,72 +37,6 @@ class FutuSimulatedExecutionAdapter:
         self.port = port or int(os.getenv("FUTU_OPEND_PORT", "11111"))
         self.acc_id = acc_id if acc_id is not None else _optional_int(os.getenv("FUTU_ACC_ID"))
         self.security_firm = security_firm or os.getenv("FUTU_SECURITY_FIRM", "").strip()
-
-    def get_accounts(self) -> list[Dict[str, Any]]:
-        futu = _load_futu()
-        ctx = None
-        try:
-            ctx = _create_trade_context(
-                futu.OpenSecTradeContext,
-                self.host,
-                self.port,
-                futu.TrdMarket,
-                _security_firm(futu.SecurityFirm, self.security_firm),
-            )
-            return _records(ctx.get_acc_list(), futu.RET_OK)
-        finally:
-            if ctx is not None:
-                ctx.close()
-
-    def get_positions(self, *, symbol: str | None = None) -> list[Dict[str, Any]]:
-        futu = _load_futu()
-        ctx = None
-        try:
-            ctx = _create_trade_context(
-                futu.OpenSecTradeContext,
-                self.host,
-                self.port,
-                futu.TrdMarket,
-                _security_firm(futu.SecurityFirm, self.security_firm),
-            )
-            code = normalize_futu_symbol(symbol) if symbol else ""
-            return _records(
-                ctx.position_list_query(
-                    code=code,
-                    trd_env=futu.TrdEnv.SIMULATE,
-                    acc_id=self.acc_id or 0,
-                    refresh_cache=True,
-                ),
-                futu.RET_OK,
-            )
-        finally:
-            if ctx is not None:
-                ctx.close()
-
-    def get_cash(self) -> Dict[str, Any]:
-        futu = _load_futu()
-        ctx = None
-        try:
-            ctx = _create_trade_context(
-                futu.OpenSecTradeContext,
-                self.host,
-                self.port,
-                futu.TrdMarket,
-                _security_firm(futu.SecurityFirm, self.security_firm),
-            )
-            kwargs = {
-                "trd_env": futu.TrdEnv.SIMULATE,
-                "acc_id": self.acc_id or 0,
-                "refresh_cache": True,
-            }
-            currency = getattr(futu.Currency, "USD", None)
-            if currency is not None:
-                kwargs["currency"] = currency
-            records = _records(ctx.accinfo_query(**kwargs), futu.RET_OK)
-            return records[0] if records else {}
-        finally:
-            if ctx is not None:
-                ctx.close()
 
     def place_order(self, request: BrokerExecutionRequest) -> BrokerExecutionResult:
         if request.trd_env != "SIMULATE":
@@ -165,40 +99,6 @@ class FutuSimulatedExecutionAdapter:
             raw=raw,
         )
 
-    def cancel_order(self, order_id: str) -> BrokerExecutionResult:
-        futu = _load_futu()
-        ctx = None
-        key = f"cancel:{order_id}"
-        try:
-            ctx = _create_trade_context(
-                futu.OpenSecTradeContext,
-                self.host,
-                self.port,
-                futu.TrdMarket,
-                _security_firm(futu.SecurityFirm, self.security_firm),
-            )
-            ret, data = ctx.modify_order(
-                futu.ModifyOrderOp.CANCEL,
-                order_id,
-                0,
-                0,
-                trd_env=futu.TrdEnv.SIMULATE,
-                acc_id=self.acc_id or 0,
-            )
-        finally:
-            if ctx is not None:
-                ctx.close()
-
-        raw = _first_record_from_data(data)
-        return BrokerExecutionResult(
-            idempotency_key=key,
-            submitted=ret == futu.RET_OK,
-            order_id=str(order_id),
-            status="cancelled" if ret == futu.RET_OK else "failed",
-            message="Futu simulated order cancelled." if ret == futu.RET_OK else str(data),
-            raw=raw,
-        )
-
 
 def _load_futu():
     try:
@@ -247,21 +147,6 @@ def _trd_side(side_cls, value: str):
 def _order_type(order_type_cls, value: str):
     name = value.strip().upper() or "NORMAL"
     return getattr(order_type_cls, name, order_type_cls.NORMAL)
-
-
-def _records(result: Tuple[Any, Any], ret_ok) -> list[Dict[str, Any]]:
-    ret, data = result
-    if ret != ret_ok:
-        raise FutuExecutionError(str(data))
-    if data is None or getattr(data, "empty", False):
-        return []
-    if hasattr(data, "to_dict"):
-        return [_clean_record(row) for row in data.to_dict("records")]
-    if isinstance(data, list):
-        return [_clean_record(row) for row in data if isinstance(row, dict)]
-    if isinstance(data, dict):
-        return [_clean_record(data)]
-    return [{"value": str(data)}]
 
 
 def _first_record_from_data(data: Any) -> Dict[str, Any]:
@@ -313,3 +198,6 @@ def _first_present(*values: Any) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+__all__ = ["FutuExecutionError", "FutuSimulatedExecutionAdapter"]

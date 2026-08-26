@@ -1,4 +1,4 @@
-"""State contract for the explainable copilot LangGraph."""
+﻿"""State contract for the explainable copilot LangGraph."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from ai_trading_copilot.copilot.domain.models import (
     CopilotRunReport,
     DistilledMemory,
     ExecutionDecision,
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     NewsSentimentReport,
     OpportunityRadarItem,
     PortfolioSnapshot,
@@ -39,7 +39,7 @@ class CopilotGraphState(TypedDict, total=False):
     portfolio: PortfolioSnapshot
     portfolio_mode: ExecutionMode
     price_history_by_symbol: Dict[str, List[PriceBar]]
-    fundamental_news_by_symbol: Dict[str, FundamentalNewsReport]
+    fundamental_analysis_by_symbol: Dict[str, FundamentalAnalysisReport]
     trade_date: Optional[str]
     look_back_days: int
     radar_items: List[OpportunityRadarItem]
@@ -47,7 +47,7 @@ class CopilotGraphState(TypedDict, total=False):
     technical_contexts: Dict[str, TechnicalContext]
     news_sentiment_by_symbol: Dict[str, NewsSentimentReport]
     market_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
-    fundamental_news_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
+    fundamental_analysis_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
     news_sentiment_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
     opportunity_reports_by_symbol: Annotated[Dict[str, str], merge_dicts]
     trade_plans: Dict[str, TradePlan]
@@ -63,6 +63,6 @@ class CopilotGraphState(TypedDict, total=False):
     errors: List[str]
     execution_mode: ExecutionMode
     user_confirmed: bool
-    broker_execution_enabled: bool
     run_id: str
     trace_persisted: bool
+

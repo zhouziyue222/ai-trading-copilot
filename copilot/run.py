@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List
@@ -44,7 +45,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "subscription_symbols": symbols,
         "selected_analysts": selected_analysts,
         "price_history_by_symbol": None,
-        "fundamental_news_by_symbol": None,
+        "fundamental_analysis_by_symbol": None,
         "portfolio": None,
         "report_output_dir": str(output_dir),
         "trade_date": args.trade_date,
@@ -52,7 +53,6 @@ def main(argv: Iterable[str] | None = None) -> int:
         "mode": ExecutionMode(args.mode),
         "portfolio_mode": ExecutionMode(args.portfolio_mode),
         "user_confirmed": False,
-        "broker_execution_enabled": args.broker_execution_enabled,
         "run_id": run_id,
     }
     defaults = {
@@ -61,6 +61,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "execution_mode_default": ExecutionMode.SIMULATION.value,
         "portfolio_mode_default": ExecutionMode.SIMULATION.value,
         "look_back_days_default": 90,
+        "technical_debug": args.technical_debug,
     }
     tracker = RunTracker(
         output_dir=output_dir,
@@ -74,7 +75,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         CopilotLangGraph,
         run_tracker=tracker,
         memory_agent=create_default_memory_agent(),
-        fundamental_rag_retriever=create_default_fundamental_research_retriever(),
+        fundamental_rag_retriever=(
+            create_default_fundamental_research_retriever()
+            if _enable_fundamental_rag()
+            else None
+        ),
+        technical_position_debug=args.technical_debug,
     )
     state = None
     error = None
@@ -141,6 +147,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser.add_argument("--trade-date", help="YYYY-MM-DD trade date. Defaults to today.")
     parser.add_argument("--look-back-days", type=int, default=90)
     parser.add_argument(
+        "--technical-debug",
+        action="store_true",
+        help="Use the debug prompt only for the technical_position analyst.",
+    )
+    parser.add_argument(
         "--mode",
         choices=[ExecutionMode.SIMULATION.value, ExecutionMode.LIVE.value],
         default=ExecutionMode.SIMULATION.value,
@@ -149,11 +160,6 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         "--portfolio-mode",
         choices=[ExecutionMode.SIMULATION.value, ExecutionMode.LIVE.value],
         default=ExecutionMode.SIMULATION.value,
-    )
-    parser.add_argument(
-        "--broker-execution-enabled",
-        action="store_true",
-        help="Submit risk-approved order candidates to a Futu simulated account.",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -290,6 +296,15 @@ def _load_questionary():
     return questionary
 
 
+def _enable_fundamental_rag() -> bool:
+    return os.getenv("COPILOT_ENABLE_FUNDAMENTAL_RAG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _require_symbols(symbols: Iterable[str], message: str) -> List[str]:
     normalized = _unique_symbols(symbols)
     if not normalized:
@@ -311,7 +326,7 @@ def create_default_fundamental_research_retriever(
     path: str | Path = DEFAULT_MEMORY_FILE,
     *,
     rag_chroma_dir: str | Path | None = None,
-    auto_ingest_seed: bool = True,
+    auto_ingest_seed: bool = False,
 ) -> FundamentalResearchRetriever:
     memory_path = Path(path)
     retriever = FundamentalResearchRetriever(
@@ -328,11 +343,14 @@ def _create_graph(
     run_tracker: RunTracker,
     memory_agent,
     fundamental_rag_retriever=None,
+    technical_position_debug: bool = False,
 ):
     if _accepts_keyword(graph_cls, "memory_agent"):
         kwargs = {"run_tracker": run_tracker, "memory_agent": memory_agent}
         if _accepts_keyword(graph_cls, "fundamental_rag_retriever"):
             kwargs["fundamental_rag_retriever"] = fundamental_rag_retriever
+        if _accepts_keyword(graph_cls, "technical_position_debug"):
+            kwargs["technical_position_debug"] = technical_position_debug
         return graph_cls(**kwargs)
     return graph_cls(run_tracker=run_tracker)
 

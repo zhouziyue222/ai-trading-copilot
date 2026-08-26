@@ -41,6 +41,66 @@ def test_run_tracker_records_node_and_report_status(tmp_path):
     assert payload["status"] == "failed"
 
 
+def test_run_tracker_records_sanitized_node_activity(tmp_path):
+    tracker = _tracker(tmp_path)
+    tracker.start_node("Technical Position")
+
+    tracker.record_node_activity(
+        "Technical Position",
+        {
+            "phase": "tool.call",
+            "status": "running",
+            "title": "正在调用 get_stock_info",
+            "tool_name": "get_stock_info",
+            "args": {"symbol": "CRCL", "api_key": "secret", "nested": {"token": "hidden"}},
+            "summary": {"tool.output": {"chars": 10, "sha256": "abc"}},
+        },
+    )
+    for index in range(25):
+        tracker.record_node_activity(
+            "Technical Position",
+            {
+                "phase": "tool.call",
+                "status": "ok",
+                "title": f"完成调用 tool_{index}",
+                "tool_name": f"tool_{index}",
+                "args": {"api_key": "secret", "token": "hidden", "password": "masked"},
+            },
+            completed=True,
+        )
+
+    payload = json.loads((tmp_path / "run_status.json").read_text(encoding="utf-8"))
+    node = payload["nodes"]["Technical Position"]
+    assert node["activity"]["tool_name"] == "tool_24"
+    assert node["activity"]["args"]["password"] == "<redacted>"
+    assert len(node["activity_history"]) == 20
+    first = node["activity_history"][0]
+    assert first["tool_name"] == "tool_5"
+    assert "secret" not in json.dumps(node, ensure_ascii=False)
+    assert "hidden" not in json.dumps(node, ensure_ascii=False)
+    assert "masked" not in json.dumps(node, ensure_ascii=False)
+
+
+def test_run_tracker_records_cancel_request_and_cancelled_terminal_state(tmp_path):
+    tracker = _tracker(tmp_path)
+    tracker.start_node("Technical Position")
+
+    assert tracker.request_cancel() is True
+    assert tracker.is_cancel_requested() is True
+    tracker.cancel()
+    tracker.finish()
+
+    payload = json.loads((tmp_path / "run_status.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "cancelled"
+    assert payload["cancel_requested"] is True
+    assert payload["cancel_requested_at"]
+    assert payload["cancelled_at"]
+    assert payload["finished_at"] == payload["cancelled_at"]
+    assert payload["current_node"] is None
+    assert payload["nodes"]["Technical Position"]["status"] == "skipped"
+    assert payload["nodes"]["Technical Position"]["error"] == "cancelled"
+
+
 def test_langgraph_tracker_records_reports_for_successful_run(tmp_path):
     tracker = _tracker(tmp_path)
     state = CopilotLangGraph(
@@ -58,10 +118,14 @@ def test_langgraph_tracker_records_reports_for_successful_run(tmp_path):
     assert payload["nodes"][CopilotLangGraph.NODE_TECHNICAL_POSITION]["status"] == "succeeded"
     assert payload["nodes"][CopilotLangGraph.NODE_NEWS_SENTIMENT]["status"] == "succeeded"
     assert payload["nodes"][CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS]["status"] == "succeeded"
-    assert payload["nodes"][CopilotLangGraph.NODE_OPPORTUNITY_RADAR]["status"] == "skipped"
+    assert CopilotLangGraph.NODE_OPPORTUNITY_RADAR not in payload["nodes"]
     assert payload["reports"]["futu_portfolio"]["exists"] is True
     assert payload["reports"]["run_explanation"]["exists"] is True
     assert (tmp_path / "run_audit.md").exists()
+    audit = (tmp_path / "run_audit.md").read_text(encoding="utf-8")
+    assert "# Trading Copilot Run Audit" in audit
+    for marker in ["锛", "涓", "鏅", "浜", "鍩", "椋"]:
+        assert marker not in audit
 
 
 def test_run_tracker_writes_decision_summary_from_state(tmp_path):
@@ -96,18 +160,36 @@ def test_run_tracker_writes_decision_summary_from_state(tmp_path):
                 "entry_logic": "Buy near support",
             }
         },
-        "risk_assessments": {"AAPL": {"approved": False, "violations": []}},
+        "risk_assessments": {
+            "AAPL": {
+                "symbol": "AAPL",
+                "approved": True,
+                "current_position_weight": 0.0,
+                "target_weight": 0.2,
+                "final_weight": 0.2,
+                "delta_weight": 0.2,
+                "estimated_trade_value": 20_000,
+                "clamped": False,
+            }
+        },
         "execution_decisions": {
             "AAPL": {
                 "symbol": "AAPL",
-                "status": "blocked_by_risk",
+                "status": "portfolio_decided",
                 "direction": "buy",
-                "approved_by_risk": False,
-                "message": "Blocked by hard risk rule",
+                "approved_by_risk": True,
+                "message": "Portfolio Manager selected buy 10 shares within risk limits.",
+                "action": "buy",
+                "quantity": 10,
+                "current_weight": 0.0,
+                "target_weight": 0.2,
+                "final_weight": 0.2,
+                "delta_weight": 0.2,
+                "estimated_trade_value": 20_000,
             }
         },
         "report": {
-            "summary": "One actionable setup was blocked by risk.",
+            "summary": "One actionable setup received a portfolio decision.",
             "market_regime": {"regime": "uptrend"},
         },
         "errors": [],
@@ -118,14 +200,18 @@ def test_run_tracker_writes_decision_summary_from_state(tmp_path):
 
     payload = json.loads((tmp_path / "run_status.json").read_text(encoding="utf-8"))
     summary = payload["decision_summary"]
-    assert summary["summary"] == "One actionable setup was blocked by risk."
+    assert summary["summary"] == "One actionable setup received a portfolio decision."
     assert summary["market_regime"] == "uptrend"
     assert summary["metrics"]["symbol_count"] == 1
     assert summary["metrics"]["actionable_count"] == 1
-    assert summary["metrics"]["risk_blocked_count"] == 1
+    assert summary["metrics"]["risk_adjusted_count"] == 0
+    assert summary["metrics"]["risk_held_count"] == 0
+    assert summary["metrics"]["portfolio_decided_count"] == 1
     assert summary["symbols"][0]["symbol"] == "AAPL"
     assert summary["symbols"][0]["direction"] == "buy"
-    assert summary["symbols"][0]["execution_status"] == "blocked_by_risk"
+    assert summary["symbols"][0]["execution_status"] == "portfolio_decided"
+    assert summary["symbols"][0]["target_weight"] == 0.2
+    assert summary["symbols"][0]["final_weight"] == 0.2
 
 
 def test_langgraph_tracker_records_failed_node(tmp_path):

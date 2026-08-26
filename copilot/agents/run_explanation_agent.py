@@ -16,6 +16,7 @@ from ai_trading_copilot.copilot.domain.models import (
     TradePlan,
 )
 from ai_trading_copilot.copilot.domain.localization import zh_join, zh_label
+from ai_trading_copilot.copilot.services.cancellation import RunCancelled, check_cancelled
 
 
 class RunExplanationAgent:
@@ -54,7 +55,10 @@ class RunExplanationAgent:
 
             risk_notes = []
             if risk is not None:
-                risk_notes.extend(v.message for v in risk.violations)
+                risk_notes.append(
+                    f"Risk target {risk.target_weight:.2%}, final {risk.final_weight:.2%}, delta {risk.delta_weight:.2%}."
+                )
+                risk_notes.extend(risk.warnings)
             if item.symbol in risk_challenges:
                 risk_notes.append(risk_challenges[item.symbol])
 
@@ -134,8 +138,12 @@ class RunExplanationAgent:
             f"结构化标的摘要：{[item.model_dump() for item in symbols]}"
         )
         try:
+            check_cancelled()
             response = self.llm.invoke(prompt)
+            check_cancelled()
             content = getattr(response, "content", response)
             return str(content).strip() or fallback
+        except RunCancelled:
+            raise
         except Exception:
             return fallback

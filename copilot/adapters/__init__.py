@@ -6,34 +6,33 @@ from .market_data import (
     get_stock_data_text,
     parse_price_bars_from_csv,
 )
+from .futu_execution import FutuExecutionError, FutuSimulatedExecutionAdapter
 from .portfolio import (
     FutuPortfolioError,
     format_portfolio_snapshot,
     get_futu_portfolio_snapshot,
 )
-from .futu_execution import (
-    FutuExecutionError,
-    FutuSimulatedExecutionAdapter,
-)
 from .stock_info import (
     FutuStockInfoError,
     format_stock_info,
     get_futu_stock_info,
+    normalize_futu_code_to_symbol,
     normalize_futu_symbol,
 )
 
 __all__ = [
+    "FutuExecutionError",
     "FutuPortfolioError",
     "FutuStockInfoError",
     "FutuMarketDataAdapter",
     "FutuMarketDataError",
-    "FutuExecutionError",
     "FutuSimulatedExecutionAdapter",
     "format_portfolio_snapshot",
     "format_stock_info",
     "get_futu_portfolio_snapshot",
     "get_futu_stock_info",
     "get_stock_data_text",
+    "normalize_futu_code_to_symbol",
     "normalize_futu_symbol",
     "parse_price_bars_from_csv",
 ]

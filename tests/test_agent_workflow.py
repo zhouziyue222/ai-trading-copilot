@@ -1,5 +1,5 @@
 from ai_trading_copilot.copilot.agents import (
-    ExecutionAlertManager,
+    PortfolioManager,
     RiskAgent,
 )
 from ai_trading_copilot.copilot.domain import (
@@ -7,7 +7,6 @@ from ai_trading_copilot.copilot.domain import (
     ExecutionStatus,
     MarketRegime,
     PortfolioSnapshot,
-    RiskRuleCode,
     SubscriptionStatus,
     TradeDirection,
     TradePlan,
@@ -21,7 +20,7 @@ def _workflow() -> TradePlanReviewWorkflow:
         persona_config=UserPersonaConfig(),
         subscription_symbols=["AAPL"],
         risk_agent=RiskAgent(),
-        execution_manager=ExecutionAlertManager(),
+        portfolio_manager=PortfolioManager(),
     )
 
 
@@ -45,26 +44,26 @@ def _plan(**overrides):
     return TradePlan(**data)
 
 
-def _codes(review):
-    return {violation.code for violation in review.risk_assessment.violations}
-
-
 def test_workflow_approves_valid_subscribed_plan_for_simulation():
     review = _workflow().review(plan=_plan(), portfolio=PortfolioSnapshot())
 
     assert review.risk_assessment.approved is True
-    assert review.execution_decision.status == ExecutionStatus.SIMULATION_READY
+    assert review.risk_assessment.target_weight == 0.20
+    assert review.risk_assessment.final_weight == 0.20
+    assert review.execution_decision.status == ExecutionStatus.PORTFOLIO_DECIDED
 
 
-def test_workflow_blocks_non_subscription_before_execution():
+def test_workflow_holds_non_subscription_flat():
     review = _workflow().review(
         plan=_plan(symbol="MSFT"),
         portfolio=PortfolioSnapshot(),
     )
 
     assert review.risk_assessment.approved is False
-    assert RiskRuleCode.SUBSCRIPTION_REQUIRED in _codes(review)
-    assert review.execution_decision.status == ExecutionStatus.BLOCKED_BY_RISK
+    assert review.risk_assessment.warnings
+    assert review.risk_assessment.final_weight == 0
+    assert review.execution_decision.action == "hold"
+    assert review.execution_decision.status == ExecutionStatus.ALERT_ONLY
 
 
 def test_workflow_live_mode_still_requires_confirmation():

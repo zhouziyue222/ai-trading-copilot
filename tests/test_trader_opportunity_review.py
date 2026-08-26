@@ -1,8 +1,8 @@
-import pytest
+﻿import pytest
 
 from ai_trading_copilot.copilot.agents import TraderAgent
 from ai_trading_copilot.copilot.domain import (
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     OpportunityRadarItem,
     SubscriptionStatus,
     TechnicalPosition,
@@ -41,7 +41,7 @@ def test_trader_internal_review_keeps_clean_report_actionable():
     result = TraderAgent().create_plan_with_report(
         opportunity=_opportunity(),
         technical_position=_position(),
-        fundamental_news=FundamentalNewsReport(symbol="AAPL", thesis_intact=True),
+        fundamental_analysis=FundamentalAnalysisReport(symbol="AAPL", thesis_intact=True),
         persona=UserPersonaConfig(),
     )
 
@@ -54,7 +54,7 @@ def test_trader_internal_review_downgrades_material_risk():
     result = TraderAgent().create_plan_with_report(
         opportunity=_opportunity(),
         technical_position=_position(),
-        fundamental_news=FundamentalNewsReport(
+        fundamental_analysis=FundamentalAnalysisReport(
             symbol="AAPL",
             material_risk=True,
             risk_flags=["regulatory_probe"],
@@ -73,6 +73,8 @@ def test_trader_internal_review_rejects_symbol_mismatch():
         TraderAgent().create_plan_with_report(
             opportunity=_opportunity(),
             technical_position=_position(),
-            fundamental_news=FundamentalNewsReport(symbol="MSFT"),
+            fundamental_analysis=FundamentalAnalysisReport(symbol="MSFT"),
             persona=UserPersonaConfig(),
         )
+
+

@@ -1,4 +1,4 @@
-"""Pydantic models for the AI trading copilot domain."""
+﻿"""Pydantic models for the AI trading copilot domain."""
 
 from __future__ import annotations
 
@@ -15,8 +15,6 @@ from .enums import (
     MemoryType,
     MarketRegime,
     MarketType,
-    RiskRuleCode,
-    RiskSeverity,
     SymbolTrendState,
     SubscriptionStatus,
     TradeDirection,
@@ -46,6 +44,7 @@ class UserPersonaConfig(BaseModel):
         ]
     )
     max_single_position_weight: float = Field(default=0.50, gt=0, le=1)
+    max_gross_exposure: float = Field(default=1.00, gt=0)
     default_position_weight_min: float = Field(default=0.10, ge=0, le=1)
     default_position_weight_max: float = Field(default=0.25, ge=0, le=1)
     stock_source: str = "user_subscription_list"
@@ -111,18 +110,21 @@ class SubscriptionBook(BaseModel):
 
 
 class PortfolioSnapshot(BaseModel):
-    """Portfolio context used by risk checks."""
+    """Portfolio context used by risk limits and portfolio decisions."""
 
     current_drawdown: float = Field(default=0.0, ge=0, le=1)
     position_weights: Dict[str, float] = Field(default_factory=dict)
+    cash: Optional[float] = Field(default=None, ge=0)
+    total_value: Optional[float] = Field(default=None, gt=0)
+    margin_requirement: float = Field(default=0.0, ge=0, le=1)
 
     @field_validator("position_weights")
     @classmethod
     def normalize_position_keys(cls, value: Dict[str, float]) -> Dict[str, float]:
         normalized = {}
         for symbol, weight in value.items():
-            if weight < 0 or weight > 1:
-                raise ValueError("position weights must be between 0 and 1")
+            if weight < -1 or weight > 1:
+                raise ValueError("position weights must be between -1 and 1")
             normalized[normalize_symbol(symbol)] = weight
         return normalized
 
@@ -197,6 +199,9 @@ class TechnicalContext(BaseModel):
     market: Optional[TechnicalDimension] = None
     summary: str = ""
     warnings: List[str] = Field(default_factory=list)
+    decision_basis: List[str] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
+    downstream_summary: str = ""
 
 
 class OpportunityRadarItem(BaseModel):
@@ -224,8 +229,8 @@ class OpportunityRadarItem(BaseModel):
         return self
 
 
-class FundamentalNewsReport(BaseModel):
-    """Structured fundamental/news risk input for opportunity review."""
+class FundamentalAnalysisReport(BaseModel):
+    """Structured company-fundamental risk input for opportunity review."""
 
     symbol: str
     thesis_intact: bool = True
@@ -236,6 +241,9 @@ class FundamentalNewsReport(BaseModel):
     sentiment_score: Optional[float] = Field(default=None, ge=-1, le=1)
     key_events: List[str] = Field(default_factory=list)
     data_availability: Dict[str, str] = Field(default_factory=dict)
+    decision_basis: List[str] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
+    downstream_summary: str = ""
 
     @field_validator("symbol")
     @classmethod
@@ -258,8 +266,12 @@ class NewsSentimentReport(BaseModel):
     risk_flags: List[str] = Field(default_factory=list)
     key_events: List[str] = Field(default_factory=list)
     alerts: List[str] = Field(default_factory=list)
+    news_references: List[Dict[str, str]] = Field(default_factory=list)
     summary: str = ""
     data_availability: Dict[str, str] = Field(default_factory=dict)
+    decision_basis: List[str] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
+    downstream_summary: str = ""
 
     @field_validator("symbol")
     @classmethod
@@ -270,31 +282,8 @@ class NewsSentimentReport(BaseModel):
         return normalized
 
 
-class BrokerExecutionRequest(BaseModel):
-    """One broker action candidate. First implementation is SIMULATE only."""
-
-    idempotency_key: str
-    symbol: str
-    side: str
-    quantity: float = Field(gt=0)
-    price: Optional[float] = Field(default=None, gt=0)
-    order_type: str = "NORMAL"
-    trd_env: str = "SIMULATE"
-
-
-class BrokerExecutionResult(BaseModel):
-    """Result returned by a broker adapter."""
-
-    idempotency_key: str
-    submitted: bool
-    order_id: Optional[str] = None
-    status: str = ""
-    message: str = ""
-    raw: Dict[str, Any] = Field(default_factory=dict)
-
-
 class TradePlan(BaseModel):
-    """Structured trade plan produced before hard risk approval."""
+    """Structured trade plan consumed by Risk Manager and Portfolio Manager."""
 
     symbol: str
     subscription_status: SubscriptionStatus
@@ -324,39 +313,83 @@ class TradePlan(BaseModel):
         return normalized
 
 
-class RiskViolation(BaseModel):
-    code: RiskRuleCode
-    severity: RiskSeverity
-    message: str
+class RiskLimits(BaseModel):
+    """Portfolio-level limits used by the v2 Risk Manager."""
+
+    max_position_pct: float = Field(default=0.20, gt=0, le=1)
+    max_gross_exposure: float = Field(default=1.00, gt=0)
+
+
+class ClampEvent(BaseModel):
+    """One deterministic risk adjustment from requested to allowed weight."""
+
+    symbol: str
+    reason: str
+    before: float
+    after: float
+    limit: float
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol_field(cls, value: str) -> str:
+        normalized = normalize_symbol(value)
+        if not normalized:
+            raise ValueError("symbol is required")
+        return normalized
 
 
 class RiskAssessment(BaseModel):
-    """Result of hard risk validation."""
+    """v2 risk result for one symbol after portfolio-level clamping."""
 
-    approved: bool
-    violations: List[RiskViolation] = Field(default_factory=list)
+    symbol: str = ""
+    approved: bool = True
+    current_price: Optional[float] = Field(default=None, gt=0)
+    current_position_weight: float = Field(default=0.0, ge=-1, le=1)
+    target_weight: float = Field(default=0.0, ge=-1, le=1)
+    final_weight: float = Field(default=0.0, ge=-1, le=1)
+    delta_weight: float = 0.0
+    portfolio_value: float = Field(default=0.0, ge=0)
+    estimated_trade_value: float = 0.0
+    clamped: bool = False
+    clamps: List[ClampEvent] = Field(default_factory=list)
+    risk_limits: Optional[RiskLimits] = None
+    reasoning: Dict[str, str] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
 
-    @property
-    def blocking_violations(self) -> List[RiskViolation]:
-        return [v for v in self.violations if v.severity == RiskSeverity.BLOCK]
-
-    @property
-    def warnings(self) -> List[RiskViolation]:
-        return [v for v in self.violations if v.severity == RiskSeverity.WARN]
-
+    @field_validator("symbol")
     @classmethod
-    def from_violations(cls, violations: List[RiskViolation]) -> "RiskAssessment":
-        return cls(
-            approved=not any(v.severity == RiskSeverity.BLOCK for v in violations),
-            violations=violations,
-        )
+    def normalize_symbol_field(cls, value: str) -> str:
+        return normalize_symbol(value) if value else ""
+
+
+class BrokerExecutionRequest(BaseModel):
+    """One simulated broker order request."""
+
+    idempotency_key: str
+    symbol: str
+    side: str
+    quantity: int = Field(gt=0)
+    price: Optional[float] = Field(default=None, gt=0)
+    order_type: str = "NORMAL"
+    trd_env: str = "SIMULATE"
+
+
+class BrokerExecutionResult(BaseModel):
+    """Result returned by a broker adapter."""
+
+    idempotency_key: str
+    submitted: bool
+    order_id: Optional[str] = None
+    status: str = ""
+    message: str = ""
+    raw: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionDecision(BaseModel):
-    """Execution/alert manager output.
+    """Portfolio Manager final decision.
 
-    Broker fields are populated only when simulated broker execution is
-    explicitly enabled for the run.
+    The class name is retained for API compatibility. It no longer represents a
+    broker execution handoff; it carries ai-hedge-fund-style portfolio actions.
     """
 
     symbol: str
@@ -366,8 +399,22 @@ class ExecutionDecision(BaseModel):
     approved_by_risk: bool
     requires_user_confirmation: bool
     message: str
+    action: str = "hold"
+    quantity: int = Field(default=0, ge=0)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    reasoning: str = ""
+    current_weight: float = 0.0
+    target_weight: float = 0.0
+    final_weight: float = 0.0
+    delta_weight: float = 0.0
+    current_price: Optional[float] = Field(default=None, gt=0)
+    estimated_trade_value: float = 0.0
+    pending_broker_order: bool = False
+    broker_confirmation_required: bool = False
     submitted_to_broker: bool = False
+    submitted_quantity: int = Field(default=0, ge=0)
     broker_order_id: Optional[str] = None
+    broker_status: str = ""
     broker_message: str = ""
     broker_idempotency_key: str = ""
 
@@ -459,17 +506,19 @@ __all__ = [
     "AnalystType",
     "BrokerExecutionRequest",
     "BrokerExecutionResult",
+    "ClampEvent",
     "CopilotRunReport",
     "DistilledMemory",
     "ExecutionDecision",
-    "FundamentalNewsReport",
+    "FundamentalAnalysisReport",
     "MarketRegimeReport",
+    "NewsSentimentReport",
     "OpportunityRadarItem",
     "PortfolioSnapshot",
     "PriceBar",
     "RagDocument",
     "RiskAssessment",
-    "RiskViolation",
+    "RiskLimits",
     "Subscription",
     "SubscriptionBook",
     "SymbolTrendState",
@@ -484,3 +533,4 @@ __all__ = [
     "ValidationError",
     "normalize_symbol",
 ]
+

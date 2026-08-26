@@ -1,28 +1,23 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from langchain_core.messages import AIMessage
 
 from ai_trading_copilot.copilot.agents import (
-    ExecutionAlertManager,
+    PortfolioManager,
     RiskAgent,
     TraderAgent,
 )
 from ai_trading_copilot.copilot.domain import (
-    BrokerExecutionResult,
     ExecutionMode,
     ExecutionStatus,
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     MarketRegime,
     PortfolioSnapshot,
-    RiskRuleCode,
-    Subscription,
-    SubscriptionBook,
     SubscriptionStatus,
     TechnicalPosition,
     TradeDirection,
     UserPersonaConfig,
 )
-from ai_trading_copilot.copilot.domain.enums import MarketType
 from ai_trading_copilot.copilot.domain.models import OpportunityRadarItem, TradePlan
 
 
@@ -34,21 +29,6 @@ class StaticLLM:
     def invoke(self, prompt):
         self.prompts.append(prompt)
         return AIMessage(content=self.content)
-
-
-class FakeExecutionAdapter:
-    def __init__(self):
-        self.requests = []
-
-    def place_order(self, request):
-        self.requests.append(request)
-        return BrokerExecutionResult(
-            idempotency_key=request.idempotency_key,
-            submitted=True,
-            order_id="SIM-1",
-            status="submitted",
-            message="fake simulated order submitted",
-        )
 
 
 def _opportunity(status=SubscriptionStatus.ACTIONABLE):
@@ -97,6 +77,15 @@ def _plan(**overrides):
     return TradePlan(**data)
 
 
+def _risk(plan=None):
+    plan = plan or _plan()
+    return RiskAgent().review(
+        persona=UserPersonaConfig(),
+        portfolio=PortfolioSnapshot(total_value=100_000, cash=80_000),
+        plan=plan,
+    )
+
+
 def test_trader_agent_internal_review_uses_llm_report_and_structured_json():
     llm = StaticLLM(
         "# Trader review\n\n"
@@ -114,7 +103,7 @@ def test_trader_agent_internal_review_uses_llm_report_and_structured_json():
     result = TraderAgent(llm=llm).create_plan_with_report(
         opportunity=_opportunity(),
         technical_position=_position(),
-        fundamental_news=FundamentalNewsReport(
+        fundamental_analysis=FundamentalAnalysisReport(
             symbol="AAPL",
             material_risk=True,
             risk_flags=["regulatory_probe"],
@@ -158,80 +147,66 @@ def test_trader_agent_uses_llm_to_build_trade_plan_and_report():
     assert result.report.startswith("# Trader report")
 
 
-def test_risk_agent_llm_report_cannot_override_hard_blocks():
-    llm = StaticLLM("# Risk report\n\nApproved despite missing subscription.")
+def test_risk_agent_report_explains_v2_weight_clamp():
+    llm = StaticLLM("# Risk report\n\nThis should not drive deterministic limits.")
     result = RiskAgent(llm=llm).review_with_report(
         persona=UserPersonaConfig(),
-        subscriptions=SubscriptionBook(
-            items=[Subscription(symbol="MSFT", market_type=MarketType.US_STOCK)]
-        ),
-        portfolio=PortfolioSnapshot(),
+        portfolio=PortfolioSnapshot(total_value=100_000, cash=80_000),
         plan=_plan(),
         analyst_context="tool-derived reports",
     )
 
-    assert result.assessment.approved is False
-    assert result.assessment.blocking_violations[0].code == RiskRuleCode.SUBSCRIPTION_REQUIRED
+    assert result.assessment.target_weight == 0.2
+    assert result.assessment.final_weight == 0.2
     assert result.risk_challenge
-    assert "风险挑战" in result.report
     assert result.risk_challenge in result.report
-    assert result.report.startswith("# Risk report")
+    assert result.report.startswith("# Risk Manager Report")
+    assert llm.prompts == []
 
 
-def test_execution_alert_manager_llm_report_keeps_live_confirmation_gate():
-    llm = StaticLLM("# Execution report\n\nWait for user confirmation.")
-    result = ExecutionAlertManager(llm=llm).prepare_with_report(
+def test_portfolio_manager_report_keeps_live_confirmation_gate():
+    llm = StaticLLM(
+        "# Portfolio report\n\n"
+        '{"action": "buy", "quantity": 10, "confidence": 0.8, '
+        '"reasoning": "Risk limit supports a small buy."}'
+    )
+    result = PortfolioManager(llm=llm).decide_with_report(
         plan=_plan(),
-        risk_assessment=RiskAgent().review(
-            persona=UserPersonaConfig(),
-            subscriptions=SubscriptionBook(
-                items=[Subscription(symbol="AAPL", market_type=MarketType.US_STOCK)]
-            ),
-            portfolio=PortfolioSnapshot(),
-            plan=_plan(),
-        ),
+        risk_assessment=_risk(),
+        portfolio=PortfolioSnapshot(total_value=100_000, cash=80_000),
         mode=ExecutionMode.LIVE,
         user_confirmed=False,
     )
 
     assert result.decision.status == ExecutionStatus.CONFIRMATION_REQUIRED
     assert result.decision.requires_user_confirmation is True
-    assert result.report.startswith("# Execution report")
+    assert result.report.startswith("# Portfolio Manager Report")
+    assert llm.prompts == []
 
 
-def test_execution_alert_manager_submits_only_when_simulated_broker_enabled():
-    adapter = FakeExecutionAdapter()
-    risk = RiskAgent().review(
-        persona=UserPersonaConfig(),
-        subscriptions=SubscriptionBook(
-            items=[Subscription(symbol="AAPL", market_type=MarketType.US_STOCK)]
-        ),
-        portfolio=PortfolioSnapshot(),
-        plan=_plan(),
-    )
+def test_portfolio_manager_never_submits_orders():
+    risk = _risk()
 
-    disabled = ExecutionAlertManager(execution_adapter=adapter).prepare(
+    disabled = PortfolioManager().decide(
         plan=_plan(),
         risk_assessment=risk,
+        portfolio=PortfolioSnapshot(total_value=100_000, cash=80_000),
         mode=ExecutionMode.SIMULATION,
-        broker_execution_enabled=False,
         run_id="run_unit",
     )
-    enabled = ExecutionAlertManager(execution_adapter=adapter).prepare(
+    enabled = PortfolioManager().decide(
         plan=_plan(),
         risk_assessment=risk,
+        portfolio=PortfolioSnapshot(total_value=100_000, cash=80_000),
         mode=ExecutionMode.SIMULATION,
-        broker_execution_enabled=True,
         run_id="run_unit",
     )
 
-    assert disabled.status == ExecutionStatus.SIMULATION_READY
+    assert disabled.status == ExecutionStatus.PORTFOLIO_DECIDED
     assert disabled.submitted_to_broker is False
-    assert enabled.status == ExecutionStatus.SIMULATED_ORDER_SUBMITTED
-    assert enabled.submitted_to_broker is True
-    assert enabled.broker_order_id == "SIM-1"
-    assert adapter.requests[0].trd_env == "SIMULATE"
-    assert adapter.requests[0].idempotency_key.startswith("run_unit:AAPL:BUY:")
+    assert enabled.status == ExecutionStatus.PORTFOLIO_DECIDED
+    assert enabled.submitted_to_broker is False
+    assert enabled.action == disabled.action
 
 
 def test_agent_report_paths_are_workspace_reports(tmp_path):
@@ -240,3 +215,5 @@ def test_agent_report_paths_are_workspace_reports(tmp_path):
     path.write_text("# Trader report\n", encoding="utf-8")
 
     assert Path(path).parent == tmp_path / "3_trader"
+
+

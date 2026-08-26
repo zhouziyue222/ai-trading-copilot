@@ -4,6 +4,7 @@ import ai_trading_copilot
 from ai_trading_copilot.copilot.config import (
     DEFAULT_DEEPSEEK_BASE_URL,
     DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_ENV_PATH,
     DEFAULT_REPORT_OUTPUT_DIR,
     create_default_deepseek_llm,
@@ -44,6 +45,8 @@ def test_default_deepseek_llm_uses_deepseek_settings(monkeypatch):
 
     assert llm.model_name == DEFAULT_DEEPSEEK_MODEL
     assert str(llm.openai_api_base).rstrip("/") == DEFAULT_DEEPSEEK_BASE_URL
+    assert llm.reasoning_effort == DEFAULT_DEEPSEEK_REASONING_EFFORT
+    assert llm.extra_body == {"thinking": {"type": "enabled"}}
 
 
 def test_graph_default_report_dir_is_copilot_reports():

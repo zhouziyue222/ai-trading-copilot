@@ -1,4 +1,4 @@
-"""Compatibility wrapper for the explainable subscription opportunity graph."""
+﻿"""Compatibility wrapper for the explainable subscription opportunity graph."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from ai_trading_copilot.copilot.domain.enums import AnalystType, ExecutionMode
 from ai_trading_copilot.copilot.domain.models import (
     ExecutionDecision,
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     OpportunityRadarItem,
     PortfolioSnapshot,
     PriceBar,
@@ -48,7 +48,7 @@ class SubscriptionOpportunityWorkflow:
         portfolio: Optional[PortfolioSnapshot] = None,
         persona_markdown: Optional[str] = None,
         persona_config: Optional[UserPersonaConfig] = None,
-        fundamental_news_by_symbol: Dict[str, FundamentalNewsReport] | None = None,
+        fundamental_analysis_by_symbol: Dict[str, FundamentalAnalysisReport] | None = None,
         selected_analysts: Optional[Iterable[AnalystType | str]] = None,
         report_output_dir: Optional[str | Path] = None,
         trade_date: Optional[str] = None,
@@ -56,7 +56,6 @@ class SubscriptionOpportunityWorkflow:
         mode: ExecutionMode = ExecutionMode.SIMULATION,
         portfolio_mode: ExecutionMode = ExecutionMode.SIMULATION,
         user_confirmed: bool = False,
-        broker_execution_enabled: bool = False,
         run_id: str | None = None,
     ) -> SubscriptionOpportunityRun:
         state = self.graph.run(
@@ -65,7 +64,7 @@ class SubscriptionOpportunityWorkflow:
             portfolio=portfolio,
             persona_markdown=persona_markdown,
             persona_config=persona_config,
-            fundamental_news_by_symbol=fundamental_news_by_symbol,
+            fundamental_analysis_by_symbol=fundamental_analysis_by_symbol,
             selected_analysts=selected_analysts,
             report_output_dir=report_output_dir,
             trade_date=trade_date,
@@ -73,7 +72,6 @@ class SubscriptionOpportunityWorkflow:
             mode=mode,
             portfolio_mode=portfolio_mode,
             user_confirmed=user_confirmed,
-            broker_execution_enabled=broker_execution_enabled,
             run_id=run_id,
         )
         return SubscriptionOpportunityRun(
@@ -88,3 +86,4 @@ class SubscriptionOpportunityWorkflow:
                 for item in state.get("radar_items", [])
             ]
         )
+

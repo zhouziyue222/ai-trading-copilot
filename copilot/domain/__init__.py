@@ -1,4 +1,4 @@
-"""Domain models and rules for the AI trading copilot."""
+﻿"""Domain models for the AI trading copilot."""
 
 from .enums import (
     AnalystType,
@@ -8,8 +8,6 @@ from .enums import (
     MemoryType,
     MarketRegime,
     MarketType,
-    RiskRuleCode,
-    RiskSeverity,
     SymbolTrendState,
     SubscriptionStatus,
     TradeDirection,
@@ -17,10 +15,11 @@ from .enums import (
 from .models import (
     BrokerExecutionRequest,
     BrokerExecutionResult,
+    ClampEvent,
     CopilotRunReport,
     DistilledMemory,
     ExecutionDecision,
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     MarketRegimeReport,
     NewsSentimentReport,
     OpportunityRadarItem,
@@ -28,7 +27,7 @@ from .models import (
     PriceBar,
     RagDocument,
     RiskAssessment,
-    RiskViolation,
+    RiskLimits,
     Subscription,
     SubscriptionBook,
     SymbolExplanation,
@@ -39,19 +38,18 @@ from .models import (
     TradePlan,
     UserPersonaConfig,
 )
-from .risk_rules import evaluate_trade_plan
-
 __all__ = [
     "AnalystType",
     "BrokerExecutionRequest",
     "BrokerExecutionResult",
+    "ClampEvent",
     "CopilotRunReport",
     "DistilledMemory",
     "ExecutionDecision",
     "ExecutionMode",
     "ExecutionStatus",
     "ForbiddenInstrument",
-    "FundamentalNewsReport",
+    "FundamentalAnalysisReport",
     "MarketRegime",
     "MarketRegimeReport",
     "MemoryType",
@@ -62,9 +60,7 @@ __all__ = [
     "PriceBar",
     "RagDocument",
     "RiskAssessment",
-    "RiskRuleCode",
-    "RiskSeverity",
-    "RiskViolation",
+    "RiskLimits",
     "Subscription",
     "SubscriptionBook",
     "SubscriptionStatus",
@@ -77,5 +73,5 @@ __all__ = [
     "TradePlan",
     "TraceEvent",
     "UserPersonaConfig",
-    "evaluate_trade_plan",
 ]
+

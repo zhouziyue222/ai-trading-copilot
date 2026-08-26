@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Iterable, Tuple
 
+from ai_trading_copilot.copilot.adapters.stock_info import normalize_futu_code_to_symbol
 from ai_trading_copilot.copilot.domain.enums import ExecutionMode
 from ai_trading_copilot.copilot.domain.localization import zh_label
 from ai_trading_copilot.copilot.domain.models import PortfolioSnapshot
@@ -70,6 +71,8 @@ def get_futu_portfolio_snapshot(
     return PortfolioSnapshot(
         current_drawdown=0.0,
         position_weights=_position_weights(positions, total_assets),
+        cash=_cash_available(account),
+        total_value=total_assets if total_assets > 0 else None,
     )
 
 
@@ -84,6 +87,8 @@ def format_portfolio_snapshot(
         "",
         f"- 来源：{zh_label(ExecutionMode(mode) if isinstance(mode, str) else mode)}",
         f"- 当前回撤：{snapshot.current_drawdown:.1%}",
+        f"- 总资产：{snapshot.total_value if snapshot.total_value is not None else '-'}",
+        f"- 可用现金：{snapshot.cash if snapshot.cash is not None else '-'}",
         "- 持仓权重：",
     ]
     if snapshot.position_weights:
@@ -165,6 +170,14 @@ def _total_assets(account: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _cash_available(account: Dict[str, Any]) -> float | None:
+    for key in ("cash", "available_funds", "available_cash", "power", "buying_power"):
+        value = _float_or_none(account.get(key))
+        if value is not None and value >= 0:
+            return value
+    return None
+
+
 def _position_weights(
     positions: Iterable[Dict[str, Any]],
     total_assets: float,
@@ -173,15 +186,18 @@ def _position_weights(
         return {}
     weights: Dict[str, float] = {}
     for row in positions:
-        symbol = str(row.get("code") or row.get("stock_name") or "").strip().upper()
+        symbol = normalize_futu_code_to_symbol(
+            str(row.get("code") or row.get("stock_name") or "")
+        )
         market_value = _float_or_none(
             row.get("market_val")
             or row.get("market_value")
             or row.get("nominal_price")
         )
-        if not symbol or market_value is None or market_value <= 0:
+        if not symbol or market_value is None or market_value == 0:
             continue
-        weights[symbol] = min(max(market_value / total_assets, 0.0), 1.0)
+        weight = min(max(market_value / total_assets, -1.0), 1.0)
+        weights[symbol] = min(max(weights.get(symbol, 0.0) + weight, -1.0), 1.0)
     return weights
 
 

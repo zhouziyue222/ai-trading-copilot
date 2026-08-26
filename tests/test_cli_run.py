@@ -45,6 +45,13 @@ def test_resolve_analysts_accepts_subset():
     ]
 
 
+def test_parse_args_accepts_technical_debug_for_single_technical_agent():
+    args = run._parse_args(["CRCL", "--analysts", "technical_position", "--technical-debug"])
+
+    assert args.technical_debug is True
+    assert run._resolve_analysts(args) == [AnalystType.TECHNICAL_POSITION]
+
+
 def test_parse_args_rejects_unknown_analyst():
     with pytest.raises(SystemExit):
         run._parse_args(["CRCL", "--analysts", "market"])
@@ -149,10 +156,57 @@ def test_main_passes_multiple_symbols_and_selected_analysts(monkeypatch, tmp_pat
         AnalystType.NEWS_SENTIMENT,
         AnalystType.FUNDAMENTAL_ANALYSIS,
     ]
-    assert calls["graph_run"]["broker_execution_enabled"] is False
     assert calls["memory_agent"] is not None
     payload = json.loads(capsys.readouterr().out)
     assert payload["output_dir"] == str(tmp_path)
+
+
+def test_main_passes_technical_debug_to_graph(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeTracker:
+        def __init__(self, **kwargs):
+            calls["tracker"] = kwargs
+
+        def add_error(self, error):
+            calls["error"] = error
+
+        def finish(self, *, failed):
+            calls["failed"] = failed
+
+        def write_audit(self, *, state, error):
+            return str(Path(calls["tracker"]["output_dir"]) / "run_audit.md")
+
+    class FakeGraph:
+        NODE_ORDER = ["node"]
+
+        def __init__(self, *, run_tracker, memory_agent, technical_position_debug=False):
+            calls["run_tracker"] = run_tracker
+            calls["memory_agent"] = memory_agent
+            calls["technical_position_debug"] = technical_position_debug
+
+        def run(self, **kwargs):
+            calls["graph_run"] = kwargs
+            return {"subscription_symbols": kwargs["subscription_symbols"], "agent_reports": {}}
+
+    monkeypatch.setattr(run, "RunTracker", FakeTracker)
+    monkeypatch.setattr(run, "CopilotLangGraph", FakeGraph)
+
+    result = run.main(
+        [
+            "CRCL",
+            "--analysts",
+            "technical_position",
+            "--technical-debug",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    assert calls["technical_position_debug"] is True
+    assert calls["tracker"]["defaults"]["technical_debug"] is True
+    assert calls["graph_run"]["selected_analysts"] == [AnalystType.TECHNICAL_POSITION]
 
 
 def test_default_memory_agent_uses_requested_path(tmp_path):

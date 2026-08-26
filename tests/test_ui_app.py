@@ -8,6 +8,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from ai_trading_copilot.copilot.domain import BrokerExecutionResult, PortfolioSnapshot
+from ai_trading_copilot.copilot.ui import app as ui_app
 from ai_trading_copilot.copilot.ui.app import UISettings, create_app
 
 
@@ -43,12 +44,16 @@ class FakeGraph:
 
 
 class FakeFundamentalRetriever:
-    def rag_status(self):
+    probe_values = []
+
+    def rag_status(self, *, probe=False):
+        self.__class__.probe_values.append(probe)
         return {
             "backend": "fundamental_chroma",
             "scope": "fundamental_only",
             "available": False,
             "document_count": 0,
+            "error": "OPENAI_API_KEY or DASHSCOPE_API_KEY is not set",
         }
 
     def ingest_seed_knowledge(self):
@@ -136,6 +141,25 @@ class FailingPortfolioOrderGraph(PendingOrderGraph):
     portfolio_error = True
 
 
+class CancellableGraph:
+    NODE_ORDER = ["Load", "Finish"]
+
+    def __init__(self, *, run_tracker, memory_agent=None, cancellation_checker=None, **kwargs):
+        self.run_tracker = run_tracker
+        self.cancellation_checker = cancellation_checker or (lambda: False)
+
+    def run(self, **kwargs):
+        self.run_tracker.start_node("Load")
+        self.run_tracker.succeed_node("Load")
+        self.run_tracker.start_node("Finish")
+        deadline = time.time() + 5
+        while not self.cancellation_checker():
+            if time.time() > deadline:
+                raise TimeoutError("cancel signal was not received")
+            time.sleep(0.01)
+        raise ui_app.RunCancelled("Run cancelled by user.")
+
+
 class RecordingBroker:
     def __init__(self):
         self.requests = []
@@ -207,6 +231,19 @@ def _portfolio_client(tmp_path, portfolio_getter, *, timeout_seconds=5.0):
         )
     )
     return TestClient(app)
+
+
+def _wait_for_status(client, run_id, predicate, *, timeout=5.0):
+    deadline = time.time() + timeout
+    last_status = None
+    while time.time() < deadline:
+        response = client.get(f"/api/runs/{run_id}")
+        assert response.status_code == 200
+        last_status = response.json()["status"]
+        if predicate(last_status):
+            return last_status
+        time.sleep(0.02)
+    raise AssertionError(f"Timed out waiting for run status. Last status: {last_status}")
 
 
 def test_subscription_list_loads_when_file_is_missing(client):
@@ -281,6 +318,93 @@ def test_get_run_returns_status(client):
 
     assert response.status_code == 200
     assert response.json()["status"]["symbols"] == ["AAPL"]
+
+
+def test_cancel_completed_run_is_idempotent(client):
+    created = client.post("/api/runs", json={"manual_symbols": "AAPL"}).json()
+
+    response = client.post(f"/api/runs/{created['run_id']}/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"]["status"] == "succeeded"
+    assert payload["status"]["cancel_requested"] is False
+
+
+def test_cancel_running_background_run_finishes_as_cancelled(tmp_path):
+    app = create_app(
+        UISettings(
+            subscriptions_file=tmp_path / "config" / "subscriptions.json",
+            memory_file=tmp_path / "config" / "memory.jsonl",
+            reports_dir=tmp_path / "reports",
+            graph_cls=CancellableGraph,
+            run_in_background=True,
+            fundamental_retriever_factory=lambda settings, auto_ingest_seed: FakeFundamentalRetriever(),
+        )
+    )
+    client = TestClient(app)
+    created = client.post("/api/runs", json={"manual_symbols": "AAPL"}).json()
+    run_id = created["run_id"]
+
+    _wait_for_status(client, run_id, lambda status: status["nodes"]["Finish"]["status"] == "running")
+    cancel_response = client.post(f"/api/runs/{run_id}/cancel")
+
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"]["cancel_requested"] is True
+    final_status = _wait_for_status(
+        client,
+        run_id,
+        lambda status: status["status"] == "cancelled"
+        and status["reports"].get("run_audit", {}).get("exists") is True,
+    )
+    assert final_status["status"] == "cancelled"
+    assert final_status["nodes"]["Load"]["status"] == "succeeded"
+    assert final_status["nodes"]["Finish"]["status"] == "skipped"
+    assert final_status["errors"] == []
+    assert final_status["reports"]["run_audit"]["exists"] is True
+
+
+def test_cancel_file_only_running_run_marks_cancel_requested(tmp_path):
+    app = create_app(
+        UISettings(
+            subscriptions_file=tmp_path / "config" / "subscriptions.json",
+            memory_file=tmp_path / "config" / "memory.jsonl",
+            reports_dir=tmp_path / "reports",
+            run_in_background=False,
+            fundamental_retriever_factory=lambda settings, auto_ingest_seed: FakeFundamentalRetriever(),
+        )
+    )
+    client = TestClient(app)
+    run_dir = tmp_path / "reports" / "run_file_only"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_status.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run_file_only",
+                "symbols": ["AAPL"],
+                "status": "running",
+                "cancel_requested": False,
+                "reports": {},
+                "errors": [],
+                "nodes": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post("/api/runs/run_file_only/cancel")
+
+    assert response.status_code == 200
+    status = response.json()["status"]
+    assert status["status"] == "running"
+    assert status["cancel_requested"] is True
+    assert status["cancel_requested_at"]
+
+
+def test_cancel_run_rejects_unsafe_run_id(client):
+    response = client.post("/api/runs/%2E%2E/cancel")
+
+    assert response.status_code == 400
 
 
 def test_confirm_simulated_order_submits_once_and_is_idempotent(tmp_path, monkeypatch):
@@ -376,6 +500,8 @@ def test_confirm_simulated_order_records_broker_failure(tmp_path):
 
 
 def test_rag_status_endpoint_degrades_when_chroma_is_unavailable(client):
+    FakeFundamentalRetriever.probe_values = []
+
     response = client.get("/api/rag/status")
 
     assert response.status_code == 200
@@ -384,6 +510,81 @@ def test_rag_status_endpoint_degrades_when_chroma_is_unavailable(client):
     assert payload["scope"] == "fundamental_only"
     assert "available" in payload
     assert "document_count" in payload
+    assert "OPENAI_API_KEY or DASHSCOPE_API_KEY is not set" in payload["error"]
+    assert FakeFundamentalRetriever.probe_values == [True]
+
+
+def test_observability_status_endpoint_reports_otel_configuration(client, monkeypatch):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "test-copilot")
+    monkeypatch.setenv("JAEGER_UI_URL", "http://127.0.0.1:16686")
+
+    response = client.get("/api/observability/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["local_trace_enabled"] is True
+    assert payload["otel_configured"] is True
+    assert payload["otel_export_enabled"] is True
+    assert payload["otlp_endpoint"] == "http://127.0.0.1:4317"
+    assert payload["service_name"] == "test-copilot"
+    assert payload["jaeger_ui_url"] == "http://127.0.0.1:16686"
+
+
+def test_rag_status_endpoint_reports_missing_embedding_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "ai_trading_copilot.copilot.ui.app.load_copilot_env",
+        lambda: None,
+    )
+    app = create_app(
+        UISettings(
+            subscriptions_file=tmp_path / "config" / "subscriptions.json",
+            memory_file=tmp_path / "config" / "memory.jsonl",
+            reports_dir=tmp_path / "reports",
+            run_in_background=False,
+        )
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/rag/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is False
+    assert "OPENAI_API_KEY or DASHSCOPE_API_KEY is not set" in payload["error"]
+
+
+def test_rag_status_probe_uses_utf8_env_and_longer_timeout(tmp_path, monkeypatch):
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = '{"available": true, "document_count": 7}\n'
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(ui_app.subprocess, "run", fake_run)
+    monkeypatch.setenv("PYTHONUTF8", "0")
+
+    payload = ui_app._probe_rag_status_subprocess(
+        UISettings(
+            subscriptions_file=tmp_path / "config" / "subscriptions.json",
+            memory_file=tmp_path / "config" / "memory.jsonl",
+            reports_dir=tmp_path / "reports",
+            rag_chroma_dir=tmp_path / "config" / "rag_chroma",
+        )
+    )
+
+    assert payload["available"] is True
+    assert payload["document_count"] == 7
+    assert captured["timeout"] == 30.0
+    assert captured["env"]["PYTHONUTF8"] == "1"
 
 
 def test_rag_ingest_text_endpoint_returns_ingest_result(client):

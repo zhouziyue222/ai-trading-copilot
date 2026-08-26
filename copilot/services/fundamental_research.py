@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Iterable, List
 
 from ai_trading_copilot.copilot.domain.models import RagDocument
+from ai_trading_copilot.copilot.services.eval_samples import (
+    rag_documents_eval_payload,
+    record_eval_sample,
+)
 from ai_trading_copilot.copilot.services.rag_store import (
     DEFAULT_FUNDAMENTAL_SOURCE_TYPE,
     FundamentalRagStore,
@@ -26,18 +31,34 @@ class FundamentalResearchRetriever:
         query: str | None = None,
         limit: int | None = None,
     ) -> List[RagDocument]:
-        return self._rag_store.search(
+        started = perf_counter()
+        tag_tuple = tuple(tags)
+        effective_limit = 5 if limit is None else limit
+        docs = self._rag_store.search(
             query=query or "",
             symbol=symbol,
-            tags=tags,
-            limit=5 if limit is None else limit,
+            tags=tag_tuple,
+            limit=effective_limit,
         )
+        record_eval_sample(
+            stage="fundamental_rag_retriever",
+            payload={
+                "user_input": query or "",
+                "retrieval_query": query or "",
+                "symbol": symbol,
+                "tags": list(tag_tuple),
+                "limit": effective_limit,
+                "latency_ms": (perf_counter() - started) * 1000.0,
+                **rag_documents_eval_payload(docs),
+            },
+        )
+        return docs
 
     def set_rag_query_llm(self, llm) -> None:
         self._rag_store.set_query_llm(llm)
 
-    def rag_status(self) -> dict:
-        return self._rag_store.status()
+    def rag_status(self, *, probe: bool = False) -> dict:
+        return self._rag_store.status(probe=probe)
 
     def ingest_seed_knowledge(self) -> dict:
         result = self._rag_store.ingest_seed_dir()

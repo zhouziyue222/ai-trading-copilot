@@ -8,12 +8,16 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterable
 
+from ai_trading_copilot.copilot.services.tracing import sanitize_value
+
 
 NODE_PENDING = "pending"
 NODE_RUNNING = "running"
 NODE_SUCCEEDED = "succeeded"
 NODE_FAILED = "failed"
 NODE_SKIPPED = "skipped"
+NODE_CANCELLED = "cancelled"
+MAX_ACTIVITY_HISTORY = 20
 
 
 class RunTracker:
@@ -42,6 +46,9 @@ class RunTracker:
             "defaults": _jsonable(defaults),
             "current_node": None,
             "status": NODE_RUNNING,
+            "cancel_requested": False,
+            "cancel_requested_at": None,
+            "cancelled_at": None,
             "started_at": now,
             "updated_at": now,
             "finished_at": None,
@@ -51,11 +58,14 @@ class RunTracker:
                     "started_at": None,
                     "finished_at": None,
                     "error": None,
+                    "activity": None,
+                    "activity_history": [],
                 }
                 for node in nodes
             },
             "reports": {},
             "errors": [],
+            "graph_errors": [],
         }
         self.status["decision_summary"] = _build_decision_summary(None, self.status)
         self.flush()
@@ -68,6 +78,8 @@ class RunTracker:
             node["started_at"] = node["started_at"] or now
             node["finished_at"] = None
             node["error"] = None
+            node["activity"] = None
+            node["activity_history"] = []
             self.status["current_node"] = node_name
             self._touch()
 
@@ -100,6 +112,24 @@ class RunTracker:
             node["error"] = reason or None
             self._touch()
 
+    def record_node_activity(
+        self,
+        node_name: str,
+        activity: dict[str, Any],
+        *,
+        completed: bool = False,
+    ) -> None:
+        """Record the current or recently completed work inside one graph node."""
+        with self._lock:
+            node = self._node(node_name)
+            normalized = _normalize_activity(activity)
+            node["activity"] = normalized
+            if completed:
+                history = list(node.get("activity_history") or [])
+                history.append(normalized)
+                node["activity_history"] = history[-MAX_ACTIVITY_HISTORY:]
+            self._touch()
+
     def record_report(self, key: str, path: str | Path) -> None:
         with self._lock:
             report_path = Path(path)
@@ -124,8 +154,47 @@ class RunTracker:
             if flush:
                 self._touch()
 
+    def request_cancel(self) -> bool:
+        """Mark the run for cooperative cancellation.
+
+        Returns True when the run is still active and should be interrupted by
+        the worker, False when it is already in a terminal state.
+        """
+        with self._lock:
+            if self.status.get("status") in {NODE_SUCCEEDED, NODE_FAILED, NODE_CANCELLED}:
+                return False
+            if not self.status.get("cancel_requested"):
+                self.status["cancel_requested"] = True
+                self.status["cancel_requested_at"] = _utc_now()
+            self._touch()
+            return True
+
+    def is_cancel_requested(self) -> bool:
+        with self._lock:
+            return bool(self.status.get("cancel_requested"))
+
+    def cancel(self) -> None:
+        with self._lock:
+            now = _utc_now()
+            self.status["status"] = NODE_CANCELLED
+            self.status["cancel_requested"] = True
+            self.status["cancel_requested_at"] = self.status.get("cancel_requested_at") or now
+            self.status["cancelled_at"] = now
+            self.status["finished_at"] = now
+            current_node = self.status.get("current_node")
+            if current_node:
+                node = self._node(current_node)
+                if node.get("status") == NODE_RUNNING:
+                    node["status"] = NODE_SKIPPED
+                    node["finished_at"] = now
+                    node["error"] = "cancelled"
+            self.status["current_node"] = None
+            self._touch()
+
     def finish(self, *, failed: bool = False) -> None:
         with self._lock:
+            if self.status.get("status") == NODE_CANCELLED:
+                return
             self.status["status"] = NODE_FAILED if failed else NODE_SUCCEEDED
             self.status["finished_at"] = _utc_now()
             self.status["current_node"] = None
@@ -138,65 +207,66 @@ class RunTracker:
         error: Exception | None = None,
     ) -> str:
         path = self.output_dir / "run_audit.md"
+        self.status["graph_errors"] = [str(item) for item in state.get("errors", [])] if state else []
         self.status["decision_summary"] = _build_decision_summary(state, self.status)
         lines = [
-            "# 交易助手运行审计",
+            "# Trading Copilot Run Audit",
             "",
-            f"- 运行 ID：`{self.status['run_id']}`",
-            f"- 标的：`{', '.join(self.status['symbols'])}`",
-            f"- 状态：`{_zh_node_status(self.status['status'])}`",
-            f"- 当前节点：`{self.status.get('current_node') or '-'}`",
-            f"- 状态文件：`{self.status_path}`",
+            f"- Run ID: `{self.status['run_id']}`",
+            f"- Symbols: `{', '.join(self.status['symbols'])}`",
+            f"- Status: `{_node_status_label(self.status['status'])}`",
+            f"- Current node: `{self.status.get('current_node') or '-'}`",
+            f"- Status file: `{self.status_path}`",
         ]
         if error is not None:
-            lines.append(f"- 异常：`{type(error).__name__}: {error}`")
+            lines.append(f"- Exception: `{type(error).__name__}: {error}`")
 
-        lines.extend(["", "## 节点进度", ""])
+        lines.extend(["", "## Node Progress", ""])
         for node_name, node in self.status["nodes"].items():
             suffix = f" ({node['error']})" if node.get("error") else ""
-            lines.append(f"- `{node_name}`：{_zh_node_status(node['status'])}{suffix}")
+            lines.append(f"- `{node_name}`: {_node_status_label(node['status'])}{suffix}")
 
-        lines.extend(["", "## 报告", ""])
+        lines.extend(["", "## Reports", ""])
         if not self.status["reports"]:
-            lines.append("- 未记录报告。")
+            lines.append("- No reports recorded.")
         for key, report in sorted(self.status["reports"].items()):
             lines.append(
-                f"- `{key}`：存在={report['exists']} 字节={report['bytes']} "
-                f"路径=`{report['path']}`"
+                f"- `{key}`: exists={report['exists']} bytes={report['bytes']} "
+                f"path=`{report['path']}`"
             )
 
-        lines.extend(["", "## 错误", ""])
+        lines.extend(["", "## Errors", ""])
         graph_errors = state.get("errors", []) if state else []
         all_errors = [item["message"] for item in self.status["errors"]]
         all_errors.extend(str(item) for item in graph_errors)
         if not all_errors:
-            lines.append("- 未记录错误。")
+            lines.append("- No errors recorded.")
         else:
             for item in all_errors:
                 lines.append(f"- `{item}`")
 
         if state:
-            lines.extend(["", "## 智能体输入与输出", ""])
+            lines.extend(["", "## Agent Inputs And Outputs", ""])
             for name, input_value, output_value, report_key in _agent_io_sections(state):
                 report = self.status["reports"].get(report_key, {})
                 lines.extend(
                     [
                         f"### {name}",
                         "",
-                        f"- 报告：`{report.get('path', '未生成')}`",
+                        f"- Report: `{report.get('path', 'not generated')}`",
                         "",
-                        "输入：",
+                        "Input:",
                         "```json",
-                        json.dumps(_jsonable(input_value), ensure_ascii=False, indent=2),
+                        _audit_json(input_value),
                         "```",
-                        "输出：",
+                        "Output:",
                         "```json",
-                        json.dumps(_jsonable(output_value), ensure_ascii=False, indent=2),
+                        _audit_json(output_value),
                         "```",
                     ]
                 )
 
-            lines.extend(["", "## 最终输出", "", "```json"])
+            lines.extend(["", "## Final Outputs", "", "```json"])
             final_outputs = {
                 "agent_reports": state.get("agent_reports", {}),
                 "analyst_reports": state.get("analyst_reports", {}),
@@ -204,13 +274,13 @@ class RunTracker:
                 "technical_positions": state.get("technical_positions", {}),
                 "technical_contexts": state.get("technical_contexts", {}),
                 "news_sentiment_by_symbol": state.get("news_sentiment_by_symbol", {}),
-                "fundamental_news_by_symbol": state.get("fundamental_news_by_symbol", {}),
+                "fundamental_analysis_by_symbol": state.get("fundamental_analysis_by_symbol", {}),
                 "trade_plans": state.get("trade_plans", {}),
                 "risk_assessments": state.get("risk_assessments", {}),
                 "execution_decisions": state.get("execution_decisions", {}),
                 "risk_challenges": state.get("explanations", {}).get("risk_challenges", {}),
             }
-            lines.append(json.dumps(_jsonable(final_outputs), ensure_ascii=False, indent=2))
+            lines.append(_audit_json(final_outputs))
             lines.append("```")
 
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -221,10 +291,7 @@ class RunTracker:
 
     def flush(self) -> None:
         with self._lock:
-            self.status_path.write_text(
-                json.dumps(self.status, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_json_atomic(self.status_path, self.status)
 
     def _touch(self) -> None:
         self.status["updated_at"] = _utc_now()
@@ -238,6 +305,8 @@ class RunTracker:
                 "started_at": None,
                 "finished_at": None,
                 "error": None,
+                "activity": None,
+                "activity_history": [],
             },
         )
 
@@ -246,13 +315,20 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _zh_node_status(status: str) -> str:
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _node_status_label(status: str) -> str:
     labels = {
-        NODE_PENDING: "待执行",
-        NODE_RUNNING: "运行中",
-        NODE_SUCCEEDED: "成功",
-        NODE_FAILED: "失败",
-        NODE_SKIPPED: "已跳过",
+        NODE_PENDING: "pending",
+        NODE_RUNNING: "running",
+        NODE_SUCCEEDED: "succeeded",
+        NODE_FAILED: "failed",
+        NODE_SKIPPED: "skipped",
+        NODE_CANCELLED: "cancelled",
     }
     return labels.get(status, status)
 
@@ -273,6 +349,16 @@ def _jsonable(value: Any) -> Any:
         return value
     except TypeError:
         return str(value)
+
+
+def _normalize_activity(activity: dict[str, Any]) -> dict[str, Any]:
+    payload = sanitize_value(dict(activity), text_limit=12000)
+    payload.setdefault("updated_at", _utc_now())
+    return _jsonable(payload)
+
+
+def _audit_json(value: Any) -> str:
+    return json.dumps(_jsonable(value), ensure_ascii=True, indent=2)
 
 
 def _build_decision_summary(
@@ -327,6 +413,7 @@ def _build_decision_summary(
                 ),
                 "status_label": _first_present(_field(radar, "status_label"), ""),
                 "current_price": _first_present(
+                    _field(execution, "current_price"),
                     _field(radar, "current_price"),
                     _field(technical, "current_price"),
                 ),
@@ -342,8 +429,8 @@ def _build_decision_summary(
                 ),
                 "direction": _value(
                     _first_present(
-                        _field(plan, "direction"),
                         _field(execution, "direction"),
+                        _field(plan, "direction"),
                     )
                 ),
                 "approved_by_risk": approved_by_risk,
@@ -353,10 +440,43 @@ def _build_decision_summary(
                     _field(explanation, "execution_message"),
                     "",
                 ),
-                "submitted_to_broker": _field(execution, "submitted_to_broker"),
+                "execution_mode": _value(_field(execution, "mode")),
+                "action": _field(execution, "action"),
+                "quantity": _field(execution, "quantity"),
+                "current_weight": _first_present(
+                    _field(execution, "current_weight"),
+                    _field(risk, "current_position_weight"),
+                ),
+                "target_weight": _first_present(
+                    _field(execution, "target_weight"),
+                    _field(risk, "target_weight"),
+                ),
+                "final_weight": _first_present(
+                    _field(execution, "final_weight"),
+                    _field(risk, "final_weight"),
+                ),
+                "delta_weight": _first_present(
+                    _field(execution, "delta_weight"),
+                    _field(risk, "delta_weight"),
+                ),
+                "estimated_trade_value": _first_present(
+                    _field(execution, "estimated_trade_value"),
+                    _field(risk, "estimated_trade_value"),
+                ),
+                "portfolio_value": _field(risk, "portfolio_value"),
+                "pending_broker_order": _field(execution, "pending_broker_order", False),
+                "broker_confirmation_required": _field(
+                    execution,
+                    "broker_confirmation_required",
+                    False,
+                ),
+                "submitted_to_broker": _field(execution, "submitted_to_broker", False),
+                "submitted_quantity": _field(execution, "submitted_quantity", 0),
                 "broker_order_id": _field(execution, "broker_order_id"),
+                "broker_status": _field(execution, "broker_status", ""),
                 "broker_message": _field(execution, "broker_message", ""),
                 "broker_idempotency_key": _field(execution, "broker_idempotency_key", ""),
+                "risk_clamped": _field(risk, "clamped", False),
                 "suggested_action": _first_present(
                     _field(radar, "suggested_action"),
                     _field(plan, "entry_logic"),
@@ -374,17 +494,20 @@ def _build_decision_summary(
         1 for report_item in (status.get("reports", {}) or {}).values()
         if _field(report_item, "exists")
     )
-    risk_blocked = sum(
-        1
-        for row in rows
-        if row["approved_by_risk"] is False
-        or row["execution_status"] == "blocked_by_risk"
+    risk_adjusted = sum(1 for row in rows if row.get("risk_clamped") is True)
+    risk_held = sum(1 for row in rows if row.get("approved_by_risk") is False)
+    portfolio_decided = sum(
+        1 for row in rows if row["execution_status"] == "portfolio_decided"
     )
-    broker_submitted = sum(1 for row in rows if row.get("submitted_to_broker") is True)
+    pending_broker = sum(1 for row in rows if row.get("pending_broker_order") is True)
+    submitted_broker = sum(1 for row in rows if row.get("submitted_to_broker") is True)
     actionable = sum(1 for row in rows if row["status"] == "actionable")
     summary = _first_present(_field(report, "summary"), "")
     if not summary:
-        summary = f"已扫描 {len(rows)} 个标的，{actionable} 个可行动，{risk_blocked} 个风险阻断。"
+        summary = (
+            f"Scanned {len(rows)} symbols; {actionable} actionable; "
+            f"{portfolio_decided} portfolio decisions."
+        )
 
     market_regime = _field(_field(report, "market_regime"), "regime")
     if market_regime is None:
@@ -399,8 +522,11 @@ def _build_decision_summary(
         "metrics": {
             "symbol_count": len(rows),
             "actionable_count": actionable,
-            "risk_blocked_count": risk_blocked,
-            "broker_submitted_count": broker_submitted,
+            "risk_adjusted_count": risk_adjusted,
+            "risk_held_count": risk_held,
+            "portfolio_decided_count": portfolio_decided,
+            "pending_broker_order_count": pending_broker,
+            "submitted_broker_order_count": submitted_broker,
             "completed_nodes": sum(
                 1 for item in node_statuses if item in {NODE_SUCCEEDED, NODE_SKIPPED}
             ),
@@ -460,20 +586,20 @@ def _agent_io_sections(state: dict[str, Any]) -> list[tuple[str, Any, Any, str]]
     technical = state.get("technical_positions", {}).get(symbol)
     technical_context = state.get("technical_contexts", {}).get(symbol)
     news_sentiment = state.get("news_sentiment_by_symbol", {}).get(symbol)
-    fundamental = state.get("fundamental_news_by_symbol", {}).get(symbol)
+    fundamental = state.get("fundamental_analysis_by_symbol", {}).get(symbol)
     trade_plan = state.get("trade_plans", {}).get(symbol)
     risk_assessment = state.get("risk_assessments", {}).get(symbol)
     execution = state.get("execution_decisions", {}).get(symbol)
     risk_challenge = state.get("explanations", {}).get("risk_challenges", {}).get(symbol)
     return [
         (
-            "富途组合快照",
+            "Futu Portfolio Snapshot",
             {"portfolio_mode": state.get("portfolio_mode")},
             state.get("portfolio"),
             "futu_portfolio",
         ),
         (
-            "技术位置智能体",
+            "Technical Position Agent",
             {
                 "symbol": symbol,
                 "price_history": state.get("price_history_by_symbol", {}).get(symbol),
@@ -485,19 +611,19 @@ def _agent_io_sections(state: dict[str, Any]) -> list[tuple[str, Any, Any, str]]
             "technical_position",
         ),
         (
-            "新闻情绪智能体",
+            "News Sentiment Agent",
             {"symbol": symbol, "look_back_days": state.get("look_back_days")},
             news_sentiment,
             "news_sentiment",
         ),
         (
-            "基本面分析智能体",
+            "Fundamental Analysis Agent",
             {"symbol": symbol, "fundamental_rag": "available_to_agent_tool"},
             fundamental,
             "fundamental_analysis",
         ),
         (
-            "交易员智能体",
+            "Trader Agent",
             {
                 "reviewed_opportunity": radar_item,
                 "technical_position": technical,
@@ -510,7 +636,7 @@ def _agent_io_sections(state: dict[str, Any]) -> list[tuple[str, Any, Any, str]]
             "trader",
         ),
         (
-            "风控智能体",
+            "Risk Manager",
             {
                 "persona": state.get("persona_config"),
                 "portfolio": state.get("portfolio"),
@@ -521,19 +647,18 @@ def _agent_io_sections(state: dict[str, Any]) -> list[tuple[str, Any, Any, str]]
             "risk_check",
         ),
         (
-            "执行提醒管理器",
+            "Portfolio Manager",
             {
                 "trade_plan": trade_plan,
                 "risk_assessment": risk_assessment,
                 "mode": state.get("execution_mode"),
                 "user_confirmed": state.get("user_confirmed"),
-                "broker_execution_enabled": state.get("broker_execution_enabled"),
             },
             execution,
-            "execution_alert",
+            "portfolio_manager",
         ),
         (
-            "运行解释智能体",
+            "Run Explanation Agent",
             {
                 "radar_items": state.get("radar_items", []),
                 "technical_positions": state.get("technical_positions", {}),

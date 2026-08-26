@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from typing import Callable, Iterable, List
 
 import pandas as pd
 
+from ai_trading_copilot.copilot.analysis.technical_position import (
+    build_compact_technical_summary,
+)
 from ai_trading_copilot.copilot.adapters.market_data import (
     FutuMarketDataError,
     fetch_history_dataframe,
@@ -17,6 +21,7 @@ from ai_trading_copilot.copilot.adapters.stock_info import (
     format_stock_info,
     get_futu_stock_info,
 )
+from ai_trading_copilot.copilot.domain.models import PriceBar
 
 
 def get_stock_data_text(symbol: str, start_date: str, end_date: str) -> str:
@@ -178,6 +183,100 @@ def get_stock_info_text(symbol: str) -> str:
     return format_stock_info(get_futu_stock_info(symbol))
 
 
+def get_compact_technical_summary_text(
+    symbol: str,
+    curr_date: str,
+    look_back_days: int = 90,
+) -> str:
+    """Return compact technical evidence for LLM consumption."""
+    end = date.fromisoformat(curr_date) if curr_date else date.today()
+    fetch_days = max(int(look_back_days), 320)
+    start = end - timedelta(days=fetch_days)
+    try:
+        data = fetch_history_dataframe(
+            symbol=symbol,
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+        )
+        frame = format_ohlcv_for_csv(data)
+        bars = _price_bars_from_frame(frame)
+        summary = build_compact_technical_summary(
+            symbol,
+            bars,
+            curr_date=end.isoformat(),
+            look_back_days=look_back_days,
+        )
+    except Exception as exc:
+        summary = {
+            "symbol": symbol.strip().upper(),
+            "window": f"{int(look_back_days)}d",
+            "current_price": None,
+            "latest_ohlcv_5d": [],
+            "returns": {"5d": None, "20d": None, "50d": None, "90d": None},
+            "moving_averages": {
+                "ma20": None,
+                "ma50": None,
+                "ma200": None,
+                "price_vs_ma": {},
+            },
+            "trend": "unknown",
+            "support": None,
+            "resistance": None,
+            "rsi": {"current": None, "state": "unknown", "percentile_90d": None},
+            "macd": {"state": "unknown", "value": None, "signal": None, "histogram": None},
+            "atr": {"value": None, "pct": None},
+            "bollinger": {"middle": None, "upper": None, "lower": None, "position": "unknown"},
+            "volume": {"state": "unknown", "latest": None, "avg20": None},
+            "windows": {},
+            "key_events": [],
+            "data_quality": "unavailable",
+            "warnings": [f"technical_summary_unavailable:{exc}"],
+        }
+    return json.dumps(summary, ensure_ascii=False, sort_keys=True)
+
+
+def _price_bars_from_frame(frame: pd.DataFrame) -> List[PriceBar]:
+    if frame.empty:
+        return []
+    bars: List[PriceBar] = []
+    for _, row in frame.iterrows():
+        bars.append(
+            PriceBar(
+                date=str(row["Date"]),
+                open=float(row["Open"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                close=float(row["Close"]),
+                volume=float(row.get("Volume") or 0),
+            )
+        )
+    return bars
+
+
+def make_technical_position_tools(
+    *,
+    stock_info_getter: Callable[[str], str] = get_stock_info_text,
+    technical_summary_getter: Callable[[str, str, int], str] = get_compact_technical_summary_text,
+) -> List:
+    from langchain_core.tools import tool
+
+    @tool
+    def get_stock_info(symbol: str) -> str:
+        """Retrieve current Futu quote and snapshot information for a ticker."""
+        return stock_info_getter(symbol)
+
+    @tool
+    def get_technical_summary(
+        symbol: str,
+        curr_date: str,
+        look_back_days: int = 90,
+    ) -> str:
+        """Retrieve compact technical summary JSON for a ticker."""
+        return technical_summary_getter(symbol, curr_date, look_back_days)
+
+    return [get_stock_info, get_technical_summary]
+
+
 def make_market_tools(
     *,
     stock_info_getter: Callable[[str], str] = get_stock_info_text,
@@ -205,61 +304,6 @@ def make_market_tools(
         return get_indicator_text(symbol, indicator, curr_date, look_back_days)
 
     return [get_stock_info, get_stock_data, get_indicators]
-
-
-def make_fundamental_news_tools() -> List:
-    from langchain_core.tools import tool
-
-    @tool
-    def get_news(ticker: str, start_date: str, end_date: str) -> str:
-        """Retrieve company-specific news for a ticker."""
-        return get_news_text(ticker, start_date, end_date)
-
-    @tool
-    def get_global_news(curr_date: str, look_back_days: int = 7, limit: int = 5) -> str:
-        """Retrieve broad macro and market news."""
-        return get_global_news_text(curr_date, look_back_days, limit)
-
-    @tool
-    def get_fundamentals(ticker: str, curr_date: str) -> str:
-        """Retrieve comprehensive company fundamentals."""
-        return get_fundamentals_text(ticker, curr_date)
-
-    @tool
-    def get_balance_sheet(
-        ticker: str,
-        freq: str = "quarterly",
-        curr_date: str | None = None,
-    ) -> str:
-        """Retrieve balance sheet data."""
-        return get_balance_sheet_text(ticker, freq, curr_date)
-
-    @tool
-    def get_cashflow(
-        ticker: str,
-        freq: str = "quarterly",
-        curr_date: str | None = None,
-    ) -> str:
-        """Retrieve cash flow statement data."""
-        return get_cashflow_text(ticker, freq, curr_date)
-
-    @tool
-    def get_income_statement(
-        ticker: str,
-        freq: str = "quarterly",
-        curr_date: str | None = None,
-    ) -> str:
-        """Retrieve income statement data."""
-        return get_income_statement_text(ticker, freq, curr_date)
-
-    return [
-        get_news,
-        get_global_news,
-        get_fundamentals,
-        get_balance_sheet,
-        get_cashflow,
-        get_income_statement,
-    ]
 
 
 def _safe_tool(fetcher: Callable[[], str]) -> str:

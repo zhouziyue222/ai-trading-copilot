@@ -15,6 +15,9 @@ dependencies = [
     "langchain-core>=0.3.81",
     "langchain-openai>=0.3.23",
     "langgraph>=0.4.8",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
     "pandas>=2.3.0",
     "pydantic>=2.0.0",
     "python-dateutil>=2.9.0",
@@ -30,6 +33,11 @@ dependencies = [
 dev = [
     "httpx>=0.27.0",
     "pytest>=8.0.0",
+]
+eval = [
+    "langchain-community<0.4",
+    "ragas>=0.4.0",
+    "rapidfuzz>=3.0.0",
 ]
 
 [project.scripts]
@@ -58,8 +66,10 @@ packages = [
 ai_trading_copilot = [
     "config/*.json",
     "config/*.md",
+    "config/prompts/*.md",
     "copilot/ui/static/*",
     "knowledge/fundamentals/*.md",
+    "knowledge/stock_research/*.md",
 ]
 
 [tool.pytest.ini_options]

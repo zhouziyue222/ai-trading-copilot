@@ -23,6 +23,7 @@ from ai_trading_copilot.copilot.services.rag_store import (
     ChromaRagStore,
     documents_from_text,
 )
+from ai_trading_copilot.copilot.services.eval_samples import EvalSampleRecorder
 
 
 class FakeSemanticEmbedder:
@@ -148,7 +149,7 @@ def test_agent_evaluator_scores_expected_workflow_state(tmp_path):
                 expected_status=SubscriptionStatus.ACTIONABLE,
                 expected_direction=TradeDirection.BUY,
                 expected_risk_approved=True,
-                expected_execution_status=ExecutionStatus.SIMULATION_READY,
+                expected_execution_status=ExecutionStatus.PORTFOLIO_DECIDED,
             )
         ],
     )
@@ -165,7 +166,7 @@ def test_analyst_evaluator_scores_multiple_single_analysts():
         analysts=[
             AnalystType.OPPORTUNITY_RADAR,
             AnalystType.TECHNICAL_POSITION,
-            AnalystType.FUNDAMENTAL_NEWS,
+            AnalystType.FUNDAMENTAL_ANALYSIS,
         ],
         symbols=["AAPL"],
     )
@@ -213,6 +214,50 @@ def test_analyst_smoke_cli_outputs_json(capsys):
     assert payload["details"]["summary"]["cases"] == 2.0
 
 
+def test_analyst_smoke_cli_default_analysts_outputs_json(capsys):
+    result = evaluation.main(["analyst-smoke", "--symbols", "AAPL", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert payload["suite"] == "single_analyst_evaluation"
+    assert payload["passed"] is True
+    assert payload["details"]["analysts"] == [
+        "fundamental_analysis",
+        "news_sentiment",
+        "technical_position",
+    ]
+
+
+def test_fundamental_eval_cli_records_ragas_samples(tmp_path, capsys):
+    result = evaluation.main(
+        [
+            "fundamental-eval",
+            "--symbols",
+            "AAPL",
+            "--backend",
+            "local",
+            "--answer-quality",
+            "off",
+            "--output-dir",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    samples_path = tmp_path / "ragas_eval_samples.jsonl"
+
+    assert result == 0
+    assert payload["suite"] == "fundamental_analyst_evaluation"
+    assert payload["passed"] is True
+    assert payload["details"]["ragas_samples_path"] == str(samples_path)
+    assert payload["details"]["ragas_sample_count"] == 1
+    sample = json.loads(samples_path.read_text(encoding="utf-8").splitlines()[0])
+    assert sample["stage"] == "fundamental_agent"
+    assert sample["symbol"] == "AAPL"
+    assert "response" in sample
+
+
 def test_rag_evaluator_compares_keyword_baseline_to_optimized_retrieval(tmp_path):
     store = ChromaRagStore(
         tmp_path / "chroma",
@@ -241,13 +286,84 @@ def test_rag_evaluator_compares_keyword_baseline_to_optimized_retrieval(tmp_path
         query="profit outlook",
         relevant_title_substrings=("Earnings quality",),
     )
-    report = RagEvaluator().compare_store(store, cases=[case], top_k=1)
+    report = RagEvaluator().compare_store(store, cases=[case], top_k=1, backend="local")
     comparison = report.details["comparison"]
 
     assert comparison["baseline"]["summary"]["hit_rate_at_k"] == 0.0
     assert comparison["optimized"]["summary"]["hit_rate_at_k"] == 1.0
     assert comparison["deltas"]["mrr_at_k"] == 1.0
+    assert comparison["optimized"]["summary"]["ndcg_at_k"] <= 1.0
     assert report.passed is True
+
+
+def test_rag_evaluator_matches_reference_parent_context_ids(tmp_path):
+    store = ChromaRagStore(
+        tmp_path / "chroma",
+        embedder=FakeSemanticEmbedder(),
+        client=FakeClient(),
+    )
+    docs = documents_from_text(
+        title="Earnings quality",
+        text="Earnings guidance improved after services revenue beat.",
+        source="unit:earnings",
+        source_type="earnings_report",
+    )
+    parent_id = str(docs[0].metadata["parent_id"])
+    store.upsert_documents(docs)
+
+    report = RagEvaluator().compare_store(
+        store,
+        cases=[
+            RagEvalCase(
+                name="parent_id_profit_query",
+                query="earnings guidance",
+                reference_context_ids=(parent_id,),
+            )
+        ],
+        top_k=1,
+        backend="local",
+        answer_quality="off",
+    )
+    comparison = report.details["comparison"]
+
+    assert comparison["baseline"]["summary"]["hit_rate_at_k"] == 1.0
+    assert comparison["optimized"]["summary"]["hit_rate_at_k"] == 1.0
+    assert comparison["optimized"]["details"]["cases"][0]["retrieved_context_ids"] == [parent_id]
+
+
+def test_rag_evaluator_answer_quality_required_fails_without_ragas_or_credentials(tmp_path):
+    store = ChromaRagStore(
+        tmp_path / "chroma",
+        embedder=FakeSemanticEmbedder(),
+        client=FakeClient(),
+    )
+    store.upsert_documents(
+        documents_from_text(
+            title="Earnings quality",
+            text="Earnings guidance improved after services revenue beat.",
+            source="unit:earnings",
+            source_type="earnings_report",
+        )
+    )
+
+    report = RagEvaluator().compare_store(
+        store,
+        cases=[
+            RagEvalCase(
+                name="semantic_profit_query",
+                user_input="profit outlook",
+                reference_title_substrings=("Earnings quality",),
+                reference="Earnings guidance improved.",
+                expected_answer="Earnings guidance improved.",
+            )
+        ],
+        top_k=1,
+        backend="local",
+        answer_quality="required",
+    )
+
+    assert report.passed is False
+    assert report.details["comparison"]["optimized"]["details"]["ragas"]["answer_quality"]["status"] == "failed"
 
 
 def test_keyword_baseline_marks_retrieval_channel(tmp_path):
@@ -269,3 +385,30 @@ def test_keyword_baseline_marks_retrieval_channel(tmp_path):
 
     assert found[0].title == "Support retest"
     assert found[0].metadata["retrieval_channel"] == "baseline_bm25"
+
+
+def test_keyword_baseline_records_ragas_eval_sample(tmp_path):
+    store = ChromaRagStore(
+        tmp_path / "chroma",
+        embedder=FakeSemanticEmbedder(),
+        client=FakeClient(),
+    )
+    store.upsert_documents(
+        documents_from_text(
+            title="Support retest",
+            text="The pullback held support after a shallow retest.",
+            source="unit:support",
+            source_type="fundamental_research_note",
+        )
+    )
+    recorder = EvalSampleRecorder(output_dir=tmp_path / "eval", run_id="unit")
+
+    with recorder.activate():
+        found = store.search_keyword_baseline(query="support retest", limit=1)
+
+    sample = json.loads(recorder.path.read_text(encoding="utf-8").splitlines()[0])
+    assert found[0].title == "Support retest"
+    assert sample["stage"] == "rag_baseline_retrieval"
+    assert sample["retrieved_context_ids"] == [found[0].id]
+    assert sample["retrieval_results"][0]["channels"] == "baseline_bm25"
+

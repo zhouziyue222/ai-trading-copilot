@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Callable, Iterable, List, Sequence
 
 from ai_trading_copilot.copilot.adapters.trading_tools import (
@@ -22,9 +23,14 @@ from ai_trading_copilot.copilot.config.llm import (
     DEFAULT_OPENAI_EMBEDDING_MODEL,
     load_copilot_env,
 )
+from ai_trading_copilot.copilot.services.cancellation import check_cancelled
 from ai_trading_copilot.copilot.domain.models import (
     RagDocument,
     normalize_symbol,
+)
+from ai_trading_copilot.copilot.services.eval_samples import (
+    rag_documents_eval_payload,
+    record_eval_sample,
 )
 from ai_trading_copilot.copilot.services.vector_memory import (
     retrieval_query_text,
@@ -34,6 +40,8 @@ from ai_trading_copilot.copilot.services.vector_memory import (
 DEFAULT_CHROMA_DIR = Path(__file__).resolve().parents[2] / "config" / "rag_chroma"
 DEFAULT_COLLECTION_NAME = "ai_trading_copilot_fundamentals"
 DEFAULT_RAG_SEED_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "fundamentals"
+DEFAULT_STOCK_RESEARCH_SEED_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "stock_research"
+DEFAULT_RAG_SEED_DIRS = (DEFAULT_RAG_SEED_DIR, DEFAULT_STOCK_RESEARCH_SEED_DIR)
 DEFAULT_RAG_LIMIT = 5
 DEFAULT_CHUNK_STRATEGY = "structured_semantic_parent_child_v1"
 DEFAULT_PARENT_CHUNK_SIZE = 2200
@@ -202,7 +210,9 @@ class RagQueryPlanner:
             f"Tags: {tag_text}\n"
             f"Original query: {original_query}\n"
         )
+        check_cancelled()
         response = self.llm.invoke(prompt)
+        check_cancelled()
         payload = _extract_json_object(_llm_text(response))
         required = {
             "rewritten_query",
@@ -307,18 +317,25 @@ class ChromaRagStore:
             return False
         return True
 
-    def status(self) -> dict:
-        count = 0
-        available = self.available
-        if available:
-            try:
-                count = int(self._get_collection().count())
-            except Exception as exc:
-                available = False
-                self.unavailable_reason = str(exc)
+    def status(self, *, probe: bool = False) -> dict:
+        count = None
+        available = None
+        probe_status = "not_run"
+        if probe:
+            count = 0
+            available = self.available
+            probe_status = "succeeded" if available else "failed"
+            if available:
+                try:
+                    count = int(self._get_collection().count())
+                except Exception as exc:
+                    available = False
+                    probe_status = "failed"
+                    self.unavailable_reason = str(exc)
         return {
             "backend": "fundamental_chroma",
             "available": available,
+            "probe_status": probe_status,
             "collection": self.collection_name,
             "path": str(self.path),
             "embedding_model": self._embedding_name(),
@@ -362,24 +379,36 @@ class ChromaRagStore:
             self.unavailable_reason = str(exc)
             return RagIngestResult(added=0, skipped=len(invalid), errors=[*errors, str(exc)])
 
-    def ingest_seed_dir(self, path: str | Path = DEFAULT_RAG_SEED_DIR) -> RagIngestResult:
-        root = Path(path)
-        if not root.exists():
-            return RagIngestResult(added=0, skipped=0, errors=[f"seed dir not found: {root}"])
+    def ingest_seed_dir(self, path: str | Path | None = None) -> RagIngestResult:
+        roots = [Path(path)] if path is not None else [Path(item) for item in DEFAULT_RAG_SEED_DIRS]
         documents: List[RagDocument] = []
-        for item in sorted(root.rglob("*")):
-            if item.is_file() and item.suffix.lower() in {".md", ".txt", ".jsonl"}:
-                documents.extend(
-                    documents_from_file(
-                        item,
-                        parent_chunk_size=self.parent_chunk_size,
-                        parent_chunk_overlap=self.parent_chunk_overlap,
-                        child_chunk_size=self.chunk_size,
-                        child_chunk_overlap=self.chunk_overlap,
-                        chunk_strategy=self.chunk_strategy,
+        errors: List[str] = []
+        for root in roots:
+            if not root.exists():
+                errors.append(f"seed dir not found: {root}")
+                continue
+            for item in sorted(root.rglob("*")):
+                if (
+                    item.is_file()
+                    and item.suffix.lower() in {".md", ".txt", ".jsonl"}
+                    and not _is_seed_support_file(item)
+                ):
+                    documents.extend(
+                        documents_from_file(
+                            item,
+                            parent_chunk_size=self.parent_chunk_size,
+                            parent_chunk_overlap=self.parent_chunk_overlap,
+                            child_chunk_size=self.chunk_size,
+                            child_chunk_overlap=self.chunk_overlap,
+                            chunk_strategy=self.chunk_strategy,
+                        )
                     )
-                )
-        return self.upsert_documents(documents)
+        result = self.upsert_documents(documents)
+        return RagIngestResult(
+            added=result.added,
+            skipped=result.skipped,
+            errors=[*errors, *result.errors],
+        )
 
     def ingest_file(
         self,
@@ -502,13 +531,29 @@ class ChromaRagStore:
         tags: Iterable[str] = (),
         limit: int = DEFAULT_RAG_LIMIT,
     ) -> List[RagDocument]:
-        if limit <= 0 or not rag_query_text(symbol=symbol, tags=tags, query=query).strip():
-            return []
+        started = perf_counter()
+        tag_tuple = tuple(tags)
+        normalized_query = rag_query_text(symbol=symbol, tags=tag_tuple, query=query).strip()
+        docs: List[RagDocument] = []
+        error = ""
+        if limit <= 0 or not normalized_query:
+            _record_rag_retrieval_eval_sample(
+                stage="rag_optimized_retrieval",
+                query=query,
+                normalized_query=normalized_query,
+                symbol=symbol,
+                tags=tag_tuple,
+                limit=limit,
+                docs=docs,
+                latency_ms=(perf_counter() - started) * 1000.0,
+                error=error,
+            )
+            return docs
         try:
             collection = self._get_collection()
             if int(collection.count()) <= 0:
-                return []
-            plan = self.plan_query(query=query, symbol=symbol, tags=tags)
+                return docs
+            plan = self.plan_query(query=query, symbol=symbol, tags=tag_tuple)
             candidate_limit = _rerank_candidate_limit(limit)
             recall_limit = max(candidate_limit, limit * 4, limit)
             rankings: List[tuple[str, List[RagDocument]]] = []
@@ -519,7 +564,7 @@ class ChromaRagStore:
                         collection=collection,
                         plan=plan,
                         symbol=symbol,
-                        tags=tags,
+                        tags=tag_tuple,
                         recall_limit=recall_limit,
                     ),
                     executor.submit(
@@ -527,7 +572,7 @@ class ChromaRagStore:
                         collection=collection,
                         plan=plan,
                         symbol=symbol,
-                        tags=tags,
+                        tags=tag_tuple,
                         recall_limit=recall_limit,
                     ),
                 ]
@@ -543,14 +588,27 @@ class ChromaRagStore:
                     plan,
                     fused,
                     symbol=symbol,
-                    tags=tags,
+                    tags=tag_tuple,
                     limit=candidate_limit,
                 )
-                return _parent_context_documents(reranked, limit=limit)
-            return []
+                docs = _parent_context_documents(reranked, limit=limit)
+            return docs
         except Exception as exc:
             self.unavailable_reason = str(exc)
-            return []
+            error = str(exc)
+            return docs
+        finally:
+            _record_rag_retrieval_eval_sample(
+                stage="rag_optimized_retrieval",
+                query=query,
+                normalized_query=normalized_query,
+                symbol=symbol,
+                tags=tag_tuple,
+                limit=limit,
+                docs=docs,
+                latency_ms=(perf_counter() - started) * 1000.0,
+                error=error,
+            )
 
     def search_keyword_baseline(
         self,
@@ -561,19 +619,34 @@ class ChromaRagStore:
         limit: int = DEFAULT_RAG_LIMIT,
     ) -> List[RagDocument]:
         """Single-query BM25 retrieval used as a pre-optimization baseline."""
-        baseline_query = rag_query_text(symbol=symbol, tags=tags, query=query).strip()
+        started = perf_counter()
+        tag_tuple = tuple(tags)
+        baseline_query = rag_query_text(symbol=symbol, tags=tag_tuple, query=query).strip()
+        docs: List[RagDocument] = []
+        error = ""
         if limit <= 0 or not baseline_query:
-            return []
+            _record_rag_retrieval_eval_sample(
+                stage="rag_baseline_retrieval",
+                query=query,
+                normalized_query=baseline_query,
+                symbol=symbol,
+                tags=tag_tuple,
+                limit=limit,
+                docs=docs,
+                latency_ms=(perf_counter() - started) * 1000.0,
+                error=error,
+            )
+            return docs
         try:
-            docs = self._index_documents(symbol=symbol)
+            indexed_docs = self._index_documents(symbol=symbol)
             ranked = _bm25_rank(
                 baseline_query,
-                docs,
+                indexed_docs,
                 symbol=symbol,
-                tags=tags,
+                tags=tag_tuple,
                 limit=limit,
             )
-            return [
+            docs = [
                 _with_retrieval_metadata(
                     doc,
                     channel="baseline_bm25",
@@ -582,9 +655,23 @@ class ChromaRagStore:
                 )
                 for doc in ranked
             ]
+            return docs
         except Exception as exc:
             self.unavailable_reason = str(exc)
-            return []
+            error = str(exc)
+            return docs
+        finally:
+            _record_rag_retrieval_eval_sample(
+                stage="rag_baseline_retrieval",
+                query=query,
+                normalized_query=baseline_query,
+                symbol=symbol,
+                tags=tag_tuple,
+                limit=limit,
+                docs=docs,
+                latency_ms=(perf_counter() - started) * 1000.0,
+                error=error,
+            )
 
     def plan_query(
         self,
@@ -791,6 +878,17 @@ def documents_from_file(
         child_chunk_overlap=child_chunk_overlap,
         chunk_strategy=chunk_strategy,
     )
+
+
+def _is_seed_support_file(path: Path) -> bool:
+    support_dirs = {"reports", "__pycache__"}
+    if any(part.lower() in support_dirs for part in path.parts):
+        return True
+    return path.name.lower() in {
+        "eval_contexts.jsonl",
+        "normalize_report.md",
+        "manifest.md",
+    }
 
 
 def documents_from_text(
@@ -1648,6 +1746,31 @@ def _with_retrieval_metadata(
     metadata["query_perspective"] = perspective
     metadata["retrieval_query"] = query[:500]
     return doc.model_copy(update={"metadata": metadata})
+
+
+def _record_rag_retrieval_eval_sample(
+    *,
+    stage: str,
+    query: str,
+    normalized_query: str,
+    symbol: str | None,
+    tags: Sequence[str],
+    limit: int,
+    docs: Sequence[RagDocument],
+    latency_ms: float,
+    error: str,
+) -> None:
+    payload = {
+        "user_input": query,
+        "retrieval_query": normalized_query,
+        "symbol": normalize_symbol(symbol or "") or None,
+        "tags": list(tags),
+        "limit": limit,
+        "latency_ms": latency_ms,
+        "error": error,
+        **rag_documents_eval_payload(docs),
+    }
+    record_eval_sample(stage=stage, payload=payload)
 
 
 def _metadata_for_doc(doc: RagDocument, embedding_model: str) -> dict:

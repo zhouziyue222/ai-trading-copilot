@@ -1,0 +1,347 @@
+[
+  {
+    "name": "amd_balance_sheet_latest_sec",
+    "user_input": "For AMD, what does the latest SEC filing say about balance sheet? AMD 最新 SEC 财报如何说明资产负债表质量？",
+    "symbol": "AMD",
+    "intent": "entity_specific",
+    "question_type": "balance_sheet",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__balance_sheet"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__balance_sheet",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__balance_sheet",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__balance_sheet",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__balance_sheet"
+    ],
+    "expected_answer": "Use only AMD SEC filing context for balance sheet; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "amd_cash_flow_latest_sec",
+    "user_input": "For AMD, what does the latest SEC filing say about cash flow? AMD 最新 SEC 财报如何说明现金流？",
+    "symbol": "AMD",
+    "intent": "entity_specific",
+    "question_type": "cash_flow",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__cash_flow"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__cash_flow",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__cash_flow",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__cash_flow",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__cash_flow"
+    ],
+    "expected_answer": "Use only AMD SEC filing context for cash flow; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "amd_profitability_latest_sec",
+    "user_input": "For AMD, what does the latest SEC filing say about profitability? AMD 最新 SEC 财报如何说明盈利能力？",
+    "symbol": "AMD",
+    "intent": "entity_specific",
+    "question_type": "profitability",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__profitability"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__profitability",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__profitability",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__profitability",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__profitability"
+    ],
+    "expected_answer": "Use only AMD SEC filing context for profitability; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "avgo_balance_sheet_latest_sec",
+    "user_input": "For AVGO, what does the latest SEC filing say about balance sheet? AVGO 最新 SEC 财报如何说明资产负债表质量？",
+    "symbol": "AVGO",
+    "intent": "entity_specific",
+    "question_type": "balance_sheet",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__balance_sheet"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__balance_sheet",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__balance_sheet",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__balance_sheet",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__balance_sheet"
+    ],
+    "expected_answer": "Use only AVGO SEC filing context for balance sheet; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "avgo_cash_flow_latest_sec",
+    "user_input": "For AVGO, what does the latest SEC filing say about cash flow? AVGO 最新 SEC 财报如何说明现金流？",
+    "symbol": "AVGO",
+    "intent": "entity_specific",
+    "question_type": "cash_flow",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__cash_flow"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__cash_flow",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__cash_flow",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__cash_flow",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__cash_flow"
+    ],
+    "expected_answer": "Use only AVGO SEC filing context for cash flow; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "avgo_profitability_latest_sec",
+    "user_input": "For AVGO, what does the latest SEC filing say about profitability? AVGO 最新 SEC 财报如何说明盈利能力？",
+    "symbol": "AVGO",
+    "intent": "entity_specific",
+    "question_type": "profitability",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__profitability"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__profitability",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__profitability",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__profitability",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__profitability"
+    ],
+    "expected_answer": "Use only AVGO SEC filing context for profitability; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "intc_balance_sheet_latest_sec",
+    "user_input": "For INTC, what does the latest SEC filing say about balance sheet? INTC 最新 SEC 财报如何说明资产负债表质量？",
+    "symbol": "INTC",
+    "intent": "entity_specific",
+    "question_type": "balance_sheet",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__balance_sheet"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__balance_sheet",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__balance_sheet",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__balance_sheet",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__balance_sheet"
+    ],
+    "expected_answer": "Use only INTC SEC filing context for balance sheet; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "intc_cash_flow_latest_sec",
+    "user_input": "For INTC, what does the latest SEC filing say about cash flow? INTC 最新 SEC 财报如何说明现金流？",
+    "symbol": "INTC",
+    "intent": "entity_specific",
+    "question_type": "cash_flow",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__cash_flow"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__cash_flow",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__cash_flow",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__cash_flow",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__cash_flow"
+    ],
+    "expected_answer": "Use only INTC SEC filing context for cash flow; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "intc_profitability_latest_sec",
+    "user_input": "For INTC, what does the latest SEC filing say about profitability? INTC 最新 SEC 财报如何说明盈利能力？",
+    "symbol": "INTC",
+    "intent": "entity_specific",
+    "question_type": "profitability",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__profitability"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__profitability",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__profitability",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__profitability",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__profitability"
+    ],
+    "expected_answer": "Use only INTC SEC filing context for profitability; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "mu_balance_sheet_latest_sec",
+    "user_input": "For MU, what does the latest SEC filing say about balance sheet? MU 最新 SEC 财报如何说明资产负债表质量？",
+    "symbol": "MU",
+    "intent": "entity_specific",
+    "question_type": "balance_sheet",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "MU_2026-05-28_10-Q_0000723125-26-000015__balance_sheet"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__balance_sheet",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__balance_sheet",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__balance_sheet",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__balance_sheet"
+    ],
+    "expected_answer": "Use only MU SEC filing context for balance sheet; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "mu_cash_flow_latest_sec",
+    "user_input": "For MU, what does the latest SEC filing say about cash flow? MU 最新 SEC 财报如何说明现金流？",
+    "symbol": "MU",
+    "intent": "entity_specific",
+    "question_type": "cash_flow",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "MU_2026-05-28_10-Q_0000723125-26-000015__cash_flow"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__cash_flow",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__cash_flow",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__cash_flow",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__cash_flow"
+    ],
+    "expected_answer": "Use only MU SEC filing context for cash flow; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "mu_profitability_latest_sec",
+    "user_input": "For MU, what does the latest SEC filing say about profitability? MU 最新 SEC 财报如何说明盈利能力？",
+    "symbol": "MU",
+    "intent": "entity_specific",
+    "question_type": "profitability",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "MU_2026-05-28_10-Q_0000723125-26-000015__profitability"
+    ],
+    "hard_negative_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__profitability",
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__profitability",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__profitability",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__profitability"
+    ],
+    "expected_answer": "Use only MU SEC filing context for profitability; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "nvda_balance_sheet_latest_sec",
+    "user_input": "For NVDA, what does the latest SEC filing say about balance sheet? NVDA 最新 SEC 财报如何说明资产负债表质量？",
+    "symbol": "NVDA",
+    "intent": "entity_specific",
+    "question_type": "balance_sheet",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__balance_sheet"
+    ],
+    "hard_negative_context_ids": [
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__balance_sheet",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__balance_sheet",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__balance_sheet",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__balance_sheet"
+    ],
+    "expected_answer": "Use only NVDA SEC filing context for balance sheet; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "nvda_cash_flow_latest_sec",
+    "user_input": "For NVDA, what does the latest SEC filing say about cash flow? NVDA 最新 SEC 财报如何说明现金流？",
+    "symbol": "NVDA",
+    "intent": "entity_specific",
+    "question_type": "cash_flow",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__cash_flow"
+    ],
+    "hard_negative_context_ids": [
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__cash_flow",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__cash_flow",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__cash_flow",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__cash_flow"
+    ],
+    "expected_answer": "Use only NVDA SEC filing context for cash flow; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  },
+  {
+    "name": "nvda_profitability_latest_sec",
+    "user_input": "For NVDA, what does the latest SEC filing say about profitability? NVDA 最新 SEC 财报如何说明盈利能力？",
+    "symbol": "NVDA",
+    "intent": "entity_specific",
+    "question_type": "profitability",
+    "allowed_source_types": [
+      "sec_10q"
+    ],
+    "reference_context_ids": [
+      "NVDA_2026-04-26_10-Q_0001045810-26-000052__profitability"
+    ],
+    "hard_negative_context_ids": [
+      "AMD_2026-03-28_10-Q_0000002488-26-000076__profitability",
+      "AVGO_2026-05-03_10-Q_0001730168-26-000054__profitability",
+      "MU_2026-05-28_10-Q_0000723125-26-000015__profitability",
+      "INTC_2026-06-27_10-Q_0000050863-26-000157__profitability"
+    ],
+    "expected_answer": "Use only NVDA SEC filing context for profitability; do not answer from same-metric filings of other companies unless the query asks for peer comparison.",
+    "annotation_status": "candidate_needs_human_review",
+    "annotation_source": "deterministic_sec_filing_normalization",
+    "annotation_granularity": "filing_metric_context"
+  }
+]

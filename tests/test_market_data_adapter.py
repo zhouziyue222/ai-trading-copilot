@@ -7,8 +7,10 @@ from ai_trading_copilot.copilot.adapters import (
 from ai_trading_copilot.copilot.adapters import market_data
 from ai_trading_copilot.copilot.adapters import trading_tools
 from ai_trading_copilot.copilot.adapters.trading_tools import (
+    get_compact_technical_summary_text,
     get_indicator_text,
     get_stock_data_text,
+    make_technical_position_tools,
 )
 
 
@@ -99,6 +101,50 @@ def test_get_indicator_text_calculates_close_50_sma(monkeypatch):
 
     assert "close_50_sma 指标值" in output
     assert "2026-03-11" in output
+
+
+def test_get_compact_technical_summary_text_returns_json_without_full_ohlcv(monkeypatch):
+    data = pd.DataFrame(
+        {
+            "time_key": pd.date_range("2025-01-01", periods=220, freq="D"),
+            "open": [100 + idx * 0.2 for idx in range(220)],
+            "high": [101 + idx * 0.2 for idx in range(220)],
+            "low": [99 + idx * 0.2 for idx in range(220)],
+            "close": [100 + idx * 0.2 for idx in range(220)],
+            "volume": [1000 + idx for idx in range(220)],
+        }
+    )
+    calls = []
+
+    def fake_fetch_history_dataframe(**kwargs):
+        calls.append(kwargs)
+        return data
+
+    monkeypatch.setattr(trading_tools, "fetch_history_dataframe", fake_fetch_history_dataframe)
+
+    output = get_compact_technical_summary_text("MU", "2025-08-08", 90)
+
+    assert '"symbol": "MU"' in output
+    assert '"latest_ohlcv_5d"' in output
+    assert '"moving_averages"' in output
+    assert '"key_events"' in output
+    assert "Date,Open,High,Low,Close,Volume" not in output
+    assert calls == [
+        {
+            "symbol": "MU",
+            "start_date": "2024-09-22",
+            "end_date": "2025-08-08",
+        }
+    ]
+
+
+def test_make_technical_position_tools_exposes_only_compact_tool_surface():
+    tools = make_technical_position_tools(
+        stock_info_getter=lambda symbol: f"{symbol} info",
+        technical_summary_getter=lambda symbol, curr_date, look_back_days: "{}",
+    )
+
+    assert [tool.name for tool in tools] == ["get_stock_info", "get_technical_summary"]
 
 
 def test_get_indicator_text_reports_unknown_indicator():

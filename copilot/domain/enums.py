@@ -22,7 +22,6 @@ class MemoryType(str, Enum):
 class AnalystType(str, Enum):
     OPPORTUNITY_RADAR = "opportunity_radar"
     TECHNICAL_POSITION = "technical_position"
-    FUNDAMENTAL_NEWS = "fundamental_news"
     NEWS_SENTIMENT = "news_sentiment"
     FUNDAMENTAL_ANALYSIS = "fundamental_analysis"
 
@@ -59,6 +58,8 @@ class TradeDirection(str, Enum):
     HOLD = "hold"
     REDUCE = "reduce"
     SELL = "sell"
+    SHORT = "short"
+    COVER = "cover"
     WATCH = "watch"
 
 
@@ -68,33 +69,6 @@ class ExecutionMode(str, Enum):
 
 
 class ExecutionStatus(str, Enum):
-    BLOCKED_BY_RISK = "blocked_by_risk"
     ALERT_ONLY = "alert_only"
-    SIMULATION_READY = "simulation_ready"
-    SIMULATED_ORDER_SUBMITTED = "simulated_order_submitted"
-    SIMULATED_ORDER_FAILED = "simulated_order_failed"
+    PORTFOLIO_DECIDED = "portfolio_decided"
     CONFIRMATION_REQUIRED = "confirmation_required"
-    LIVE_READY = "live_ready"
-
-
-class RiskSeverity(str, Enum):
-    INFO = "info"
-    WARN = "warn"
-    BLOCK = "block"
-
-
-class RiskRuleCode(str, Enum):
-    SUBSCRIPTION_REQUIRED = "subscription_required"
-    MARKET_NOT_ALLOWED = "market_not_allowed"
-    FORBIDDEN_INSTRUMENT = "forbidden_instrument"
-    STOP_LOSS_REQUIRED = "stop_loss_required"
-    INVALIDATION_REQUIRED = "invalidation_required"
-    POSITION_LIMIT_EXCEEDED = "position_limit_exceeded"
-    HIGH_POSITION_SIZE = "high_position_size"
-    DRAWDOWN_CAUTION = "drawdown_caution"
-    DRAWDOWN_DEFENSIVE = "drawdown_defensive"
-    DRAWDOWN_LIMIT_REACHED = "drawdown_limit_reached"
-    MARKET_REGIME_WEAK = "market_regime_weak"
-    CHASE_CONFIRMATION_REQUIRED = "chase_confirmation_required"
-    REWARD_RISK_TOO_LOW = "reward_risk_too_low"
-    ACTIONABLE_STATUS_REQUIRED = "actionable_status_required"

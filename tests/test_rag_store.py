@@ -210,11 +210,12 @@ def test_chroma_rag_store_upserts_and_queries_with_symbol_filter(tmp_path):
     result = store.upsert_documents(docs)
     found = store.search(query="earnings guidance", symbol="AAPL", limit=3)
 
+    status = store.status(probe=True)
     assert result.added == 2
-    assert store.status()["document_count"] == 2
-    assert store.status()["backend"] == "fundamental_chroma"
-    assert store.status()["scope"] == "fundamental_only"
-    assert store.status()["chunking"]["strategy"] == "structured_semantic_parent_child_v1"
+    assert status["document_count"] == 2
+    assert status["backend"] == "fundamental_chroma"
+    assert status["scope"] == "fundamental_only"
+    assert status["chunking"]["strategy"] == "structured_semantic_parent_child_v1"
     assert len(found) == 1
     assert found[0].symbols == ["AAPL"]
     assert found[0].source_type == "earnings_report"
@@ -223,7 +224,35 @@ def test_chroma_rag_store_upserts_and_queries_with_symbol_filter(tmp_path):
         "AAPL earnings guidance improved after services revenue beat."
     ]
     assert found[0].metadata["rerank_model"] == "local_cross_feature_v1"
-    assert "retrieval" in store.status()
+    assert "retrieval" in status
+
+
+def test_ingest_seed_dir_skips_eval_support_files(tmp_path):
+    seed_dir = tmp_path / "seed"
+    reports_dir = seed_dir / "reports"
+    reports_dir.mkdir(parents=True)
+    (seed_dir / "MU_profitability.md").write_text(
+        "# MU Profitability\n\nMU revenue and gross margin improved.",
+        encoding="utf-8",
+    )
+    (seed_dir / "eval_contexts.jsonl").write_text(
+        '{"title":"support","text":"This is eval support metadata."}\n',
+        encoding="utf-8",
+    )
+    (reports_dir / "normalize_report.md").write_text(
+        "# Normalize Report\n\nThis report should not be ingested.",
+        encoding="utf-8",
+    )
+    store = ChromaRagStore(
+        tmp_path / "chroma",
+        embedder=FakeEmbedder(),
+        client=FakeClient(),
+    )
+
+    result = store.ingest_seed_dir(seed_dir)
+
+    assert result.added == 1
+    assert store.status(probe=True)["document_count"] == 1
 
 
 def test_fundamental_rag_store_uses_chroma_backend():
@@ -390,4 +419,4 @@ def test_chroma_rag_store_rejects_non_fundamental_source_types(tmp_path):
     assert result.added == 0
     assert result.skipped == 1
     assert "unsupported fundamental RAG source_type" in result.errors[0]
-    assert store.status()["document_count"] == 0
+    assert store.status(probe=True)["document_count"] == 0

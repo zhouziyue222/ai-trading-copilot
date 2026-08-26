@@ -1,11 +1,11 @@
-"""First vertical slice: persona -> subscription -> risk -> execution."""
+"""First vertical slice: persona -> subscription -> risk limits -> portfolio decision."""
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 
 from ai_trading_copilot.copilot.agents import (
-    ExecutionAlertManager,
+    PortfolioManager,
     RiskAgent,
 )
 from ai_trading_copilot.copilot.domain.enums import ExecutionMode
@@ -35,12 +35,12 @@ class TradePlanReviewWorkflow:
         persona_config: UserPersonaConfig,
         subscription_symbols: list[str],
         risk_agent: RiskAgent,
-        execution_manager: ExecutionAlertManager,
+        portfolio_manager: PortfolioManager,
     ):
         self.persona_config = persona_config
         self.subscription_symbols = [symbol.strip().upper() for symbol in subscription_symbols]
         self.risk_agent = risk_agent
-        self.execution_manager = execution_manager
+        self.portfolio_manager = portfolio_manager
 
     def review(
         self,
@@ -49,7 +49,6 @@ class TradePlanReviewWorkflow:
         portfolio: PortfolioSnapshot,
         mode: ExecutionMode = ExecutionMode.SIMULATION,
         user_confirmed: bool = False,
-        broker_execution_enabled: bool = False,
         run_id: str | None = None,
     ) -> TradePlanReview:
         from ai_trading_copilot.copilot.domain.enums import MarketType
@@ -66,12 +65,12 @@ class TradePlanReviewWorkflow:
             portfolio=portfolio,
             plan=plan,
         )
-        execution_decision = self.execution_manager.prepare(
+        execution_decision = self.portfolio_manager.decide(
             plan=plan,
             risk_assessment=risk_assessment,
+            portfolio=portfolio,
             mode=mode,
             user_confirmed=user_confirmed,
-            broker_execution_enabled=broker_execution_enabled,
             run_id=run_id,
         )
         return TradePlanReview(

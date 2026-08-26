@@ -40,6 +40,19 @@ def normalize_futu_symbol(symbol: str) -> str:
     raise ValueError(f"Unsupported Futu ticker format: {symbol}")
 
 
+def normalize_futu_code_to_symbol(symbol: str) -> str:
+    """Map Futu codes back to the copilot's internal subscription symbols."""
+    raw = str(symbol or "").strip().upper().replace("-", ".")
+    if not raw:
+        return ""
+    if "." not in raw:
+        return raw
+    prefix, value = raw.split(".", 1)
+    if prefix == "US":
+        return value
+    return raw
+
+
 def get_futu_stock_info(symbol: str) -> Dict[str, Any]:
     """Fetch quote and snapshot fields from Futu OpenD.
 

@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from langchain_core.messages import AIMessage
 
@@ -6,16 +6,23 @@ from ai_trading_copilot.copilot.domain import (
     AnalystType,
     DistilledMemory,
     ExecutionMode,
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     MemoryType,
+    NewsSentimentReport,
     PortfolioSnapshot,
     PriceBar,
     SubscriptionStatus,
+    TechnicalContext,
+    TechnicalDimension,
 )
 from ai_trading_copilot.copilot.graph import CopilotLangGraph
-from ai_trading_copilot.copilot.graph.copilot_langgraph import _analyst_context_for_symbol
+from ai_trading_copilot.copilot.graph.copilot_langgraph import (
+    _analyst_context_for_symbol,
+    _format_news_sentiment_report,
+)
+from ai_trading_copilot.copilot.domain.localization import zh_label
 from ai_trading_copilot.copilot.agents import (
-    FundamentalNewsAgent,
+    FundamentalAnalystAgent,
     OpportunityRadarAgent,
     PostTradeReviewLearningAgent,
     TechnicalPositionAgent,
@@ -63,6 +70,52 @@ def _actionable_bars():
     return bars
 
 
+def test_graph_uses_debug_prompt_for_default_technical_position_agent():
+    default_graph = CopilotLangGraph(enable_default_llm=False)
+    debug_graph = CopilotLangGraph(
+        enable_default_llm=False,
+        technical_position_debug=True,
+    )
+
+    assert default_graph.technical_position_agent.prompt_name == "technical_position.v1"
+    assert debug_graph.technical_position_agent.prompt_name == "technical_position.debug.v1"
+
+
+def test_news_sentiment_report_includes_news_references():
+    content = _format_news_sentiment_report(
+        subscription_symbols=["MU"],
+        reports={
+            "MU": NewsSentimentReport(
+                symbol="MU",
+                sentiment_score=0.1,
+                key_events=["upcoming_earnings_catalyst"],
+                alerts=["即将发布财报"],
+                summary="财报将决定估值分歧方向。",
+                downstream_summary="新闻中性偏谨慎，等待财报确认。",
+                decision_basis=["新闻称财报将决定估值分歧方向。"],
+                uncertainties=["财报结果尚未发布。"],
+                news_references=[
+                    {
+                        "title": "Memory Stocks valuation disagreement widens",
+                        "published_at": "2026-08-16T12:00:00",
+                        "url": "https://example.com/memory-stocks",
+                        "source": "MarketWatch",
+                        "event_type": "upcoming_earnings_catalyst",
+                        "relevance": "财报将决定。",
+                    }
+                ],
+            )
+        },
+    )
+
+    assert "## News References" in content
+    assert "2026-08-16T12:00:00" in content
+    assert "https://example.com/memory-stocks" in content
+    assert "upcoming_earnings_catalyst" in content
+    assert "## Downstream Context" in content
+    assert "新闻中性偏谨慎，等待财报确认。" in content
+
+
 class RoutingLLM:
     def __init__(self):
         self.prompts = []
@@ -94,7 +147,7 @@ class RoutingLLM:
                     '"uptrend": true}'
                 )
             )
-        if "Fundamental News Review analyst" in text:
+        if "Fundamental Analyst" in text:
             return AIMessage(
                 content=(
                     "# Fundamental report\n\n"
@@ -117,12 +170,16 @@ class RoutingLLM:
                     '"pullback_confirmed": true}'
                 )
             )
-        if "single Risk Check analyst" in text:
-            return AIMessage(content="# Risk report\n\nHard rules pass; monitor support.")
-        if "Risk Check" in text:
-            return AIMessage(content="Watch the stop-loss discipline.")
-        if "Execution Alert Manager" in text:
-            return AIMessage(content="# Execution report\n\nSimulation candidate is ready.")
+        if "Risk Manager in an AI hedge fund" in text:
+            return AIMessage(content="# Risk report\n\nRisk limit supports a small buy.")
+        if "Portfolio Manager in an AI hedge fund" in text:
+            return AIMessage(
+                content=(
+                    "# Portfolio report\n\n"
+                    '{"action": "buy", "quantity": 10, "confidence": 0.8, '
+                    '"reasoning": "Use a small starter position."}'
+                )
+            )
         if "Summarize this AI trading copilot scan" in text:
             return AIMessage(content="This scan found 1 actionable opportunity.")
         return AIMessage(content="# Report\n\nNo extra changes.")
@@ -160,9 +217,10 @@ def _fake_market_tools():
 
 def _fake_fundamental_tools():
     return [
-        FakeTool("get_news", "No material company news risk."),
-        FakeTool("get_global_news", "Macro backdrop is stable."),
         FakeTool("get_fundamentals", "Revenue and margin quality are intact."),
+        FakeTool("get_balance_sheet", "Balance sheet quality is stable."),
+        FakeTool("get_cashflow", "Cash flow quality is stable."),
+        FakeTool("get_income_statement", "Income statement quality is stable."),
     ]
 
 
@@ -179,7 +237,7 @@ def test_langgraph_routes_selected_analysts_as_fan_out_nodes():
         {
             "selected_analysts": [
                 AnalystType.OPPORTUNITY_RADAR,
-                AnalystType.FUNDAMENTAL_NEWS,
+                AnalystType.FUNDAMENTAL_ANALYSIS,
             ]
         }
     )
@@ -187,7 +245,7 @@ def test_langgraph_routes_selected_analysts_as_fan_out_nodes():
     assert graph.langgraph_available is True
     assert routes == [
         graph.NODE_OPPORTUNITY_RADAR,
-        graph.NODE_FUNDAMENTAL_NEWS_REVIEW,
+        graph.NODE_FUNDAMENTAL_ANALYSIS,
     ]
 
 
@@ -251,8 +309,8 @@ def test_langgraph_runs_only_selected_analysts_and_reviews_their_outputs(tmp_pat
     state = CopilotLangGraph(enable_default_llm=False).run(
         subscription_symbols=["AAPL"],
         price_history_by_symbol={"AAPL": _actionable_bars()},
-        fundamental_news_by_symbol={
-            "AAPL": FundamentalNewsReport(
+        fundamental_analysis_by_symbol={
+            "AAPL": FundamentalAnalysisReport(
                 symbol="AAPL",
                 material_risk=True,
                 risk_flags=["earnings_gap_risk"],
@@ -262,7 +320,7 @@ def test_langgraph_runs_only_selected_analysts_and_reviews_their_outputs(tmp_pat
         portfolio=PortfolioSnapshot(),
         selected_analysts=[
             AnalystType.OPPORTUNITY_RADAR,
-            AnalystType.FUNDAMENTAL_NEWS,
+            AnalystType.FUNDAMENTAL_ANALYSIS,
         ],
         report_output_dir=tmp_path,
     )
@@ -270,14 +328,16 @@ def test_langgraph_runs_only_selected_analysts_and_reviews_their_outputs(tmp_pat
     node_names = [event.node_name for event in state["trace_events"]]
 
     assert CopilotLangGraph.NODE_OPPORTUNITY_RADAR in node_names
-    assert CopilotLangGraph.NODE_FUNDAMENTAL_NEWS_REVIEW in node_names
+    assert CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS in node_names
     assert CopilotLangGraph.NODE_TECHNICAL_POSITION not in node_names
     assert state["radar_items"][0].status == SubscriptionStatus.RISK_ELEVATED
-    assert state["radar_items"][0].final_conclusion == "风险升高"
+    assert state["radar_items"][0].final_conclusion == zh_label(
+        SubscriptionStatus.RISK_ELEVATED
+    )
     assert state["radar_items"][0].risk_points == ["earnings_gap_risk"]
     assert set(state["analyst_reports"]) == {
         "opportunity_radar",
-        "fundamental_news",
+        "fundamental_analysis",
     }
     for report_path in state["analyst_reports"].values():
         path = Path(report_path)
@@ -305,8 +365,8 @@ def test_analyst_context_includes_retrieved_trading_memories():
         "AAPL",
     )
 
-    assert "已检索交易记忆" in context
-    assert "仅作为历史背景" in context
+    assert "Retrieved Trading Memories" in context
+    assert "historical context only" in context
     assert "Wait for support confirmation" in context
     assert "run=run_AAPL_previous" in context
 
@@ -314,7 +374,7 @@ def test_analyst_context_includes_retrieved_trading_memories():
 def test_analyst_context_uses_fundamental_report_not_graph_rag_documents():
     context = _analyst_context_for_symbol(
         {
-            "fundamental_news_reports_by_symbol": {
+            "fundamental_analysis_reports_by_symbol": {
                 "AAPL": "# Fundamental Analysis\n\nRAG-informed thesis summary."
             },
             "unused_rag_contexts": {"AAPL": ["AAPL earnings note"]},
@@ -327,6 +387,38 @@ def test_analyst_context_uses_fundamental_report_not_graph_rag_documents():
     assert "AAPL earnings note" not in context
 
 
+def test_analyst_context_includes_structured_downstream_fields():
+    context = _analyst_context_for_symbol(
+        {
+            "technical_contexts": {
+                "AAPL": TechnicalContext(
+                    symbol="AAPL",
+                    stock=TechnicalDimension(scope="stock", symbol="AAPL"),
+                    downstream_summary="Technical pullback is constructive.",
+                    decision_basis=["Price is near support."],
+                    uncertainties=["Sector confirmation is mixed."],
+                )
+            },
+            "news_sentiment_by_symbol": {
+                "AAPL": NewsSentimentReport(
+                    symbol="AAPL",
+                    sentiment_score=0.1,
+                    downstream_summary="News is neutral.",
+                    decision_basis=["No material negative company news."],
+                    uncertainties=["Upcoming earnings could change sentiment."],
+                )
+            },
+        },
+        "AAPL",
+    )
+
+    assert "Technical Position Context" in context
+    assert "News Sentiment Context" in context
+    assert "Downstream summary: Technical pullback is constructive." in context
+    assert "Price is near support." in context
+    assert "Upcoming earnings could change sentiment." in context
+
+
 def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
     llm = RoutingLLM()
     state = CopilotLangGraph(
@@ -334,7 +426,7 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
         portfolio_getter=RecordingPortfolioGetter(),
         opportunity_radar_agent=OpportunityRadarAgent(llm=llm, tools=_fake_market_tools()),
         technical_position_agent=TechnicalPositionAgent(llm=llm, tools=_fake_market_tools()),
-        fundamental_news_agent=FundamentalNewsAgent(llm=llm, tools=_fake_fundamental_tools()),
+        fundamental_analyst_agent=FundamentalAnalystAgent(llm=llm, tools=_fake_fundamental_tools()),
     ).run(
         subscription_symbols=["AAPL"],
         price_history_by_symbol={},
@@ -342,7 +434,7 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
         selected_analysts=[
             AnalystType.OPPORTUNITY_RADAR,
             AnalystType.TECHNICAL_POSITION,
-            AnalystType.FUNDAMENTAL_NEWS,
+            AnalystType.FUNDAMENTAL_ANALYSIS,
         ],
         report_output_dir=tmp_path,
         trade_date="2026-05-08",
@@ -351,11 +443,11 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
     expected = {
         "opportunity_radar": "1_analysts",
         "technical_position": "1_analysts",
-        "fundamental_news": "1_analysts",
+        "fundamental_analysis": "1_analysts",
         "futu_portfolio": "0_portfolio",
         "trader": "3_trader",
         "risk_check": "4_risk_check",
-        "execution_alert": "5_execution",
+        "portfolio_manager": "5_portfolio_manager",
         "run_explanation": "6_explanation",
     }
 
@@ -367,3 +459,5 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
         path = Path(state["agent_reports"][key])
         assert path.exists()
         assert path.parent == tmp_path / parent
+
+

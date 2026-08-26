@@ -29,7 +29,7 @@ def get_company_news_text(ticker: str, start_date: str, end_date: str) -> str:
         return f"未找到 {ticker} 在 {start_date} 至 {end_date} 期间的 Finnhub 新闻。"
     return (
         f"## {ticker.strip().upper()} 新闻（来源：Finnhub，{start_date} 至 {end_date}）\n\n"
-        + "\n".join(_format_news_item(item) for item in data[:10])
+        + "\n".join(_format_news_item_with_metadata(item) for item in data[:10])
     )
 
 
@@ -49,7 +49,7 @@ def get_global_news_text(curr_date: str, look_back_days: int = 7, limit: int = 5
     start_date = cutoff.strftime("%Y-%m-%d")
     return (
         f"## 全球市场新闻（来源：Finnhub，{start_date} 至 {curr_date}）\n\n"
-        + "\n".join(_format_news_item(item) for item in selected)
+        + "\n".join(_format_news_item_with_metadata(item) for item in selected)
     )
 
 
@@ -244,6 +244,23 @@ def _format_news_item(item: Dict[str, Any]) -> str:
         lines.append(str(summary))
     if url:
         lines.append(f"链接：{url}")
+    return "\n".join(lines) + "\n"
+
+
+def _format_news_item_with_metadata(item: Dict[str, Any]) -> str:
+    title = item.get("headline") or item.get("title") or "unknown"
+    source = item.get("source") or "Finnhub"
+    summary = item.get("summary") or "unknown"
+    url = item.get("url") or "unknown"
+    published_at = _item_datetime(item)
+    lines = [
+        f"### {title}",
+        f"published_at: {published_at.isoformat() if published_at else 'unknown'}",
+        f"source: {source or 'unknown'}",
+        f"title: {title or 'unknown'}",
+        f"url: {url or 'unknown'}",
+        f"summary: {summary}",
+    ]
     return "\n".join(lines) + "\n"
 
 

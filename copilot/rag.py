@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable, List
 
@@ -15,18 +17,34 @@ from ai_trading_copilot.copilot.run import (
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
+    chroma_dir = args.chroma_dir or args.memory_file.parent / "rag_chroma"
+
+    if args.command == "_probe-status-worker":
+        agent = create_default_fundamental_research_retriever(
+            args.memory_file,
+            rag_chroma_dir=chroma_dir,
+            auto_ingest_seed=False,
+        )
+        _print_json(agent.rag_status(probe=True))
+        return 0
+
+    if args.command == "status" and args.probe:
+        _print_json(_probe_status_subprocess(args.memory_file, chroma_dir))
+        return 0
+
     agent = create_default_fundamental_research_retriever(
-        args.chroma_dir or args.memory_file.parent / "rag_chroma",
+        args.memory_file,
+        rag_chroma_dir=chroma_dir,
         auto_ingest_seed=False,
     )
 
     if args.command == "status":
-        print(json.dumps(agent.rag_status(), ensure_ascii=False))
+        _print_json(agent.rag_status(probe=False))
         return 0
 
     if args.command == "ingest-defaults":
         result = agent.ingest_seed_knowledge()
-        print(json.dumps(result, ensure_ascii=False))
+        _print_json(result)
         return 0
 
     if args.command == "ingest-text":
@@ -39,7 +57,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             symbols=_split_csv(args.symbols),
             tags=_split_csv(args.tags),
         )
-        print(json.dumps(result, ensure_ascii=False))
+        _print_json(result)
         return 0
 
     if args.command == "ingest-online":
@@ -48,7 +66,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             trade_date=args.trade_date,
             look_back_days=args.look_back_days,
         )
-        print(json.dumps(result, ensure_ascii=False))
+        _print_json(result)
         return 0
 
     if args.command == "query":
@@ -58,10 +76,73 @@ def main(argv: Iterable[str] | None = None) -> int:
             query=args.query,
             limit=args.limit,
         )
-        print(json.dumps([doc.model_dump(mode="json") for doc in docs], ensure_ascii=False))
+        _print_json([doc.model_dump(mode="json") for doc in docs])
         return 0
 
     raise SystemExit(f"Unknown command: {args.command}")
+
+
+def _probe_status_subprocess(memory_file: Path, chroma_dir: Path) -> dict:
+    command = [
+        sys.executable,
+        "-m",
+        "ai_trading_copilot.copilot.rag",
+        "--memory-file",
+        str(memory_file),
+        "--chroma-dir",
+        str(chroma_dir),
+        "_probe-status-worker",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "backend": "fundamental_chroma",
+            "available": False,
+            "probe_status": "failed",
+            "collection": "ai_trading_copilot_fundamentals",
+            "path": str(chroma_dir),
+            "document_count": None,
+            "error": f"RAG probe timed out after {exc.timeout} seconds.",
+        }
+    if completed.returncode != 0:
+        return {
+            "backend": "fundamental_chroma",
+            "available": False,
+            "probe_status": "failed",
+            "collection": "ai_trading_copilot_fundamentals",
+            "path": str(chroma_dir),
+            "document_count": None,
+            "error": (
+                f"RAG probe worker exited with code {completed.returncode}. "
+                f"{(completed.stderr or completed.stdout).strip()}"
+            ).strip(),
+        }
+    try:
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        return {
+            "backend": "fundamental_chroma",
+            "available": False,
+            "probe_status": "failed",
+            "collection": "ai_trading_copilot_fundamentals",
+            "path": str(chroma_dir),
+            "document_count": None,
+            "error": f"RAG probe returned invalid JSON: {exc}",
+        }
+
+
+def _print_json(payload) -> None:
+    try:
+        print(json.dumps(payload, ensure_ascii=False))
+    except UnicodeEncodeError:
+        print(json.dumps(payload, ensure_ascii=True))
 
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
@@ -70,8 +151,10 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser.add_argument("--chroma-dir", type=Path, default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("status")
+    status = subparsers.add_parser("status")
+    status.add_argument("--probe", action="store_true", help="Open Chroma in a worker process and count documents.")
     subparsers.add_parser("ingest-defaults")
+    subparsers.add_parser("_probe-status-worker", help=argparse.SUPPRESS)
 
     ingest_text = subparsers.add_parser("ingest-text")
     ingest_text.add_argument("path")

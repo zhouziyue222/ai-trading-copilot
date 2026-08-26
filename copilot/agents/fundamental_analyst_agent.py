@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import List
 
 from ai_trading_copilot.copilot.adapters.trading_tools import (
@@ -15,12 +16,14 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
-from ai_trading_copilot.copilot.domain.models import FundamentalNewsReport
+from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.domain.models import FundamentalAnalysisReport
+from ai_trading_copilot.copilot.services.eval_samples import record_eval_sample
 
 
 @dataclass
 class FundamentalAnalysisResult:
-    report: FundamentalNewsReport
+    report: FundamentalAnalysisReport
     markdown: str
     tool_calls: List[str]
 
@@ -49,7 +52,8 @@ class FundamentalAnalystAgent:
         trade_date: str | None = None,
         look_back_days: int = 90,
     ) -> FundamentalAnalysisResult:
-        fallback = FundamentalNewsReport(
+        started = perf_counter()
+        fallback = FundamentalAnalysisReport(
             symbol=symbol,
             thesis_intact=True,
             material_risk=False,
@@ -59,11 +63,21 @@ class FundamentalAnalystAgent:
             data_availability={"llm": "unavailable"},
         )
         if self.llm is None:
-            return FundamentalAnalysisResult(
+            result = FundamentalAnalysisResult(
                 report=fallback,
                 markdown=_markdown_from_report(fallback),
                 tool_calls=[],
             )
+            _record_fundamental_agent_eval_sample(
+                symbol=symbol,
+                trade_date=trade_date,
+                look_back_days=look_back_days,
+                result=result,
+                latency_ms=(perf_counter() - started) * 1000.0,
+                evidence="",
+                error="",
+            )
+            return result
 
         tools = self.tools or make_fundamental_tools(rag_retriever=self.rag_retriever)
         _, end_date = date_window(trade_date, look_back_days)
@@ -80,25 +94,18 @@ class FundamentalAnalystAgent:
             ("retrieve_fundamental_rag", {"ticker": symbol, "query": rag_query, "limit": 5}),
         ]
         evidence = runner.run(prompt="", prefetch=prefetch)
-        prompt = (
-            "You are the Fundamental Analyst for an AI trading copilot. Use fresh "
-            "fundamental tools first and use retrieved fundamental RAG documents as "
-            "background evidence. Score fundamental quality from -1 to 1, identify "
-            "material risks, and decide whether the trading thesis is intact. Do not "
-            "invent data.\n\n"
-            "Return a Markdown report followed by one final JSON object with keys: "
-            "thesis_intact, material_risk, risk_flags, summary, fundamental_score, "
-            "key_events, data_availability. JSON must be the final object.\n\n"
-            f"Symbol: {symbol}\n"
-            f"Current date: {end_date}\n"
-            f"Available tools: {tool_names(tools)}\n\n"
-            f"Prefetched fundamental evidence:\n{evidence.prefetched_evidence or '-'}"
+        prompt = render_prompt(
+            "fundamental_analyst.v1",
+            symbol=symbol,
+            current_date=end_date,
+            available_tools=tool_names(tools),
+            fundamental_evidence=evidence.prefetched_evidence or "-",
         )
         result = runner.run(prompt=prompt)
         content = result.content
         try:
             payload = extract_json_object(content)
-            report = FundamentalNewsReport(
+            report = FundamentalAnalysisReport(
                 symbol=symbol,
                 thesis_intact=bool(payload.get("thesis_intact", True)),
                 material_risk=bool(payload.get("material_risk", False)),
@@ -110,14 +117,29 @@ class FundamentalAnalystAgent:
                     str(key): str(value)
                     for key, value in (payload.get("data_availability") or {}).items()
                 },
+                decision_basis=_string_list(payload.get("decision_basis")),
+                uncertainties=_string_list(payload.get("uncertainties")),
+                downstream_summary=str(
+                    payload.get("downstream_summary") or payload.get("summary") or ""
+                ).strip(),
             )
         except Exception:
             report = fallback.model_copy(update={"summary": content.strip() or fallback.summary})
-        return FundamentalAnalysisResult(
+        final_result = FundamentalAnalysisResult(
             report=report,
             markdown=strip_trailing_json_object(content) or _markdown_from_report(report),
             tool_calls=[*evidence.prefetched_calls, *result.tool_calls],
         )
+        _record_fundamental_agent_eval_sample(
+            symbol=symbol,
+            trade_date=end_date,
+            look_back_days=look_back_days,
+            result=final_result,
+            latency_ms=(perf_counter() - started) * 1000.0,
+            evidence=evidence.prefetched_evidence,
+            error="",
+        )
+        return final_result
 
 
 def _score(value, fallback: float) -> float:
@@ -129,7 +151,13 @@ def _score(value, fallback: float) -> float:
         return fallback
 
 
-def _markdown_from_report(report: FundamentalNewsReport) -> str:
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _markdown_from_report(report: FundamentalAnalysisReport) -> str:
     return (
         f"# Fundamental Analysis: {report.symbol}\n\n"
         f"- Fundamental score: {report.fundamental_score if report.fundamental_score is not None else '-'}\n"
@@ -137,5 +165,59 @@ def _markdown_from_report(report: FundamentalNewsReport) -> str:
         f"- Material risk: {'yes' if report.material_risk else 'no'}\n"
         f"- Risk flags: {', '.join(report.risk_flags) or '-'}\n"
         f"- Key events: {', '.join(report.key_events) or '-'}\n"
+        f"- Decision basis: {', '.join(report.decision_basis) or '-'}\n"
+        f"- Uncertainties: {', '.join(report.uncertainties) or '-'}\n"
+        f"- Downstream summary: {report.downstream_summary or '-'}\n"
         f"- Summary: {report.summary or '-'}\n"
     )
+
+
+def _record_fundamental_agent_eval_sample(
+    *,
+    symbol: str,
+    trade_date: str | None,
+    look_back_days: int,
+    result: FundamentalAnalysisResult,
+    latency_ms: float,
+    evidence: str,
+    error: str,
+) -> None:
+    report = result.report
+    response = result.markdown or _markdown_from_report(report)
+    record_eval_sample(
+        stage="fundamental_agent",
+        payload={
+            "user_input": (
+                f"Evaluate {symbol} fundamentals as of {trade_date or 'latest'} "
+                f"using a {look_back_days} day evidence window."
+            ),
+            "symbol": report.symbol,
+            "trade_date": trade_date,
+            "look_back_days": look_back_days,
+            "response": response,
+            "answer": response,
+            "reference": _default_fundamental_reference(report),
+            "retrieved_contexts": [evidence] if evidence.strip() else [],
+            "tool_calls": list(result.tool_calls),
+            "latency_ms": latency_ms,
+            "error": error,
+            "structured_output": {
+                "thesis_intact": report.thesis_intact,
+                "material_risk": report.material_risk,
+                "risk_flags": list(report.risk_flags),
+                "summary": report.summary,
+                "fundamental_score": report.fundamental_score,
+                "key_events": list(report.key_events),
+                "decision_basis": list(report.decision_basis),
+                "uncertainties": list(report.uncertainties),
+                "data_availability": dict(report.data_availability),
+            },
+        },
+    )
+
+
+def _default_fundamental_reference(report: FundamentalAnalysisReport) -> str:
+    risk_clause = "material risk is present" if report.material_risk else "no material risk is present"
+    thesis_clause = "thesis is intact" if report.thesis_intact else "thesis is impaired"
+    return f"The fundamental {thesis_clause}, and {risk_clause}."
+

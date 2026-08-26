@@ -1,14 +1,14 @@
-from ai_trading_copilot.copilot.agents import (
-    ExecutionAlertManager,
-    FundamentalNewsAgent,
+﻿from ai_trading_copilot.copilot.agents import (
+    FundamentalAnalystAgent,
     OpportunityRadarAgent,
+    PortfolioManager,
     RiskAgent,
     TechnicalPositionAgent,
     TraderAgent,
 )
 from ai_trading_copilot.copilot.domain import (
     ExecutionStatus,
-    FundamentalNewsReport,
+    FundamentalAnalysisReport,
     MarketType,
     PortfolioSnapshot,
     PriceBar,
@@ -66,9 +66,9 @@ class CapturingRiskAgent(RiskAgent):
     def __init__(self):
         self.seen_subscription_books = []
 
-    def review(self, **kwargs):
+    def review_book(self, **kwargs):
         self.seen_subscription_books.append(kwargs["subscriptions"])
-        return super().review(**kwargs)
+        return super().review_book(**kwargs)
 
 
 def _workflow(risk_agent=None):
@@ -77,11 +77,11 @@ def _workflow(risk_agent=None):
             enable_default_llm=False,
             default_persona_config=UserPersonaConfig(),
             opportunity_radar_agent=OpportunityRadarAgent(),
-            fundamental_news_agent=FundamentalNewsAgent(),
+            fundamental_analyst_agent=FundamentalAnalystAgent(),
             technical_position_agent=TechnicalPositionAgent(),
             trader_agent=TraderAgent(),
             risk_agent=risk_agent or RiskAgent(),
-            execution_manager=ExecutionAlertManager(),
+            portfolio_manager=PortfolioManager(),
         )
     )
 
@@ -103,13 +103,13 @@ def test_subscription_workflow_generates_simulated_buy_for_actionable_subscripti
     assert aapl.radar_item.status == SubscriptionStatus.ACTIONABLE
     assert aapl.trade_plan.direction == TradeDirection.BUY
     assert aapl.risk_assessment.approved is True
-    assert aapl.execution_decision.status == ExecutionStatus.SIMULATION_READY
+    assert aapl.execution_decision.status == ExecutionStatus.PORTFOLIO_DECIDED
     crcl = run.items[2]
     assert crcl.radar_item.symbol == "CRCL"
     assert crcl.trade_plan.symbol == "CRCL"
     assert crcl.risk_assessment is not None
     assert crcl.execution_decision.symbol == "CRCL"
-    assert crcl.execution_decision.status == ExecutionStatus.SIMULATION_READY
+    assert crcl.execution_decision.status == ExecutionStatus.PORTFOLIO_DECIDED
     assert risk_agent.seen_subscription_books
     assert risk_agent.seen_subscription_books[-1].get("CRCL").market_type == MarketType.US_STOCK
 
@@ -131,8 +131,8 @@ def test_subscription_workflow_downgrades_material_news_risk():
     run = _workflow().run(
         subscription_symbols=["AAPL", "SPY"],
         price_history_by_symbol={"AAPL": _actionable_bars()},
-        fundamental_news_by_symbol={
-            "AAPL": FundamentalNewsReport(
+        fundamental_analysis_by_symbol={
+            "AAPL": FundamentalAnalysisReport(
                 symbol="AAPL",
                 material_risk=True,
                 risk_flags=["earnings_gap_risk"],
@@ -146,3 +146,5 @@ def test_subscription_workflow_downgrades_material_news_risk():
     assert aapl.radar_item.status == SubscriptionStatus.RISK_ELEVATED
     assert aapl.trade_plan.direction == TradeDirection.HOLD
     assert aapl.execution_decision.status == ExecutionStatus.ALERT_ONLY
+
+

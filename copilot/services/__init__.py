@@ -1,6 +1,4 @@
 """Application services for the AI trading copilot."""
-
-from .execution_manager import prepare_execution_decision
 from .fundamental_research import (
     FundamentalResearchRetriever,
     create_fundamental_research_retriever,
@@ -15,8 +13,10 @@ from .rag_store import (
     RagQueryPlanner,
 )
 from .run_tracker import RunTracker
+from .eval_samples import EvalSampleRecorder
 from .state_machine import can_transition, transition_subscription_status
 from .subscription_service import SubscriptionStore
+from .tracing import TraceRecorder
 from .vector_memory import HashingTextEmbedder, LocalVectorMemoryIndex
 
 __all__ = [
@@ -31,9 +31,10 @@ __all__ = [
     "RagQueryPlan",
     "RagQueryPlanner",
     "RunTracker",
+    "EvalSampleRecorder",
     "SubscriptionStore",
+    "TraceRecorder",
     "can_transition",
     "create_fundamental_research_retriever",
-    "prepare_execution_decision",
     "transition_subscription_status",
 ]

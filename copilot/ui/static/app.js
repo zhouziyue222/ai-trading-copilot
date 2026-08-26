@@ -4,23 +4,50 @@ const state = {
   selectedSymbols: new Set(),
   currentRunId: null,
   pollTimer: null,
+  progressTimer: null,
   activeReportKey: null,
+  activeTraceSpanId: null,
+  traceRunId: null,
+  currentTrace: null,
+  lastRunPayload: null,
+  activeNodeName: null,
+  expandedActivityDetails: new Set(),
+  recentRuns: [],
+  cancelPending: false,
   ragStatus: null,
+  observability: null,
   portfolio: null,
 };
 
 const $ = (id) => document.getElementById(id);
+const lastRunStorageKey = "aiTradingCopilot.lastRunId";
+
+const primaryWorkflowNodes = [
+  "Load Persona Markdown",
+  "Load Subscription Symbols",
+  "Retrieve Memories",
+  "Technical Position",
+  "News Sentiment",
+  "Fundamental Analysis",
+  "Trader",
+  "Risk Check",
+  "Portfolio Manager",
+  "Explain Run",
+  "Persist Trace",
+];
+
+const optionalWorkflowNodes = ["Opportunity Radar"];
 
 const subscriptionStatusLabels = {
   observing: "观察中",
   near_opportunity: "接近机会",
-  actionable: "可行动",
+  actionable: "可执行",
   risk_elevated: "风险升高",
   not_compatible: "不兼容",
 };
 
 const nodeStatusLabels = {
-  pending: "待执行",
+  pending: "待运行",
   running: "运行中",
   succeeded: "成功",
   failed: "失败",
@@ -33,6 +60,7 @@ const runStatusLabels = {
   succeeded: "成功",
   failed: "失败",
   skipped: "跳过",
+  cancelled: "已取消",
 };
 
 const directionLabels = {
@@ -40,8 +68,8 @@ const directionLabels = {
   hold: "持有",
   reduce: "减仓",
   sell: "卖出",
-  short: "Short",
-  cover: "Cover",
+  short: "做空",
+  cover: "平空",
   watch: "观察",
 };
 
@@ -50,7 +78,6 @@ const executionStatusLabels = {
   portfolio_decided: "组合决策",
   confirmation_required: "需要确认",
 };
-
 const preferredReportOrder = [
   "run_explanation",
   "risk_check",
@@ -63,17 +90,8 @@ const preferredReportOrder = [
   "technical_position",
   "futu_portfolio",
   "run_audit",
-];
-
-const workflowSteps = [
-  ["technical_position", "技术位置"],
-  ["news_sentiment", "新闻情绪"],
-  ["fundamental_analysis", "基本面分析"],
-  ["opportunity_radar", "机会雷达"],
-  ["trader", "交易计划"],
-  ["risk_check", "风控检查"],
-  ["portfolio_manager", "Portfolio Manager"],
-  ["run_explanation", "运行解释"],
+  "trace_markdown",
+  "trace_json",
 ];
 
 async function api(path, options = {}) {
@@ -103,6 +121,9 @@ function switchView(view) {
   document.querySelectorAll(".view").forEach((section) => {
     section.classList.toggle("active", section.id === `view-${view}`);
   });
+  if (view === "rag") {
+    loadRagStatus().catch(showError);
+  }
   if (view === "portfolio" && !state.portfolio) {
     loadPortfolio().catch(showError);
   }
@@ -128,20 +149,96 @@ async function loadSubscriptions() {
 }
 
 async function loadRagStatus() {
-  const payload = await api("/api/rag/status");
+  const payload = await api("/api/rag/status?probe=true");
   state.ragStatus = payload;
   renderRagStatus(payload);
 }
 
+async function loadObservabilityStatus() {
+  const payload = await api("/api/observability/status");
+  state.observability = payload;
+  renderObservabilityStatus(payload, state.currentTrace);
+}
+
+function renderObservabilityStatus(payload = {}, trace = null) {
+  const container = $("observabilityStatus");
+  if (!container) return;
+  const localEnabled = payload.local_trace_enabled !== false;
+  const otelConfigured = payload.otel_configured === true;
+  const exported = trace?.otel_export_enabled === true || trace?.otel?.otel_export_enabled === true;
+  const statusText = otelConfigured
+    ? exported
+      ? "OTel exported"
+      : "OTel configured"
+    : "Local trace only";
+  const tone = otelConfigured ? "status-success" : "status-neutral";
+  const jaegerUrl = payload.jaeger_ui_url || "http://127.0.0.1:16686";
+  container.className = `observability-status ${tone}`;
+  container.innerHTML = `
+    <div>
+      <strong>${escapeHtml(statusText)}</strong>
+      <span>local trace ${localEnabled ? "on" : "off"} · service ${escapeHtml(payload.service_name || "-")}</span>
+    </div>
+    <div>
+      <span>${escapeHtml(payload.otlp_endpoint || "OTLP endpoint not set")}</span>
+      <a href="${escapeHtml(jaegerUrl)}" target="_blank" rel="noreferrer">Jaeger UI</a>
+    </div>
+  `;
+}
+
 function renderRagStatus(payload = {}) {
   const status = $("ragStatus");
-  if (!status) return;
+  const summary = $("ragStatusSummary");
+  const diagnostics = $("ragDiagnostics");
+  if (!status || !summary || !diagnostics) return;
+
   const available = payload.available === true;
-  const count = payload.document_count ?? 0;
+  const unavailable = payload.available === false;
+  const checking = !available && !unavailable;
+  const count = payload.document_count ?? "-";
+  const reason = payload.error || (unavailable ? "未返回具体错误。" : "");
+  const tone = available ? "status-success" : checking ? "status-neutral" : "status-warning";
+
   status.textContent = available
-    ? `Chroma 可用 · ${count} docs`
-    : `Fallback 检索 · ${payload.error || "Chroma/OpenAI 不可用"}`;
-  status.className = available ? "status-success inline-status" : "status-warning inline-status";
+    ? `知识库可用 · ${count} docs`
+    : checking
+      ? "正在检查"
+      : "Fallback 检索";
+  status.className = `${tone} inline-status`;
+  summary.className = `rag-status-summary ${tone}`;
+  summary.innerHTML = available
+    ? `<strong>向量知识库可用</strong><span>当前集合可读取，基本面分析师可以使用 RAG 工具。</span>`
+    : checking
+      ? `<strong>正在检查 RAG 状态</strong><span>正在打开 Chroma 并检查 embedding 配置。</span>`
+      : `<strong>Chroma/Embedding 不可用</strong><span>${escapeHtml(humanizeRagError(reason))}</span>`;
+
+  diagnostics.innerHTML = [
+    diagnosticCard("后端", payload.backend || "-"),
+    diagnosticCard("文档数", String(count)),
+    diagnosticCard("Chroma 路径", payload.path || "-"),
+    diagnosticCard("Embedding", payload.embedding_model || "-"),
+    diagnosticCard("Probe", payload.probe_status || "-"),
+    diagnosticCard("范围", payload.scope || "-"),
+  ].join("");
+}
+
+function humanizeRagError(error) {
+  if (!error) return "未返回具体错误。";
+  if (error.includes("OPENAI_API_KEY") || error.includes("DASHSCOPE_API_KEY")) {
+    return "未配置 OPENAI_API_KEY 或 DASHSCOPE_API_KEY。配置后刷新状态，或重新导入资料。";
+  }
+  if (error.includes("chromadb") || error.includes("Chroma")) {
+    return `Chroma 初始化失败：${error}`;
+  }
+  return error;
+}
+function diagnosticCard(label, value) {
+  return `
+    <article class="diagnostic-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </article>
+  `;
 }
 
 async function ingestDefaults() {
@@ -241,7 +338,7 @@ function renderSubscriptions() {
         <select data-field="status" data-symbol="${escapeHtml(item.symbol)}">
           ${statusOption("observing", "观察中", item.status)}
           ${statusOption("near_opportunity", "接近机会", item.status)}
-          ${statusOption("actionable", "可行动", item.status)}
+          ${statusOption("actionable", "可执行", item.status)}
           ${statusOption("risk_elevated", "风险升高", item.status)}
           ${statusOption("not_compatible", "不兼容", item.status)}
         </select>
@@ -255,11 +352,10 @@ function renderSubscriptions() {
     list.appendChild(row);
   }
 }
-
 function renderSelectedCount() {
   const counter = $("selectedCount");
   if (counter) {
-    counter.textContent = `已选 ${state.selectedSymbols.size}`;
+    counter.textContent = `宸查€?${state.selectedSymbols.size}`;
   }
 }
 
@@ -302,14 +398,57 @@ async function startRun() {
       }),
     });
     state.currentRunId = payload.run_id;
+    localStorage.setItem(lastRunStorageKey, payload.run_id);
     state.activeReportKey = null;
+    state.activeTraceSpanId = null;
+    state.traceRunId = null;
+    state.currentTrace = null;
+    state.activeNodeName = null;
+    state.expandedActivityDetails.clear();
     $("refreshRun").disabled = false;
     $("reportContent").textContent = "运行已启动，报告生成后可在下方切换查看。";
     renderRun(payload);
     startPolling();
+    loadRuns().catch(showError);
   } finally {
     startButton.disabled = false;
     startButton.textContent = "启动分析";
+  }
+}
+
+async function loadRuns() {
+  const payload = await api("/api/runs");
+  state.recentRuns = payload.items || [];
+  renderRunHistory();
+  return state.recentRuns;
+}
+
+async function restoreLastRun() {
+  const runs = await loadRuns();
+  const storedRunId = localStorage.getItem(lastRunStorageKey);
+  const storedRun = runs.find((run) => run.run_id === storedRunId);
+  const runningRun = runs.find((run) => run.status === "running");
+  const target = storedRun || runningRun;
+  if (!target) return;
+  await connectRun(target.run_id);
+}
+
+async function connectRun(runId) {
+  showError("");
+  stopPolling();
+  state.currentRunId = runId;
+  state.activeReportKey = null;
+  state.activeTraceSpanId = null;
+  state.traceRunId = null;
+  state.currentTrace = null;
+  state.expandedActivityDetails.clear();
+  localStorage.setItem(lastRunStorageKey, runId);
+  renderRunHistory();
+  $("refreshRun").disabled = false;
+  const payload = await api(`/api/runs/${encodeURIComponent(runId)}`);
+  renderRun(payload);
+  if (payload.status?.status === "running") {
+    startPolling();
   }
 }
 
@@ -318,6 +457,31 @@ function startPolling() {
     clearInterval(state.pollTimer);
   }
   state.pollTimer = setInterval(refreshRun, 2000);
+  startProgressTicker();
+}
+
+function stopPolling() {
+  if (state.pollTimer) {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+  if (state.progressTimer) {
+    clearInterval(state.progressTimer);
+    state.progressTimer = null;
+  }
+}
+
+function startProgressTicker() {
+  if (state.progressTimer) return;
+  state.progressTimer = setInterval(() => {
+    if (!state.lastRunPayload?.status || state.lastRunPayload.status.status !== "running") {
+      clearInterval(state.progressTimer);
+      state.progressTimer = null;
+      return;
+    }
+    renderSummaryCards(state.lastRunPayload.status);
+    renderProgress(state.lastRunPayload.run_id, state.lastRunPayload.status);
+  }, 1000);
 }
 
 async function refreshRun() {
@@ -325,38 +489,104 @@ async function refreshRun() {
   const payload = await api(`/api/runs/${encodeURIComponent(state.currentRunId)}`);
   renderRun(payload);
   const status = payload.status?.status;
-  if (status === "succeeded" || status === "failed") {
-    clearInterval(state.pollTimer);
-    state.pollTimer = null;
+  if (isTerminalRunStatus(status)) {
+    stopPolling();
+    loadRuns().catch(showError);
   }
 }
 
 function renderRun(payload) {
+  state.lastRunPayload = payload;
   const runStatus = payload.status || {};
   const runState = $("runState");
   const status = runStatus.status || "running";
-  runState.textContent = runStatusLabels[status] || status;
+  runState.textContent = runStatus.cancel_requested && status === "running" ? "正在取消" : runStatusLabels[status] || status;
   runState.className = `run-state ${toneClass(status)}`;
+  updateRunControls(runStatus);
 
   renderSummaryCards(runStatus);
   renderProgress(payload.run_id, runStatus);
+  renderNodeGuide(runStatus);
   renderDecisionRows(payload.run_id, runStatus);
+  renderTrace(payload.run_id, runStatus);
+  renderObservabilityStatus(state.observability || {}, state.currentTrace);
 
   const errors = payload.errors || runStatus.errors || [];
   $("errors").textContent = errors.map((item) => item.message || item).join("\n");
   renderReportTabs(payload.run_id, payload.reports || {});
 }
 
+function updateRunControls(runStatus = {}) {
+  const cancelButton = $("cancelRun");
+  if (!cancelButton) return;
+  const running = runStatus.status === "running";
+  const cancelRequested = runStatus.cancel_requested === true;
+  cancelButton.disabled = !state.currentRunId || !running || cancelRequested || state.cancelPending;
+  cancelButton.textContent = state.cancelPending || cancelRequested ? "取消中" : "取消运行";
+}
+
+async function cancelRun() {
+  if (!state.currentRunId || state.cancelPending) return;
+  showError("");
+  state.cancelPending = true;
+  updateRunControls(state.lastRunPayload?.status || {});
+  try {
+    const payload = await api(`/api/runs/${encodeURIComponent(state.currentRunId)}/cancel`, {
+      method: "POST",
+    });
+    renderRun(payload);
+    startPolling();
+    await loadRuns();
+  } finally {
+    state.cancelPending = false;
+    updateRunControls(state.lastRunPayload?.status || {});
+  }
+}
+
+function renderRunHistory() {
+  const container = $("runHistory");
+  if (!container) return;
+  const runs = state.recentRuns || [];
+  if (!runs.length) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `
+    <div class="section-heading compact">
+      <div>
+        <h3>最近运行</h3>
+        <span>刷新页面后可重新连接正在运行或已完成的 run。</span>
+      </div>
+      <button class="ghost-button" type="button" data-refresh-runs>刷新列表</button>
+    </div>
+    <div class="run-history-list">
+      ${runs.slice(0, 8).map(renderRunHistoryItem).join("")}
+    </div>
+  `;
+}
+
+function renderRunHistoryItem(run = {}) {
+  const status = run.status || "pending";
+  const active = run.run_id === state.currentRunId ? " active" : "";
+  const cancelRequested = run.cancel_requested && status === "running";
+  const label = cancelRequested ? "取消中" : runStatusLabels[status] || status;
+  return `
+    <button class="run-history-item${active}" type="button" data-connect-run="${escapeHtml(run.run_id)}">
+      <span class="status-chip ${toneClass(status)}">${escapeHtml(label)}</span>
+      <strong>${escapeHtml(run.run_id || "-")}</strong>
+      <small>${escapeHtml((run.symbols || []).join(", ") || "-")}</small>
+      <em>${escapeHtml(formatDateTime(run.updated_at))}</em>
+    </button>
+  `;
+}
+
 function renderSummaryCards(runStatus = {}) {
   const summary = runStatus.decision_summary || {};
   const metrics = summary.metrics || {};
   const nodes = runStatus.nodes || {};
-  const nodeValues = Object.values(nodes);
-  const completedNodes =
-    metrics.completed_nodes ??
-    nodeValues.filter((node) => ["succeeded", "skipped"].includes(node.status)).length;
-  const failedNodes =
-    metrics.failed_nodes ?? nodeValues.filter((node) => node.status === "failed").length;
+  const primaryNodes = primaryWorkflowNodes.map((name) => nodes[name] || { status: "pending" });
+  const completedNodes = primaryNodes.filter((node) => ["succeeded", "skipped"].includes(node.status)).length;
+  const failedNodes = primaryNodes.filter((node) => node.status === "failed").length;
   const reportCount =
     metrics.report_count ??
     Object.values(runStatus.reports || {}).filter((report) => report.exists).length;
@@ -365,7 +595,7 @@ function renderSummaryCards(runStatus = {}) {
 
   const cards = [
     { label: "标的", value: metrics.symbol_count ?? (runStatus.symbols || []).length, tone: "neutral" },
-    { label: "节点完成", value: `${completedNodes}/${nodeValues.length || 0}`, tone: failedNodes ? "danger" : "success" },
+    { label: "主流程节点", value: `${completedNodes}/${primaryWorkflowNodes.length}`, tone: failedNodes ? "danger" : "success" },
     { label: "风控调整/持平", value: `${riskAdjusted}/${riskHeld}`, tone: riskAdjusted || riskHeld || failedNodes ? "warning" : "neutral" },
     { label: "报告", value: reportCount, tone: reportCount ? "success" : "neutral" },
   ];
@@ -375,20 +605,17 @@ function renderSummaryCards(runStatus = {}) {
 
 function renderProgress(runId, runStatus = {}) {
   const nodes = runStatus.nodes || {};
-  const entries = Object.keys(nodes).length
-    ? Object.entries(nodes)
-    : workflowSteps.map(([name, label]) => [label, { status: "pending", rawName: name }]);
-  const nodeHtml = entries
-    .map(([name, node]) => {
-      const status = node.status || "pending";
-      return `
-        <div class="node ${toneClass(status)}">
-          <span>${escapeHtml(nodeStatusLabels[status] || status)}</span>
-          <strong>${escapeHtml(name)}</strong>
-        </div>
-      `;
-    })
-    .join("");
+  const primaryEntries = primaryWorkflowNodes.map((name) => [name, nodes[name] || { status: "pending" }]);
+  const optionalEntries = Object.entries(nodes).filter(([name]) => !primaryWorkflowNodes.includes(name));
+  const currentNode = runStatus.current_node || "-";
+  const elapsed = runElapsed(runStatus);
+  const primaryStats = primaryEntries.reduce(
+    (acc, [, node]) => {
+      acc[node.status || "pending"] = (acc[node.status || "pending"] || 0) + 1;
+      return acc;
+    },
+    {},
+  );
 
   $("progress").innerHTML = `
     <div class="progress-heading">
@@ -398,7 +625,223 @@ function renderProgress(runId, runStatus = {}) {
       </div>
       <strong>${escapeHtml((runStatus.symbols || []).join(", ") || "暂无标的")}</strong>
     </div>
-    <div class="node-grid">${nodeHtml}</div>
+    <div class="run-overview">
+      <span>当前步骤：${escapeHtml(currentNode)}</span>
+      <span>总耗时：${escapeHtml(elapsed)}</span>
+      <span>完成 ${primaryStats.succeeded || 0} / 跳过 ${primaryStats.skipped || 0} / 失败 ${primaryStats.failed || 0}</span>
+    </div>
+    <div class="node-grid">${primaryEntries.map(([name, node]) => nodeCard(name, node)).join("")}</div>
+    ${
+      optionalEntries.length
+        ? `<div class="optional-node-block">
+            <div class="mini-heading">可选分析节点</div>
+            <div class="node-grid optional">${optionalEntries.map(([name, node]) => nodeCard(name, node, true)).join("")}</div>
+          </div>`
+        : ""
+    }
+    ${renderNodeActivityDetails(runStatus)}
+  `;
+}
+function nodeCard(name, node = {}, optional = false) {
+  const status = node.status || "pending";
+  const duration = nodeDurationLabel(node);
+  const active = state.activeNodeName === name ? " active" : "";
+  return `
+    <button class="node ${toneClass(status)}${optional ? " optional-node" : ""}${active}" type="button" data-node-name="${escapeHtml(name)}">
+      <span>${escapeHtml(nodeStatusLabels[status] || status)}</span>
+      <strong>${escapeHtml(name)}</strong>
+      <em>${escapeHtml(duration)}</em>
+    </button>
+  `;
+}
+
+function renderNodeActivityDetails(runStatus = {}) {
+  const nodeName = state.activeNodeName;
+  if (!nodeName) return "";
+  if (nodeName !== "Technical Position") {
+    return `
+      <section class="node-activity-panel">
+        <div class="section-heading compact">
+          <div>
+            <h3>${escapeHtml(nodeName)}</h3>
+            <span>当前版本先支持 Technical Position 的运行中详情。</span>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  const node = (runStatus.nodes || {})[nodeName] || {};
+  const activity = node.activity || null;
+  const history = Array.isArray(node.activity_history) ? [...node.activity_history].reverse() : [];
+  const current = activity || history[0] || null;
+  const status = node.status || "pending";
+  return `
+    <section class="node-activity-panel">
+      <div class="section-heading compact">
+        <div>
+          <h3>Technical Position 实时详情</h3>
+          <span>显示 LLM 阶段、工具调用和脱敏摘要；完整 Trace 在运行结束后查看。</span>
+        </div>
+        <span class="status-chip ${toneClass(status)}">${escapeHtml(nodeStatusLabels[status] || status)}</span>
+      </div>
+      ${
+        current
+          ? renderActivityCurrent(current)
+          : `<div class="empty-state compact"><strong>暂无活动</strong><span>节点开始调用 LLM 或工具后会显示实时详情。</span></div>`
+      }
+      ${
+        history.length
+          ? `<div class="activity-history">
+              <strong>最近活动</strong>
+              ${history.map(renderActivityHistoryItem).join("")}
+            </div>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function renderActivityCurrent(activity = {}) {
+  const args = activity.args === undefined ? null : JSON.stringify(activity.args, null, 2);
+  return `
+    <div class="activity-current">
+      <div>
+        <span class="status-chip ${toneClass(activity.status || "running")}">${escapeHtml(activity.status || "running")}</span>
+        <strong>${escapeHtml(activity.title || activity.phase || "运行中")}</strong>
+        <em>${escapeHtml(activityDurationLabel(activity))}</em>
+      </div>
+      <dl>
+        <div><dt>阶段</dt><dd>${escapeHtml(activity.phase || "-")}</dd></div>
+        <div><dt>工具</dt><dd>${escapeHtml(activity.tool_name || "-")}</dd></div>
+        <div><dt>工具阶段</dt><dd>${escapeHtml(activity.tool_phase || "-")}</dd></div>
+        <div><dt>LLM 轮次</dt><dd>${escapeHtml(activity.llm_round ?? "-")}</dd></div>
+        <div><dt>缓存</dt><dd>${activity.cache_hit === true ? "命中" : activity.cache_hit === false ? "未命中" : "-"}</dd></div>
+      </dl>
+      ${args ? `<pre class="activity-json">${escapeHtml(args)}</pre>` : ""}
+      ${renderActivitySummary(activity.summary, activity.details, activity)}
+    </div>
+  `;
+}
+function renderActivityHistoryItem(activity = {}) {
+  const details = renderActivityDetails(activity);
+  if (details) {
+    const detailKey = activityDetailKey(activity, "history");
+    return `
+      <details class="activity-item activity-item-expandable" data-activity-detail-key="${escapeHtml(detailKey)}"${activityHistoryOpenAttr(activity, detailKey)}>
+        <summary>
+          <span class="status-chip ${toneClass(activity.status || "neutral")}">${escapeHtml(activity.status || "-")}</span>
+          <strong>${escapeHtml(activity.title || activity.phase || "-")}</strong>
+          <em>${escapeHtml(activityDurationLabel(activity))}</em>
+        </summary>
+        ${details}
+      </details>
+    `;
+  }
+  return `
+    <button class="activity-item" type="button" disabled>
+      <span class="status-chip ${toneClass(activity.status || "neutral")}">${escapeHtml(activity.status || "-")}</span>
+      <strong>${escapeHtml(activity.title || activity.phase || "-")}</strong>
+      <em>${escapeHtml(activityDurationLabel(activity))}</em>
+    </button>
+  `;
+}
+
+function renderActivitySummary(summary = {}, details = {}, activity = {}) {
+  const entries = Object.entries(summary || {});
+  const detailEntries = Object.entries(details || {});
+  if (!entries.length && !detailEntries.length) return "";
+  return `
+    <div class="activity-summary">
+      ${entries
+        .map(([label, payload]) => {
+          const parts = Object.entries(payload || {})
+            .map(([key, value]) => `${key}: ${value}`)
+            .join(" 路 ");
+          const detail = details?.[label];
+          if (detail) {
+            const detailKey = activityDetailKey(activity, label);
+            return `
+              <details class="activity-detail" data-activity-detail-key="${escapeHtml(detailKey)}"${activityDetailOpenAttr(detailKey)}>
+                <summary><strong>${escapeHtml(label)}</strong>${escapeHtml(parts)}</summary>
+                <pre>${escapeHtml(JSON.stringify(detail, null, 2))}</pre>
+              </details>
+            `;
+          }
+          return `<span><strong>${escapeHtml(label)}</strong>${escapeHtml(parts)}</span>`;
+        })
+        .join("")}
+      ${detailEntries
+        .filter(([label]) => !entries.some(([summaryLabel]) => summaryLabel === label))
+        .map(
+          ([label, payload]) => {
+            const detailKey = activityDetailKey(activity, label);
+            return `
+            <details class="activity-detail" data-activity-detail-key="${escapeHtml(detailKey)}"${activityDetailOpenAttr(detailKey)}>
+              <summary><strong>${escapeHtml(label)}</strong></summary>
+              <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+            </details>
+          `;
+          },
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderActivityDetails(activity = {}) {
+  const detailEntries = Object.entries(activity.details || {});
+  if (!detailEntries.length) return "";
+  return detailEntries
+    .map(
+      ([label, payload]) => `
+        <section class="activity-detail-block">
+          <strong>${escapeHtml(label)}</strong>
+          <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+        </section>
+      `,
+    )
+    .join("");
+}
+
+function activityDetailKey(activity = {}, label = "") {
+  const identity =
+    activity.span_id ||
+    [
+      activity.phase || "",
+      activity.title || "",
+      activity.llm_round ?? "",
+      activity.tool_name || "",
+      activity.tool_phase || "",
+      activity.started_at || "",
+    ].join("|");
+  return `${identity}:${label}`;
+}
+
+function activityDetailOpenAttr(detailKey) {
+  return state.expandedActivityDetails.has(detailKey) ? " open" : "";
+}
+
+function activityHistoryOpenAttr(activity = {}, detailKey = "") {
+  if (state.expandedActivityDetails.has(detailKey)) return " open";
+  return Object.keys(activity.details || {}).some((label) => state.expandedActivityDetails.has(activityDetailKey(activity, label)))
+    ? " open"
+    : "";
+}
+
+function renderNodeGuide(runStatus = {}) {
+  const guide = $("nodeGuide");
+  if (!guide) return;
+  const optionalPresent = Object.keys(runStatus.nodes || {}).some((name) => optionalWorkflowNodes.includes(name));
+  guide.innerHTML = `
+    <div>
+      <strong>主流程 11 个节点</strong>
+      <span>${primaryWorkflowNodes.map((name) => escapeHtml(name)).join(" → ")}</span>
+    </div>
+    <div>
+      <strong>可选节点</strong>
+      <span>${optionalPresent ? "Opportunity Radar 会按选择运行或跳过，不计入主流程总数。" : "Opportunity Radar 未进入当前状态。"}</span>
+    </div>
   `;
 }
 
@@ -450,7 +893,6 @@ function renderDecisionRows(runId, runStatus = {}) {
     })
     .join("");
 }
-
 function renderBrokerControl(runId, runStatus, row) {
   const title = escapeHtml(row.broker_message || row.broker_status || "");
   if (row.submitted_to_broker) {
@@ -478,6 +920,81 @@ function renderBrokerControl(runId, runStatus, row) {
     `;
   }
   return '<span class="empty-inline">-</span>';
+}
+
+async function renderTrace(runId, runStatus = {}) {
+  const timeline = $("traceTimeline");
+  const details = $("traceDetails");
+  if (!timeline || !details) return;
+  const traceReport = runStatus.reports?.trace_json;
+  if (!runId || !traceReport?.exists) {
+    timeline.innerHTML = '<div class="empty-state compact"><strong>暂无 Trace</strong><span>Trace 文件会在 Persist Trace 阶段完成后出现。</span></div>';
+    details.textContent = "运行完成后选择一个 trace span 查看详情。";
+    state.traceRunId = null;
+    state.currentTrace = null;
+    renderObservabilityStatus(state.observability || {}, null);
+    return;
+  }
+  if (state.traceRunId === runId && state.currentTrace) {
+    renderTracePayload(state.currentTrace);
+    return;
+  }
+  timeline.innerHTML = '<div class="empty-state compact"><strong>正在读取 Trace</strong><span>正在加载本地 trace.json。</span></div>';
+  details.textContent = "";
+  try {
+    const payload = await api(`/api/runs/${encodeURIComponent(runId)}/trace`);
+    state.traceRunId = runId;
+    state.currentTrace = payload.trace || {};
+    state.activeTraceSpanId = null;
+    renderObservabilityStatus(state.observability || {}, state.currentTrace);
+    renderTracePayload(state.currentTrace);
+  } catch (error) {
+    timeline.innerHTML = `<div class="empty-state compact"><strong>Trace 不可用</strong><span>${escapeHtml(error.message || error)}</span></div>`;
+    details.textContent = "";
+    renderObservabilityStatus(state.observability || {}, null);
+  }
+}
+
+function renderTracePayload(trace = {}) {
+  const timeline = $("traceTimeline");
+  const details = $("traceDetails");
+  const spans = trace.spans || [];
+  if (!spans.length) {
+    timeline.innerHTML = '<div class="empty-state compact"><strong>暂无 spans</strong><span>trace.json 中没有 span 记录。</span></div>';
+    details.textContent = "";
+    renderObservabilityStatus(state.observability || {}, trace);
+    return;
+  }
+  renderObservabilityStatus(state.observability || {}, trace);
+  const activeId = state.activeTraceSpanId || spans[0].span_id;
+  state.activeTraceSpanId = activeId;
+  timeline.innerHTML = spans
+    .map((span) => {
+      const depth = traceDepth(span, spans);
+      const active = span.span_id === activeId ? " active" : "";
+      const label = span.attributes?.["graph.node.name"] || span.attributes?.["tool.name"] || span.kind || "";
+      return `
+        <button class="trace-span${active}" type="button" data-trace-span="${escapeHtml(span.span_id)}" style="--depth:${depth}">
+          <span class="trace-status ${toneClass(span.status)}">${escapeHtml(span.status || "-")}</span>
+          <strong>${escapeHtml(span.name || "-")}</strong>
+          <small>${escapeHtml(label)}</small>
+          <em>${formatDuration(span.duration_ms)}</em>
+        </button>
+      `;
+    })
+    .join("");
+  const activeSpan = spans.find((span) => span.span_id === activeId) || spans[0];
+  details.textContent = JSON.stringify(activeSpan, null, 2);
+}
+function traceDepth(span, spans) {
+  const byId = new Map(spans.map((item) => [item.span_id, item]));
+  let depth = 0;
+  let parent = span.parent_span_id ? byId.get(span.parent_span_id) : null;
+  while (parent && depth < 8) {
+    depth += 1;
+    parent = parent.parent_span_id ? byId.get(parent.parent_span_id) : null;
+  }
+  return depth;
 }
 
 async function confirmSimulatedOrder(symbol, button) {
@@ -510,7 +1027,7 @@ function renderReportTabs(runId, reports) {
     return (left === -1 ? 99 : left) - (right === -1 ? 99 : right) || a.localeCompare(b);
   });
   if (!keys.length) {
-    tabs.innerHTML = '<span class="empty-inline">暂无报告。</span>';
+    tabs.innerHTML = '<span class="empty-inline">鏆傛棤鎶ュ憡銆?/span>';
     return;
   }
 
@@ -600,7 +1117,6 @@ function renderPortfolio(payload = {}) {
     })
     .join("");
 }
-
 function summaryCard(card) {
   return `
     <article class="summary-card summary-${card.tone}">
@@ -615,16 +1131,20 @@ function statusLabel(value) {
 }
 
 function toneClass(value) {
-  if (["actionable", "succeeded", "portfolio_decided"].includes(value)) {
+  if (["actionable", "succeeded", "portfolio_decided", "ok"].includes(value)) {
     return "status-success";
   }
-  if (["near_opportunity", "running", "alert_only", "confirmation_required", "pending", "skipped"].includes(value)) {
+  if (["near_opportunity", "running", "alert_only", "confirmation_required"].includes(value)) {
     return "status-warning";
   }
-  if (["risk_elevated", "failed", "not_compatible"].includes(value)) {
+  if (["risk_elevated", "failed", "not_compatible", "error"].includes(value)) {
     return "status-danger";
   }
   return "status-neutral";
+}
+
+function isTerminalRunStatus(status) {
+  return ["succeeded", "failed", "cancelled"].includes(status);
 }
 
 function marketLabel(value) {
@@ -647,9 +1167,10 @@ function reportLabel(value) {
     technical_position: "技术位置",
     futu_portfolio: "Futu 组合",
     run_audit: "运行审计",
+    trace_markdown: "Trace",
+    trace_json: "Trace JSON",
   }[value] || value;
 }
-
 function formatNumber(value) {
   if (value === null || value === undefined || value === "") return "-";
   const number = Number(value);
@@ -680,6 +1201,51 @@ function formatDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatDuration(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const number = Number(value);
+  if (Number.isNaN(number)) return String(value);
+  if (number >= 1000) return `${(number / 1000).toFixed(1)}s`;
+  return `${number.toFixed(number >= 10 ? 1 : 2)}ms`;
+}
+
+function runElapsed(runStatus = {}) {
+  const started = parseDate(runStatus.started_at);
+  if (!started) return "-";
+  const finished = parseDate(runStatus.finished_at);
+  const end = finished || new Date();
+  return formatDuration(end.getTime() - started.getTime());
+}
+
+function nodeDurationLabel(node = {}) {
+  const status = node.status || "pending";
+  const started = parseDate(node.started_at);
+  const finished = parseDate(node.finished_at);
+  if (status === "pending") return "绛夊緟";
+  if (status === "skipped") return node.error ? `璺宠繃锛?{node.error}` : "璺宠繃";
+  if (!started) return "-";
+  const end = finished || new Date();
+  const label = formatDuration(end.getTime() - started.getTime());
+  return status === "running" ? `杩愯 ${label}` : `鑰楁椂 ${label}`;
+}
+
+function activityDurationLabel(activity = {}) {
+  if (activity.duration_ms !== null && activity.duration_ms !== undefined) {
+    return formatDuration(activity.duration_ms);
+  }
+  const started = parseDate(activity.started_at);
+  if (!started) return "-";
+  const ended = parseDate(activity.ended_at);
+  const end = ended || new Date();
+  return formatDuration(end.getTime() - started.getTime());
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function escapeHtml(value) {
@@ -753,11 +1319,49 @@ function bindEvents() {
 
   $("refreshSubscriptions").addEventListener("click", () => loadSubscriptions().catch(showError));
   $("startRun").addEventListener("click", () => startRun().catch(showError));
+  $("cancelRun").addEventListener("click", () => cancelRun().catch(showError));
   $("refreshRun").addEventListener("click", () => refreshRun().catch(showError));
+  $("runHistory").addEventListener("click", (event) => {
+    const refreshButton = event.target.closest("[data-refresh-runs]");
+    if (refreshButton) {
+      loadRuns().catch(showError);
+      return;
+    }
+    const button = event.target.closest("[data-connect-run]");
+    if (!button) return;
+    connectRun(button.dataset.connectRun).catch(showError);
+  });
+  $("progress").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-node-name]");
+    if (!button) return;
+    state.activeNodeName = button.dataset.nodeName;
+    renderProgress(state.currentRunId, state.lastRunPayload?.status || {});
+  });
+  $("progress").addEventListener(
+    "toggle",
+    (event) => {
+      const detail = event.target.closest?.("details[data-activity-detail-key]");
+      if (!detail) return;
+      const detailKey = detail.dataset.activityDetailKey;
+      if (!detailKey) return;
+      if (detail.open) {
+        state.expandedActivityDetails.add(detailKey);
+      } else {
+        state.expandedActivityDetails.delete(detailKey);
+      }
+    },
+    true,
+  );
   $("decisionRows").addEventListener("click", (event) => {
     const symbol = event.target.dataset.confirmSimulated;
     if (!symbol) return;
     confirmSimulatedOrder(symbol, event.target).catch(showError);
+  });
+  $("traceTimeline").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-trace-span]");
+    if (!button) return;
+    state.activeTraceSpanId = button.dataset.traceSpan;
+    renderTracePayload(state.currentTrace || {});
   });
   $("refreshRag").addEventListener("click", () => loadRagStatus().catch(showError));
   $("ingestDefaults").addEventListener("click", () => ingestDefaults().catch(showError));
@@ -771,6 +1375,13 @@ function init() {
   switchView("analysis");
   renderSummaryCards();
   renderProgress(null, {});
+  renderNodeGuide({});
+  renderRagStatus({
+    backend: "fundamental_chroma",
+    available: null,
+    document_count: "-",
+    error: "",
+  });
   renderPortfolio({
     available: false,
     mode: "simulation",
@@ -782,6 +1393,7 @@ function init() {
   });
   loadSubscriptions().catch(showError);
   loadRagStatus().catch(showError);
+  loadObservabilityStatus().catch(showError);
+  restoreLastRun().catch(showError);
 }
-
 init();

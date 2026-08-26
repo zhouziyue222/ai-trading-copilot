@@ -11,12 +11,13 @@ from ai_trading_copilot.copilot.analysis.technical_position import (
 )
 from ai_trading_copilot.copilot.adapters.trading_tools import (
     date_window,
-    make_market_tools,
+    make_technical_position_tools,
     tool_names,
 )
 from ai_trading_copilot.copilot.agents.llm_tools import extract_json_object
 from ai_trading_copilot.copilot.agents.llm_tools import strip_trailing_json_object
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
+from ai_trading_copilot.copilot.config.prompts import render_prompt
 from ai_trading_copilot.copilot.domain.enums import SymbolTrendState
 from ai_trading_copilot.copilot.domain.models import (
     PriceBar,
@@ -37,10 +38,25 @@ class TechnicalAnalysisResult:
 class TechnicalPositionAgent:
     """Evaluates support, pullback, trend, reward/risk, and optional LLM report."""
 
-    def __init__(self, *, llm=None, tools=None, stock_info_getter=None):
+    DEFAULT_PROMPT_NAME = "technical_position.v1"
+    DEBUG_PROMPT_NAME = "technical_position.debug.v1"
+
+    def __init__(
+        self,
+        *,
+        llm=None,
+        tools=None,
+        stock_info_getter=None,
+        prompt_name: str | None = None,
+        debug_mode: bool = False,
+    ):
         self.llm = llm
         self.tools = tools
         self.stock_info_getter = stock_info_getter
+        self.prompt_name = prompt_name or (
+            self.DEBUG_PROMPT_NAME if debug_mode else self.DEFAULT_PROMPT_NAME
+        )
+        self.debug_mode = debug_mode or self.prompt_name == self.DEBUG_PROMPT_NAME
 
     def analyze(self, symbol: str, bars: List[PriceBar]) -> TechnicalPosition:
         return evaluate_technical_position(symbol, bars)
@@ -73,43 +89,38 @@ class TechnicalPositionAgent:
         kwargs = {}
         if self.stock_info_getter is not None:
             kwargs["stock_info_getter"] = self.stock_info_getter
-        tools = self.tools or make_market_tools(**kwargs)
+        tools = self.tools or make_technical_position_tools(**kwargs)
         start_date, end_date = date_window(trade_date, look_back_days)
         prefetch = [
             ("get_stock_info", {"symbol": symbol}),
-            ("get_stock_data", {"symbol": symbol, "start_date": start_date, "end_date": end_date}),
             (
-                "get_indicators",
+                "get_technical_summary",
                 {
                     "symbol": symbol,
-                    "indicator": "close_20_sma,close_50_sma,close_200_sma,rsi,macd,macds,macdh",
                     "curr_date": end_date,
                     "look_back_days": look_back_days,
                 },
             ),
             (
-                "get_indicators",
+                "get_technical_summary",
                 {
                     "symbol": sector_symbol,
-                    "indicator": "close_20_sma,close_50_sma,close_200_sma,rsi,macd,macds,macdh",
                     "curr_date": end_date,
                     "look_back_days": look_back_days,
                 },
             ),
             (
-                "get_indicators",
+                "get_technical_summary",
                 {
                     "symbol": "SPY",
-                    "indicator": "close_20_sma,close_50_sma,close_200_sma,rsi,macd,macds,macdh",
                     "curr_date": end_date,
                     "look_back_days": look_back_days,
                 },
             ),
             (
-                "get_indicators",
+                "get_technical_summary",
                 {
                     "symbol": "QQQ",
-                    "indicator": "close_20_sma,close_50_sma,close_200_sma,rsi,macd,macds,macdh",
                     "curr_date": end_date,
                     "look_back_days": look_back_days,
                 },
@@ -124,38 +135,20 @@ class TechnicalPositionAgent:
         )
         tool_evidence = evidence_result.prefetched_evidence
         pre_calls = evidence_result.prefetched_calls
-        prompt = (
-            "You are the Technical Position analyst for an AI trading copilot. "
-            "This mirrors TradingAgents' market analyst indicator discipline, but focuses "
-            "on actionable technical levels across three dimensions: the subscribed stock, "
-            "its sector/index proxy, and the broad US market. Use available tools to inspect "
-            "Futu stock info, price history, and MA/MACD/RSI indicators. The final report "
-            "must explicitly state stock, sector, and broad market technical states.\n\n"
-            "高效报告格式：\n"
-            "1. 技术立场：趋势、回调质量，以及价格是否接近支撑。\n"
-            "2. 关键位置：当前价格、支撑、止损参考、近期高点/目标区。\n"
-            "3. 收益风险质量：用一句话说明是否可用。\n"
-            "4. 数据质量：列出失败或缺失的工具证据。\n\n"
-            "Avoid generic indicator education and avoid repeating raw tool output. "
-            "Write the entire Markdown report and all JSON string values in Simplified Chinese. "
-            "Write a concise Markdown report for the exact subscribed symbol followed by one JSON "
-            "object with keys: current_price, support_level, recent_high, "
-            "moving_average_20, moving_average_50, distance_to_support_pct, "
-            "pullback_from_high_pct, reward_risk_ratio, uptrend, stock_trend_state, "
-            "sector_symbol, sector_trend_state, market_symbol, market_trend_state, "
-            "technical_summary, technical_warnings. Trend state values must be one of "
-            "uptrend, downtrend, uptrend_pullback, unknown. JSON must be the final object. "
-            "Do not invent data.\n\n"
-            f"Symbol: {symbol}\n"
-            f"Date window: {start_date} to {end_date}\n"
-            f"Deterministic position: current={position.current_price:.2f}, "
-            f"support={position.support_level:.2f}, recent_high={position.recent_high:.2f}, "
-            f"ma20={position.moving_average_20}, ma50={position.moving_average_50}, "
-            f"reward_risk={position.reward_risk_ratio}\n"
-            f"Sector benchmark proxy: {sector_symbol}\n"
-            f"Broad market proxies: SPY, QQQ\n"
-            f"Available tools: {tool_names(tools)}\n\n"
-            f"Prefetched tool evidence:\n{tool_evidence or '-'}"
+        prompt = render_prompt(
+            self.prompt_name,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            current_price=f"{position.current_price:.2f}",
+            support_level=f"{position.support_level:.2f}",
+            recent_high=f"{position.recent_high:.2f}",
+            moving_average_20=position.moving_average_20,
+            moving_average_50=position.moving_average_50,
+            reward_risk_ratio=position.reward_risk_ratio,
+            sector_symbol=sector_symbol,
+            available_tools=tool_names(tools),
+            tool_evidence=tool_evidence or "-",
         )
         react_result = runner.run(
             prompt=prompt,
@@ -320,6 +313,11 @@ def _context_from_payload(
         ),
         summary=summary,
         warnings=[str(item) for item in warnings if str(item).strip()],
+        decision_basis=_string_list(payload.get("decision_basis")),
+        uncertainties=_string_list(payload.get("uncertainties")),
+        downstream_summary=str(
+            payload.get("downstream_summary") or summary or fallback.summary or ""
+        ).strip(),
     )
 
 
@@ -330,6 +328,12 @@ def _trend_state(value) -> SymbolTrendState:
         return SymbolTrendState(str(value).strip().lower())
     except ValueError:
         return SymbolTrendState.UNKNOWN
+
+
+def _string_list(value) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _sector_benchmark_for_symbol(symbol: str) -> str:
