@@ -280,7 +280,7 @@ def test_langgraph_can_use_live_portfolio_mode(tmp_path):
     assert portfolio_getter.modes == [ExecutionMode.LIVE]
 
 
-def test_langgraph_retrieves_memory_agent_context(tmp_path):
+def test_langgraph_without_llm_does_not_record_unused_memory(tmp_path):
     store = DistilledMemoryStore(tmp_path / "memory.jsonl")
     store.append(
         DistilledMemory(
@@ -301,7 +301,8 @@ def test_langgraph_retrieves_memory_agent_context(tmp_path):
         report_output_dir=tmp_path,
     )
 
-    assert state["memories"]["AAPL"][0].lesson == "AAPL pullbacks need support confirmation."
+    assert state["memories"] == {}
+    assert state["memory_retrievals"] == []
     assert "post_trade_review_learning" in state["agent_reports"]
 
 
@@ -345,7 +346,7 @@ def test_langgraph_runs_only_selected_analysts_and_reviews_their_outputs(tmp_pat
         assert path.parent == tmp_path / "1_analysts"
 
 
-def test_analyst_context_includes_retrieved_trading_memories():
+def test_analyst_context_excludes_trading_memories():
     context = _analyst_context_for_symbol(
         {
             "opportunity_reports_by_symbol": {"AAPL": "# Radar\n\nNear support."},
@@ -365,10 +366,13 @@ def test_analyst_context_includes_retrieved_trading_memories():
         "AAPL",
     )
 
-    assert "Retrieved Trading Memories" in context
-    assert "historical context only" in context
-    assert "Wait for support confirmation" in context
-    assert "run=run_AAPL_previous" in context
+    assert "Retrieved Trading Memories" not in context
+    assert "Wait for support confirmation" not in context
+    assert "Near support" in context
+
+
+def test_langgraph_has_no_early_memory_retrieval_node():
+    assert "Retrieve Memories" not in CopilotLangGraph.NODE_ORDER
 
 
 def test_analyst_context_uses_fundamental_report_not_graph_rag_documents():
@@ -459,5 +463,52 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
         path = Path(state["agent_reports"][key])
         assert path.exists()
         assert path.parent == tmp_path / parent
+
+
+def test_langgraph_retrieves_memory_inside_trader_and_portfolio_nodes(tmp_path):
+    llm = RoutingLLM()
+    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+    memory = store.repository.upsert(
+        DistilledMemory(
+            memory_id="aapl-contextual-memory",
+            memory_type=MemoryType.STRATEGY_PERFORMANCE,
+            lesson="Use smaller size until an AAPL support retest is confirmed.",
+            trigger="AAPL uptrend pullback near support.",
+            symbols=["AAPL"],
+            tags=["pullback", "position_sizing"],
+            market_regimes=["uptrend"],
+        )
+    )
+    state = CopilotLangGraph(
+        llm=llm,
+        memory_agent=PostTradeReviewLearningAgent(store),
+        portfolio_getter=RecordingPortfolioGetter(),
+        opportunity_radar_agent=OpportunityRadarAgent(llm=llm, tools=_fake_market_tools()),
+        technical_position_agent=TechnicalPositionAgent(llm=llm, tools=_fake_market_tools()),
+        fundamental_analyst_agent=FundamentalAnalystAgent(llm=llm, tools=_fake_fundamental_tools()),
+    ).run(
+        subscription_symbols=["AAPL"],
+        portfolio=PortfolioSnapshot(),
+        selected_analysts=[
+            AnalystType.OPPORTUNITY_RADAR,
+            AnalystType.TECHNICAL_POSITION,
+            AnalystType.FUNDAMENTAL_ANALYSIS,
+        ],
+        report_output_dir=tmp_path,
+        trade_date="2026-05-08",
+        run_id="run-contextual-memory",
+    )
+
+    consumers = {record.request.consumer for record in state["memory_retrievals"]}
+    node_names = [event.node_name for event in state["trace_events"]]
+    assert consumers == {"trader", "portfolio_manager"}
+    assert state["memories"]["AAPL"][0].memory_id == memory.memory_id
+    assert "Retrieve Memories" not in node_names
+    assert node_names.index(CopilotLangGraph.NODE_TRADER) > node_names.index(
+        CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS
+    )
+    assert Path(state["agent_reports"]["post_trade_review_learning"]).parent == (
+        tmp_path / "6_memory"
+    )
 
 

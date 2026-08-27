@@ -1019,7 +1019,6 @@ def _default_required_nodes(state: Mapping[str, Any]) -> tuple[str, ...]:
     nodes = [
         CopilotLangGraph.NODE_LOAD_PERSONA_MARKDOWN,
         CopilotLangGraph.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
-        CopilotLangGraph.NODE_RETRIEVE_MEMORIES,
     ]
     if AnalystType.OPPORTUNITY_RADAR.value in selected:
         nodes.append(CopilotLangGraph.NODE_OPPORTUNITY_RADAR)

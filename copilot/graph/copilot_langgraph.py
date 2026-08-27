@@ -40,6 +40,7 @@ from ai_trading_copilot.copilot.domain.models import (
     ExecutionDecision,
     FundamentalAnalysisReport,
     NewsSentimentReport,
+    MemoryRetrievalRecord,
     OpportunityRadarItem,
     PortfolioSnapshot,
     PriceBar,
@@ -61,6 +62,7 @@ from ai_trading_copilot.copilot.services.cancellation import (
     activate_cancellation,
 )
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
+from ai_trading_copilot.copilot.services.memory_retrieval import MemoryRetrievalSession
 from ai_trading_copilot.copilot.services.tracing import (
     TRACE_JSON_REPORT_KEY,
     TRACE_MARKDOWN_REPORT_KEY,
@@ -87,7 +89,6 @@ class CopilotLangGraph:
 
     NODE_LOAD_PERSONA_MARKDOWN = "Load Persona Markdown"
     NODE_LOAD_SUBSCRIPTION_SYMBOLS = "Load Subscription Symbols"
-    NODE_RETRIEVE_MEMORIES = "Retrieve Memories"
     NODE_OPPORTUNITY_RADAR = "Opportunity Radar"
     NODE_TECHNICAL_POSITION = "Technical Position"
     NODE_NEWS_SENTIMENT = "News Sentiment"
@@ -101,7 +102,6 @@ class CopilotLangGraph:
     NODE_ORDER = [
         NODE_LOAD_PERSONA_MARKDOWN,
         NODE_LOAD_SUBSCRIPTION_SYMBOLS,
-        NODE_RETRIEVE_MEMORIES,
         NODE_TECHNICAL_POSITION,
         NODE_NEWS_SENTIMENT,
         NODE_FUNDAMENTAL_ANALYSIS,
@@ -259,6 +259,9 @@ class CopilotLangGraph:
             "news_sentiment_by_symbol": {},
             "technical_contexts": {},
             "opportunity_reports_by_symbol": {},
+            "memories": {},
+            "shadow_memories": {},
+            "memory_retrievals": [],
             "report_output_dir": str(report_output_dir or self.report_output_dir),
         }
         return self.invoke(initial_state)
@@ -280,6 +283,9 @@ class CopilotLangGraph:
             "news_sentiment_by_symbol": {},
             "technical_contexts": {},
             "opportunity_reports_by_symbol": {},
+            "memories": {},
+            "shadow_memories": {},
+            "memory_retrievals": [],
             "report_output_dir": self.report_output_dir,
             "portfolio_mode": ExecutionMode.SIMULATION,
             "fundamental_analysis_by_symbol": {},
@@ -382,12 +388,8 @@ class CopilotLangGraph:
             self.NODE_LOAD_PERSONA_MARKDOWN,
             self.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
         )
-        workflow.add_edge(
-            self.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
-            self.NODE_RETRIEVE_MEMORIES,
-        )
         workflow.add_conditional_edges(
-            self.NODE_RETRIEVE_MEMORIES,
+            self.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
             self._route_analyst_nodes,
             [
                 self.NODE_OPPORTUNITY_RADAR,
@@ -414,7 +416,6 @@ class CopilotLangGraph:
         node_order = [
             self.NODE_LOAD_PERSONA_MARKDOWN,
             self.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
-            self.NODE_RETRIEVE_MEMORIES,
             *[
                 node
                 for node in self._route_analyst_nodes(current)
@@ -476,7 +477,6 @@ class CopilotLangGraph:
         node_map = {
             self.NODE_LOAD_PERSONA_MARKDOWN: self._load_persona_markdown,
             self.NODE_LOAD_SUBSCRIPTION_SYMBOLS: self._load_subscription_symbols,
-            self.NODE_RETRIEVE_MEMORIES: self._retrieve_memories,
             self.NODE_OPPORTUNITY_RADAR: self._opportunity_radar,
             self.NODE_TECHNICAL_POSITION: self._technical_position,
             self.NODE_NEWS_SENTIMENT: self._news_sentiment,
@@ -548,7 +548,11 @@ class CopilotLangGraph:
         if span.name not in {"llm.invoke", "tool.call"}:
             return
         node_name = _span_graph_node_name(span, recorder)
-        if node_name != self.NODE_TECHNICAL_POSITION:
+        if node_name not in {
+            self.NODE_TECHNICAL_POSITION,
+            self.NODE_TRADER,
+            self.NODE_PORTFOLIO_MANAGER,
+        }:
             return
         self.run_tracker.record_node_activity(
             node_name,
@@ -582,60 +586,6 @@ class CopilotLangGraph:
                 route_reason="The subscription list is a state field; no SubscriptionAgent is used.",
             ),
             subscription_symbols=symbols,
-        )
-
-    def _retrieve_memories(self, state: CopilotGraphState) -> CopilotGraphState:
-        memories: Dict[str, List[DistilledMemory]] = {}
-        shadow_memories: Dict[str, List[DistilledMemory]] = {}
-        run_id = state.get("run_id")
-        if self.memory_agent is not None:
-            for symbol in state["subscription_symbols"]:
-                tags = _memory_tags_for_state(state)
-                query = _memory_query_for_symbol(state, symbol)
-                memories[symbol] = self.memory_agent.retrieve_context(
-                    symbol=symbol,
-                    tags=tags,
-                    query=query,
-                    limit=5,
-                    run_id=run_id,
-                )
-                shadow_memories[symbol] = self.memory_agent.retrieve_shadow_context(
-                    symbol=symbol,
-                    tags=tags,
-                    query=query,
-                    limit=5,
-                    run_id=run_id,
-                )
-        total = sum(len(items) for items in memories.values())
-        shadow_total = sum(len(items) for items in shadow_memories.values())
-        updates = {"memories": memories, "shadow_memories": shadow_memories}
-        if self.memory_agent is not None:
-            content = _format_memory_report(memories, shadow_memories=shadow_memories)
-            updates["agent_reports"] = {
-                "post_trade_review_learning": self._save_agent_report(
-                    state=state,
-                    stage="0_memory",
-                    agent_name="post_trade_review_learning",
-                    content=content,
-                )
-            }
-        return self._with_trace(
-            state,
-            TraceEvent(
-                node_name=self.NODE_RETRIEVE_MEMORIES,
-                input_summary=f"symbols={state['subscription_symbols']}",
-                output_summary=(
-                    f"approved_context_items={total}; "
-                    f"shadow_observation_items={shadow_total}; "
-                    f"approved_ids={_memory_ids(memories)}; "
-                    f"shadow_ids={_memory_ids(shadow_memories)}"
-                ),
-                route_reason=(
-                    "Inject only approved SQLite memories, capped at 5 per symbol; "
-                    "shadow memories are logged for evaluation and never enter prompts."
-                ),
-            ),
-            **updates,
         )
 
     def _resolve_portfolio(
@@ -982,6 +932,11 @@ class CopilotLangGraph:
         reports_by_symbol: Dict[str, str] = {}
         reviewed_items: List[OpportunityRadarItem] = []
         events: List[TraceEvent] = []
+        memories = {key: list(value) for key, value in state.get("memories", {}).items()}
+        shadow_memories = {
+            key: list(value) for key, value in state.get("shadow_memories", {}).items()
+        }
+        memory_retrievals = list(state.get("memory_retrievals", []))
         radar_by_symbol = {item.symbol: item for item in state.get("radar_items", [])}
         for symbol in state.get("subscription_symbols", []):
             item = radar_by_symbol.get(symbol)
@@ -989,6 +944,14 @@ class CopilotLangGraph:
             technical_context = state.get("technical_contexts", {}).get(symbol)
             news_sentiment = state.get("news_sentiment_by_symbol", {}).get(symbol)
             fundamental_report = state.get("fundamental_analysis_by_symbol", {}).get(symbol)
+            memory_session = self._memory_retrieval_session(
+                state,
+                symbol=symbol,
+                consumer="trader",
+                market_regime=_retrieval_market_regime(item, technical_context),
+                agent=self.trader_agent,
+            )
+            tool_calls: list[str] = []
 
             if item is None and hasattr(self.trader_agent, "create_plan_from_evidence"):
                 result = self.trader_agent.create_plan_from_evidence(
@@ -999,10 +962,12 @@ class CopilotLangGraph:
                     fundamental_analysis=fundamental_report,
                     persona=state["persona_config"],
                     analyst_context=_analyst_context_for_symbol(state, symbol),
+                    memory_session=memory_session,
                 )
                 plan = result.plan
                 item = result.opportunity or _opportunity_from_plan(plan)
                 reports_by_symbol[symbol] = result.report
+                tool_calls = result.tool_calls
             elif item is not None:
                 if position is None:
                     position = _technical_position_from_radar(item)
@@ -1015,10 +980,12 @@ class CopilotLangGraph:
                         technical_context=technical_context,
                         news_sentiment=news_sentiment,
                         fundamental_analysis=fundamental_report,
+                        memory_session=memory_session,
                     )
                     plan = result.plan
                     item = result.opportunity or item
                     reports_by_symbol[symbol] = result.report
+                    tool_calls = result.tool_calls
                 else:
                     plan = self.trader_agent.create_plan(
                         opportunity=item,
@@ -1030,7 +997,16 @@ class CopilotLangGraph:
 
             plans[symbol] = plan
             reviewed_items.append(item)
+            if memory_session is not None:
+                memories[symbol] = _merge_memories(
+                    memories.get(symbol, []), memory_session.approved_memories
+                )
+                shadow_memories[symbol] = _merge_memories(
+                    shadow_memories.get(symbol, []), memory_session.shadow_memories
+                )
+                memory_retrievals.extend(memory_session.records)
             rule_hits = ["market_state_first", "trader_internal_opportunity_review"]
+            rule_hits.extend(tool_calls)
             if item.status == SubscriptionStatus.ACTIONABLE:
                 rule_hits.append("actionable_to_buy_plan")
             else:
@@ -1060,7 +1036,37 @@ class CopilotLangGraph:
             events,
             radar_items=reviewed_items,
             trade_plans=plans,
+            memories=memories,
+            shadow_memories=shadow_memories,
+            memory_retrievals=memory_retrievals,
             agent_reports={"trader": report_path},
+        )
+
+    def _memory_retrieval_session(
+        self,
+        state: CopilotGraphState,
+        *,
+        symbol: str,
+        consumer: str,
+        market_regime: str,
+        agent,
+    ) -> MemoryRetrievalSession | None:
+        if self.memory_agent is None or getattr(agent, "llm", None) is None:
+            return None
+        persona = state.get("persona_config") or self.default_persona_config
+        return MemoryRetrievalSession(
+            self.memory_agent.store,
+            symbol=symbol,
+            consumer=consumer,
+            run_id=str(state.get("run_id") or ""),
+            tags=[
+                "trading",
+                consumer,
+                persona.trading_style,
+                persona.risk_profile,
+            ],
+            market_regime=market_regime,
+            timeframe=persona.trading_style,
         )
 
     def _risk_check(self, state: CopilotGraphState) -> CopilotGraphState:
@@ -1135,10 +1141,23 @@ class CopilotLangGraph:
         decisions: Dict[str, ExecutionDecision] = {}
         reports_by_symbol: Dict[str, str] = {}
         events: List[TraceEvent] = []
+        memories = {key: list(value) for key, value in state.get("memories", {}).items()}
+        shadow_memories = {
+            key: list(value) for key, value in state.get("shadow_memories", {}).items()
+        }
+        memory_retrievals = list(state.get("memory_retrievals", []))
         for symbol, plan in state.get("trade_plans", {}).items():
             assessment = state.get("risk_assessments", {}).get(symbol)
             if assessment is None:
                 continue
+            memory_session = self._memory_retrieval_session(
+                state,
+                symbol=symbol,
+                consumer="portfolio_manager",
+                market_regime=plan.market_regime.value,
+                agent=self.portfolio_manager,
+            )
+            tool_calls: list[str] = []
             if hasattr(self.portfolio_manager, "decide_with_report"):
                 result = self.portfolio_manager.decide_with_report(
                     plan=plan,
@@ -1148,9 +1167,11 @@ class CopilotLangGraph:
                     user_confirmed=state.get("user_confirmed", False),
                     analyst_context=_analyst_context_for_symbol(state, symbol),
                     run_id=state.get("run_id"),
+                    memory_session=memory_session,
                 )
                 decision = result.decision
                 reports_by_symbol[symbol] = result.report
+                tool_calls = result.tool_calls or []
             else:
                 decision = self.portfolio_manager.decide(
                     plan=plan,
@@ -1162,6 +1183,14 @@ class CopilotLangGraph:
                     run_id=state.get("run_id"),
                 )
             decisions[symbol] = decision
+            if memory_session is not None:
+                memories[symbol] = _merge_memories(
+                    memories.get(symbol, []), memory_session.approved_memories
+                )
+                shadow_memories[symbol] = _merge_memories(
+                    shadow_memories.get(symbol, []), memory_session.shadow_memories
+                )
+                memory_retrievals.extend(memory_session.records)
             events.append(
                 TraceEvent(
                     node_name=self.NODE_PORTFOLIO_MANAGER,
@@ -1178,6 +1207,7 @@ class CopilotLangGraph:
                     rule_hits=[
                         decision.status.value,
                         f"delta_weight={decision.delta_weight:.2%}",
+                        *tool_calls,
                     ],
                 )
             )
@@ -1192,6 +1222,9 @@ class CopilotLangGraph:
             state,
             events,
             execution_decisions=decisions,
+            memories=memories,
+            shadow_memories=shadow_memories,
+            memory_retrievals=memory_retrievals,
             agent_reports={"portfolio_manager": report_path},
         )
 
@@ -1241,6 +1274,18 @@ class CopilotLangGraph:
         )
         next_trace = [*state.get("trace_events", []), event]
         errors = list(state.get("errors", []))
+        agent_reports = {}
+        if self.memory_agent is not None:
+            agent_reports["post_trade_review_learning"] = self._save_agent_report(
+                state=state,
+                stage="6_memory",
+                agent_name="post_trade_review_learning",
+                content=_format_memory_report(
+                    state.get("memories", {}),
+                    shadow_memories=state.get("shadow_memories", {}),
+                    retrievals=state.get("memory_retrievals", []),
+                ),
+            )
         if self.trace_writer is not None:
             try:
                 self.trace_writer(next_trace)
@@ -1252,6 +1297,7 @@ class CopilotLangGraph:
             "trace_events": [event],
             "errors": errors,
             "trace_persisted": not errors,
+            "agent_reports": agent_reports,
         }
 
     def _with_trace(
@@ -1585,9 +1631,6 @@ def _analyst_context_for_symbol(state: CopilotGraphState, symbol: str) -> str:
         if report:
             sections.append(f"## {title}\n\n{report}")
     sections.extend(_structured_downstream_context_sections(state, symbol))
-    memory_context = _memory_context_for_symbol(state, symbol)
-    if memory_context:
-        sections.append(memory_context)
     return "\n\n".join(sections)
 
 
@@ -1630,22 +1673,23 @@ def _format_memory_report(
     memories: Dict[str, List[DistilledMemory]],
     *,
     shadow_memories: Dict[str, List[DistilledMemory]] | None = None,
+    retrievals: Iterable[MemoryRetrievalRecord] = (),
 ) -> str:
     lines = ["# Trading Memory Retrieval Report", ""]
     if not memories:
         lines.append("No relevant trading memories were retrieved.")
-        return "\n".join(lines) + "\n"
-    for symbol, items in sorted(memories.items()):
-        lines.extend([f"## {symbol}", ""])
-        if not items:
-            lines.append("- No relevant trading memories were retrieved.")
-        for item in items:
-            suffix = _memory_source_suffix(item)
-            lines.append(
-                f"- `{item.memory_id}@{item.version}` {item.memory_type.value}: "
-                f"{item.lesson}{suffix}"
-            )
-        lines.append("")
+    else:
+        for symbol, items in sorted(memories.items()):
+            lines.extend([f"## {symbol}", ""])
+            if not items:
+                lines.append("- No relevant trading memories were retrieved.")
+            for item in items:
+                suffix = _memory_source_suffix(item)
+                lines.append(
+                    f"- `{item.memory_id}@{item.version}` {item.memory_type.value}: "
+                    f"{item.lesson}{suffix}"
+                )
+            lines.append("")
     if shadow_memories:
         lines.extend(
             [
@@ -1658,7 +1702,23 @@ def _format_memory_report(
         for symbol, items in sorted(shadow_memories.items()):
             for item in items:
                 lines.append(f"- {symbol}: `{item.memory_id}@{item.version}`")
-    return "\n".join(lines)
+    retrieval_list = list(retrievals)
+    if retrieval_list:
+        lines.extend(["", "# Retrieval Audit", ""])
+        for record in retrieval_list:
+            request = record.request
+            lines.extend(
+                [
+                    f"## {request.consumer} / {request.symbol} / {request.phase}",
+                    "",
+                    f"- Query: {request.query[:800]}",
+                    f"- Approved: {', '.join(record.approved_ids) or '-'}",
+                    f"- Shadow: {', '.join(record.shadow_ids) or '-'}",
+                    f"- Cited: {', '.join(record.cited_ids) or '-'}",
+                    "",
+                ]
+            )
+    return "\n".join(lines) + "\n"
 
 
 def _memory_ids(memories: Dict[str, List[DistilledMemory]]) -> List[str]:
@@ -1669,52 +1729,30 @@ def _memory_ids(memories: Dict[str, List[DistilledMemory]]) -> List[str]:
     ]
 
 
-def _memory_context_for_symbol(state: CopilotGraphState, symbol: str) -> str:
-    items = state.get("memories", {}).get(symbol, [])
-    if not items:
-        return ""
-    lines = [
-        "## Retrieved Trading Memories",
-        "",
-        "These items are historical context only and must not override live market data, tool evidence, Risk Manager limits, or Portfolio Manager constraints.",
-    ]
-    for item in items:
-        tags = ", ".join(item.tags) or "-"
-        lines.append(f"- {item.memory_type.value} [{tags}]: {item.lesson}{_memory_source_suffix(item)}")
-    return "\n".join(lines)
+def _merge_memories(
+    existing: Iterable[DistilledMemory],
+    additions: Iterable[DistilledMemory],
+) -> List[DistilledMemory]:
+    merged: dict[str, DistilledMemory] = {}
+    for memory in [*existing, *additions]:
+        merged[f"{memory.memory_id}@{memory.version}"] = memory
+    return list(merged.values())
 
 
-def _memory_tags_for_state(state: CopilotGraphState) -> List[str]:
-    tags = ["trading", "risk", "pullback"]
-    tags.extend(analyst.value for analyst in state.get("selected_analysts", []))
-    persona = state.get("persona_config")
-    if persona is not None:
-        tags.extend(
-            [
-                getattr(persona, "trading_style", ""),
-                getattr(persona, "risk_profile", ""),
-                getattr(persona, "preferred_market_regime", ""),
-            ]
-        )
-    return [tag for tag in tags if tag]
-
-
-def _memory_query_for_symbol(state: CopilotGraphState, symbol: str) -> str:
-    persona = state.get("persona_config")
-    parts = [
-        symbol,
-        "trading memory opportunity review trader risk check stop loss position sizing pullback support",
-    ]
-    if persona is not None:
-        parts.extend(
-            [
-                getattr(persona, "persona_name", ""),
-                getattr(persona, "trading_style", ""),
-                getattr(persona, "risk_profile", ""),
-                getattr(persona, "preferred_market_regime", ""),
-            ]
-        )
-    return " ".join(part for part in parts if part)
+def _retrieval_market_regime(
+    item: OpportunityRadarItem | None,
+    context: TechnicalContext | None,
+) -> str:
+    trend = (
+        context.stock.trend_state
+        if context is not None and context.stock.trend_state is not None
+        else item.trend_state if item is not None else None
+    )
+    if trend == SymbolTrendState.DOWNTREND:
+        return MarketRegime.DOWNTREND.value
+    if trend in {SymbolTrendState.UPTREND, SymbolTrendState.UPTREND_PULLBACK}:
+        return MarketRegime.UPTREND.value
+    return MarketRegime.UNCLEAR.value
 
 
 def _memory_source_suffix(item: DistilledMemory) -> str:

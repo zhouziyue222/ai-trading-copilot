@@ -4,6 +4,7 @@ from .fundamental_research import (
     create_fundamental_research_retriever,
 )
 from .memory_store import DistilledMemoryStore
+from .memory_retrieval import MemoryRetrievalSession
 from .memory_repository import MemoryRepository, SQLiteMemoryRepository
 from .memory_learning import (
     LangMemCandidateExtractor,
@@ -29,6 +30,7 @@ from .vector_memory import HashingTextEmbedder, LocalVectorMemoryIndex
 
 __all__ = [
     "DistilledMemoryStore",
+    "MemoryRetrievalSession",
     "MemoryRepository",
     "SQLiteMemoryRepository",
     "LangMemCandidateExtractor",

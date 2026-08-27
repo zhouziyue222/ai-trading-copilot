@@ -7,6 +7,9 @@
         "do not invent data",
         "do not choose buy",
         "do not use leverage or options",
+        "memory_citations",
+        "available memory tools",
+        "historical context",
         "stop_loss",
         "invalidation_conditions"
       ],
@@ -14,6 +17,21 @@
         "override risk manager",
         "skip user confirmation",
         "guaranteed return"
+      ]
+    },
+    {
+      "path": "config/prompts/portfolio_memory_advisor.v1.md",
+      "required": [
+        "proceed, scale, or hold",
+        "between 0 and 1",
+        "memory_citations",
+        "risk manager",
+        "user confirmation"
+      ],
+      "forbidden": [
+        "guaranteed return",
+        "may bypass user confirmation",
+        "increase exposure beyond"
       ]
     }
   ]

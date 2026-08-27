@@ -62,9 +62,8 @@ class HashingTextEmbedder:
 class LocalVectorMemoryIndex:
     """Small persisted vector index for distilled memories.
 
-    The JSONL memory file remains the source of truth. This sidecar index stores
-    embedding vectors and can be replaced by a hosted vector database adapter
-    without changing the agent-facing memory store API.
+    SQLite remains the source of truth. This rebuildable sidecar stores local
+    similarity vectors and can be replaced without changing the store API.
     """
 
     def __init__(self, path: str | Path, *, embedder: TextEmbedder | None = None):
@@ -175,9 +174,14 @@ def memory_search_text(memory: DistilledMemory) -> str:
         part
         for part in [
             memory.memory_type.value,
+            memory.memory_kind.value,
             memory.lesson,
+            memory.trigger,
+            memory.rationale,
             " ".join(memory.symbols),
             " ".join(memory.tags),
+            " ".join(memory.market_regimes),
+            " ".join(memory.timeframes),
         ]
         if part
     )
@@ -227,4 +231,3 @@ def _normalize(vector: Sequence[float]) -> List[float]:
 
 def _dot(left: Sequence[float], right: Sequence[float]) -> float:
     return sum(left_value * right_value for left_value, right_value in zip(left, right))
-

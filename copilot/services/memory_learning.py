@@ -55,7 +55,9 @@ Never claim future performance, never infer an outcome that is not present,
 and never emit instructions that override position, exposure, instrument,
 confirmation, or other risk controls. Treat all extracted items as unverified.
 Prefer no memory over a vague, duplicated, or unsupported memory. Keep evidence
-in the supplied fields; do not include private chain-of-thought.
+in the supplied fields; do not include private chain-of-thought. Retrieved or
+cited memories are context, not new evidence: never save a paraphrase of an
+existing memory merely because an agent retrieved or cited it.
 """.strip()
 
 
@@ -129,6 +131,7 @@ class MemoryReflector:
         "trade_plans",
         "risk_assessments",
         "execution_decisions",
+        "memory_retrievals",
         "errors",
     )
 

@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ai_trading_copilot.copilot.agents.llm_tools import (
+    extract_json_object,
+    strip_trailing_json_object,
+)
+from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
+from ai_trading_copilot.copilot.config.prompts import render_prompt
 from ai_trading_copilot.copilot.domain.enums import (
     ExecutionMode,
     ExecutionStatus,
@@ -16,6 +22,8 @@ from ai_trading_copilot.copilot.domain.models import (
     TradePlan,
     normalize_symbol,
 )
+from ai_trading_copilot.copilot.services.cancellation import RunCancelled
+from ai_trading_copilot.copilot.services.memory_retrieval import MemoryRetrievalSession
 
 
 MIN_WEIGHT_DELTA = 1e-6
@@ -26,6 +34,7 @@ BROKER_ACTIONS = {"buy", "sell", "reduce", "short", "cover"}
 class PortfolioDecisionResult:
     decision: ExecutionDecision
     report: str
+    tool_calls: list[str] | None = None
 
 
 class PortfolioManager:
@@ -69,6 +78,7 @@ class PortfolioManager:
         user_confirmed: bool = False,
         analyst_context: str = "",
         run_id: str | None = None,
+        memory_session: MemoryRetrievalSession | None = None,
     ) -> ExecutionDecision:
         return self.decide_with_report(
             plan=plan,
@@ -78,6 +88,7 @@ class PortfolioManager:
             user_confirmed=user_confirmed,
             analyst_context=analyst_context,
             run_id=run_id,
+            memory_session=memory_session,
         ).decision
 
     def decide_with_report(
@@ -90,17 +101,95 @@ class PortfolioManager:
         user_confirmed: bool = False,
         analyst_context: str = "",
         run_id: str | None = None,
+        memory_session: MemoryRetrievalSession | None = None,
     ) -> PortfolioDecisionResult:
-        decision = _decision_from_risk(
+        baseline = _decision_from_risk(
             plan=plan,
             risk=risk_assessment,
             mode=mode,
             user_confirmed=user_confirmed,
         )
-        return PortfolioDecisionResult(
-            decision=decision,
-            report=_report_from_decision(decision, risk_assessment),
-        )
+        if (
+            self.llm is None
+            or memory_session is None
+            or not _increases_gross_exposure(risk_assessment)
+        ):
+            return PortfolioDecisionResult(
+                decision=baseline,
+                report=_report_from_decision(baseline, risk_assessment),
+                tool_calls=[],
+            )
+
+        try:
+            memory_evidence = memory_session.prefetch(
+                _portfolio_memory_query(plan, risk_assessment, portfolio),
+                tags=["portfolio", "position_sizing", plan.direction.value],
+            )
+            tools = memory_session.make_tools()
+            prompt = render_prompt(
+                "portfolio_memory_advisor.v1",
+                trade_plan=plan.model_dump_json(),
+                risk_assessment=risk_assessment.model_dump_json(),
+                portfolio=portfolio.model_dump_json(),
+                analyst_context=analyst_context or "-",
+                memory_evidence=memory_evidence,
+                available_memory_tools=", ".join(tool.name for tool in tools),
+            )
+            react_result = ReActAgentRunner(
+                llm=self.llm,
+                tools=tools,
+                max_rounds=2,
+            ).run(prompt=prompt)
+            payload = extract_json_object(react_result.content)
+            policy = str(payload.get("decision", "proceed")).strip().lower()
+            scale = _memory_scale(policy, payload.get("scale", 1.0))
+            raw_citations = payload.get("memory_citations", [])
+            citations = memory_session.mark_cited(
+                [str(item) for item in raw_citations]
+                if isinstance(raw_citations, list)
+                else []
+            )
+            if scale < 1 and not citations:
+                scale = 1.0
+            influence = (
+                str(payload.get("memory_influence", "")).strip()
+                if citations
+                else ""
+            )
+            adjusted_risk = _scaled_risk(risk_assessment, scale)
+            decision = _decision_from_risk(
+                plan=plan,
+                risk=adjusted_risk,
+                mode=mode,
+                user_confirmed=user_confirmed,
+            ).model_copy(
+                update={
+                    "memory_citations": citations,
+                    "memory_influence": influence,
+                    "memory_scale": scale,
+                    "pre_memory_final_weight": risk_assessment.final_weight,
+                }
+            )
+            narrative = strip_trailing_json_object(react_result.content)
+            report = _report_from_decision(decision, risk_assessment)
+            if narrative:
+                report += f"\n## Memory Advisor\n\n{narrative}\n"
+            return PortfolioDecisionResult(
+                decision=decision,
+                report=report,
+                tool_calls=["search_trading_memories", *react_result.tool_calls],
+            )
+        except RunCancelled:
+            raise
+        except Exception:
+            decision = baseline.model_copy(
+                update={"pre_memory_final_weight": risk_assessment.final_weight}
+            )
+            return PortfolioDecisionResult(
+                decision=decision,
+                report=_report_from_decision(decision, risk_assessment),
+                tool_calls=[],
+            )
 
 
 def _decision_from_risk(
@@ -149,6 +238,67 @@ def _decision_from_risk(
         pending_broker_order=pending_broker_order,
         broker_confirmation_required=pending_broker_order,
         submitted_to_broker=False,
+    )
+
+
+def _increases_gross_exposure(risk: RiskAssessment) -> bool:
+    return abs(risk.final_weight) > abs(risk.current_position_weight) + MIN_WEIGHT_DELTA
+
+
+def _memory_scale(policy: str, raw_scale) -> float:
+    if policy == "hold":
+        return 0.0
+    if policy != "scale":
+        return 1.0
+    try:
+        value = float(raw_scale)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(max(value, 0.0), 1.0)
+
+
+def _scaled_risk(risk: RiskAssessment, scale: float) -> RiskAssessment:
+    if scale >= 1 or not _increases_gross_exposure(risk):
+        return risk
+    delta = risk.delta_weight * scale
+    final_weight = risk.current_position_weight + delta
+    estimated_trade_value = risk.portfolio_value * delta
+    return risk.model_copy(
+        update={
+            "final_weight": final_weight,
+            "delta_weight": delta,
+            "estimated_trade_value": estimated_trade_value,
+            "clamped": True,
+            "reasoning": {
+                **risk.reasoning,
+                "memory_advisor": f"risk-increasing delta scaled to {scale:.2f}",
+            },
+        }
+    )
+
+
+def _portfolio_memory_query(
+    plan: TradePlan,
+    risk: RiskAssessment,
+    portfolio: PortfolioSnapshot,
+) -> str:
+    weights = ",".join(
+        f"{symbol}:{weight:.4f}"
+        for symbol, weight in sorted(portfolio.position_weights.items())
+    )
+    return " ".join(
+        [
+            plan.symbol,
+            f"direction={plan.direction.value}",
+            f"market_regime={plan.market_regime.value}",
+            f"current_weight={risk.current_position_weight:.4f}",
+            f"risk_final_weight={risk.final_weight:.4f}",
+            f"delta_weight={risk.delta_weight:.4f}",
+            f"risk_clamped={risk.clamped}",
+            f"portfolio_weights={weights}",
+            "cited_trader_memories=" + ",".join(plan.memory_citations),
+            "portfolio concentration position sizing exposure drawdown",
+        ]
     )
 
 
@@ -246,6 +396,10 @@ def _report_from_decision(
         f"- Pending broker order: {str(decision.pending_broker_order).lower()}\n"
         f"- Broker confirmation required: {str(decision.broker_confirmation_required).lower()}\n"
         f"- Clamped by risk: {str(risk.clamped).lower()}\n"
+        f"- Memory scale: {decision.memory_scale:.2f}\n"
+        f"- Pre-memory final weight: {decision.pre_memory_final_weight}\n"
+        f"- Memory citations: {', '.join(decision.memory_citations) or '-'}\n"
+        f"- Memory influence: {decision.memory_influence or '-'}\n"
         f"- Reasoning: {decision.reasoning}\n"
         f"- Message: {decision.message}\n"
     )

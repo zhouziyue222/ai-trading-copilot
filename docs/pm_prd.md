@@ -74,7 +74,7 @@ MVP 成功指标：
 - 多智能体分析链路，包括新闻情绪、三维技术位置、基本面分析、交易计划、v2 风控限额、Portfolio Manager 组合决策、运行解释。
 - Risk Manager 资格门槛与 v2 限额，覆盖订阅池、市场类型、禁用品种、单标的上限和组合总敞口。
 - Portfolio Manager 将风控后的 final weight 转为组合建议；系统不向 Futu 或其他券商提交订单。
-- RAG 记忆，以 JSONL 存储交易复盘经验，单次最多检索 5 条。
+- RAG 记忆以 SQLite 为事实源；Trader 分析后强制精召回，Portfolio Manager 只在扩大敞口时按需检索。
 - CLI 和 FastAPI Web UI。
 - 运行追踪与报告输出，包括节点状态、阶段报告和审计报告。
 
@@ -112,7 +112,7 @@ MVP 成功指标：
 | v2 风控限额 | P0 | 对目标权重执行资格门槛、单标的上限和组合总敞口 clamp | 资格不合格保持当前仓位；超限削减为 final weight，削减部分留作现金 |
 | Portfolio Manager | P0 | 将风控后的 final weight 转为组合层面建议 | 仅生成建议和 confirmation_required 状态，不提交券商订单 |
 | 报告与审计 | P0 | 每次运行生成节点状态、阶段报告和审计报告 | run_status.json 可查询，run_audit.md 包含节点、报告、输入输出摘要 |
-| RAG 记忆 | P1 | 从历史复盘中检索最多 5 条相关记忆作为上下文 | 记忆只作为历史参考，不覆盖实时行情和 v2 风控限额 |
+| RAG 记忆 | P1 | Trader 分析后强制精召回最多 3 条，可追加查询一次且总计最多 6 条；Portfolio Manager 仅在扩大敞口时检索 | 记忆只作为历史参考，不覆盖实时行情和 v2 风控限额；最终只能缩小或否决新增风险 |
 | Web UI | P1 | 提供订阅池、运行控制和结果查看三栏工作台 | 用户能启动任务、轮询进度、查看报告 |
 | CLI | P1 | 支持单标的、多标的、全订阅、交互选择和分析模块选择 | 命令行返回 output_dir 和 audit_path |
 

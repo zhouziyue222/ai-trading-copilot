@@ -8,6 +8,7 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     extract_json_object,
     strip_trailing_json_object,
 )
+from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
 from ai_trading_copilot.copilot.config.prompts import render_prompt
 from ai_trading_copilot.copilot.services.cancellation import RunCancelled, check_cancelled
 from ai_trading_copilot.copilot.services.tracing import (
@@ -30,6 +31,7 @@ from ai_trading_copilot.copilot.domain.models import (
     UserPersonaConfig,
 )
 from ai_trading_copilot.copilot.domain.localization import zh_label
+from ai_trading_copilot.copilot.services.memory_retrieval import MemoryRetrievalSession
 
 
 @dataclass
@@ -102,6 +104,7 @@ class TraderAgent:
         fundamental_analysis: FundamentalAnalysisReport | None = None,
         persona: UserPersonaConfig | None = None,
         analyst_context: str = "",
+        memory_session: MemoryRetrievalSession | None = None,
     ) -> TraderAnalysisResult:
         position = technical_position or _technical_position_from_context(symbol, technical_context)
         opportunity = _opportunity_from_evidence(
@@ -120,6 +123,7 @@ class TraderAgent:
             technical_context=technical_context,
             news_sentiment=news_sentiment,
             fundamental_analysis=fundamental_analysis,
+            memory_session=memory_session,
         )
 
     def _buy_plan(
@@ -182,6 +186,7 @@ class TraderAgent:
         technical_context: TechnicalContext | None = None,
         news_sentiment: NewsSentimentReport | None = None,
         fundamental_analysis: FundamentalAnalysisReport | None = None,
+        memory_session: MemoryRetrievalSession | None = None,
     ) -> TraderAnalysisResult:
         reviewed = _review_opportunity(
             opportunity=opportunity,
@@ -203,6 +208,30 @@ class TraderAgent:
         if self.llm is None:
             return TraderAnalysisResult(fallback, fallback_report, [], reviewed)
 
+        memory_evidence = "-"
+        memory_tools = []
+        if memory_session is not None:
+            try:
+                memory_evidence = memory_session.prefetch(
+                    _trader_memory_query(
+                        opportunity=reviewed,
+                        technical_position=technical_position,
+                        technical_context=technical_context,
+                        news_sentiment=news_sentiment,
+                        fundamental_analysis=fundamental_analysis,
+                        persona=persona or UserPersonaConfig(),
+                        market_regime=resolved_regime,
+                    ),
+                    tags=_trader_memory_tags(reviewed, persona or UserPersonaConfig()),
+                )
+                memory_tools = memory_session.make_tools()
+            except RunCancelled:
+                raise
+            except Exception:
+                memory_session = None
+                memory_evidence = "-"
+                memory_tools = []
+
         prompt = _trader_prompt(
             opportunity=reviewed,
             technical_position=technical_position,
@@ -212,37 +241,73 @@ class TraderAgent:
             persona=persona or UserPersonaConfig(),
             fallback=fallback,
             analyst_context=analyst_context,
+            memory_evidence=memory_evidence,
+            available_memory_tools=", ".join(tool.name for tool in memory_tools) or "-",
         )
         try:
-            recorder = get_current_trace_recorder()
-            llm_attrs = {
-                "llm.model": _llm_model_name(self.llm),
-                "llm.round": 1,
-                "llm.max_rounds": 1,
-                "llm.message_count": 1,
-                **summarize_text(prompt, "prompt"),
-            }
-            if recorder is not None:
-                with recorder.start_span("llm.invoke", kind="client", attributes=llm_attrs) as span:
+            calls: list[str] = []
+            if memory_tools:
+                react_result = ReActAgentRunner(
+                    llm=self.llm,
+                    tools=memory_tools,
+                    max_rounds=2,
+                ).run(prompt=prompt)
+                content = react_result.content.strip()
+                calls = ["search_trading_memories", *react_result.tool_calls]
+            else:
+                recorder = get_current_trace_recorder()
+                llm_attrs = {
+                    "llm.model": _llm_model_name(self.llm),
+                    "llm.round": 1,
+                    "llm.max_rounds": 1,
+                    "llm.message_count": 1,
+                    **summarize_text(prompt, "prompt"),
+                }
+                if recorder is not None:
+                    with recorder.start_span(
+                        "llm.invoke", kind="client", attributes=llm_attrs
+                    ) as span:
+                        check_cancelled()
+                        response = self.llm.invoke(prompt)
+                        check_cancelled()
+                        content = str(getattr(response, "content", response) or "").strip()
+                        for key, value in summarize_text(content, "llm.response").items():
+                            span.set_attribute(key, value)
+                else:
                     check_cancelled()
                     response = self.llm.invoke(prompt)
                     check_cancelled()
                     content = str(getattr(response, "content", response) or "").strip()
-                    for key, value in summarize_text(content, "llm.response").items():
-                        span.set_attribute(key, value)
-            else:
-                check_cancelled()
-                response = self.llm.invoke(prompt)
-                check_cancelled()
-                content = str(getattr(response, "content", response) or "").strip()
             payload = extract_json_object(content)
             plan = _plan_from_payload(payload, fallback)
+            raw_citations = payload.get("memory_citations", [])
+            citations = (
+                memory_session.mark_cited(_citation_values(raw_citations))
+                if memory_session is not None
+                else []
+            )
+            influence = str(payload.get("memory_influence", "")).strip() if citations else ""
+            plan = plan.model_copy(
+                update={
+                    "memory_citations": citations,
+                    "memory_influence": influence,
+                }
+            )
+            plan = _enforce_trader_safety(
+                plan,
+                fallback=fallback,
+                opportunity=reviewed,
+                technical_position=technical_position,
+                news_sentiment=news_sentiment,
+                fundamental_analysis=fundamental_analysis,
+                persona=persona or UserPersonaConfig(),
+            )
             report = strip_trailing_json_object(content) or _report_from_plan(
                 plan,
                 reviewed,
                 "LLM trader plan",
             )
-            return TraderAnalysisResult(plan, report, [], reviewed)
+            return TraderAnalysisResult(plan, report, calls, reviewed)
         except RunCancelled:
             raise
         except Exception:
@@ -417,6 +482,8 @@ def _trader_prompt(
     persona: UserPersonaConfig,
     fallback: TradePlan,
     analyst_context: str,
+    memory_evidence: str,
+    available_memory_tools: str,
 ) -> str:
     return render_prompt(
         "trader.v1",
@@ -428,6 +495,8 @@ def _trader_prompt(
         fundamental_analysis=fundamental_analysis.model_dump_json() if fundamental_analysis else "-",
         fallback=fallback.model_dump_json(),
         analyst_context=analyst_context or "-",
+        memory_evidence=memory_evidence or "-",
+        available_memory_tools=available_memory_tools,
     )
 
 
@@ -452,6 +521,8 @@ def _plan_from_payload(payload: dict, fallback: TradePlan) -> TradePlan:
         "is_chasing",
         "breakout_confirmed",
         "pullback_confirmed",
+        "memory_citations",
+        "memory_influence",
     }:
         if key in payload:
             data[key] = payload[key]
@@ -460,6 +531,105 @@ def _plan_from_payload(payload: dict, fallback: TradePlan) -> TradePlan:
     if payload.get("market_regime"):
         data["market_regime"] = MarketRegime(str(payload["market_regime"]).lower())
     return TradePlan(**data)
+
+
+def _trader_memory_query(
+    *,
+    opportunity: OpportunityRadarItem,
+    technical_position: TechnicalPosition,
+    technical_context: TechnicalContext | None,
+    news_sentiment: NewsSentimentReport | None,
+    fundamental_analysis: FundamentalAnalysisReport | None,
+    persona: UserPersonaConfig,
+    market_regime: MarketRegime,
+) -> str:
+    stock_trend = (
+        technical_context.stock.trend_state.value
+        if technical_context and technical_context.stock.trend_state
+        else opportunity.trend_state.value if opportunity.trend_state else "unknown"
+    )
+    return " ".join(
+        [
+            opportunity.symbol,
+            f"market_regime={market_regime.value}",
+            f"trend={stock_trend}",
+            f"opportunity={opportunity.status.value}",
+            f"distance_to_support={technical_position.distance_to_support_pct:.4f}",
+            f"reward_risk={technical_position.reward_risk_ratio}",
+            f"news_material_risk={bool(news_sentiment and news_sentiment.material_risk)}",
+            "news_flags=" + ",".join(news_sentiment.risk_flags if news_sentiment else []),
+            "fundamental_material_risk="
+            + str(bool(fundamental_analysis and fundamental_analysis.material_risk)),
+            "fundamental_flags="
+            + ",".join(fundamental_analysis.risk_flags if fundamental_analysis else []),
+            f"trading_style={persona.trading_style}",
+            f"risk_profile={persona.risk_profile}",
+            "trade planning entry stop loss position sizing invalidation",
+        ]
+    )
+
+
+def _trader_memory_tags(
+    opportunity: OpportunityRadarItem,
+    persona: UserPersonaConfig,
+) -> list[str]:
+    return [
+        "trading",
+        "trade_plan",
+        opportunity.status.value,
+        persona.trading_style,
+        persona.risk_profile,
+    ]
+
+
+def _citation_values(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _enforce_trader_safety(
+    plan: TradePlan,
+    *,
+    fallback: TradePlan,
+    opportunity: OpportunityRadarItem,
+    technical_position: TechnicalPosition,
+    news_sentiment: NewsSentimentReport | None,
+    fundamental_analysis: FundamentalAnalysisReport | None,
+    persona: UserPersonaConfig,
+) -> TradePlan:
+    buy_is_safe = (
+        opportunity.status == SubscriptionStatus.ACTIONABLE
+        and technical_position.reward_risk_ratio is not None
+        and technical_position.reward_risk_ratio >= 2.0
+        and not bool(news_sentiment and news_sentiment.material_risk)
+        and not bool(fundamental_analysis and fundamental_analysis.material_risk)
+        and technical_position.distance_to_support_pct <= 0.03
+        and not plan.is_chasing
+        and plan.stop_loss is not None
+        and bool(plan.targets)
+        and bool(plan.invalidation_conditions)
+    )
+    if plan.direction == TradeDirection.BUY and not buy_is_safe:
+        if fallback.direction != TradeDirection.BUY:
+            return fallback
+        return fallback.model_copy(
+            update={
+                "direction": TradeDirection.HOLD,
+                "entry_logic": "Current structured evidence failed the deterministic buy gate.",
+                "position_weight": 0.0,
+                "targets": [],
+                "memory_citations": [],
+                "memory_influence": "",
+            }
+        )
+    return plan.model_copy(
+        update={
+            "position_weight": min(plan.position_weight, persona.default_position_weight_max),
+            "uses_leverage": False,
+            "uses_options": False,
+        }
+    )
 
 
 def _report_from_plan(plan: TradePlan, opportunity: OpportunityRadarItem, note: str) -> str:

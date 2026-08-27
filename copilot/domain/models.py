@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -307,6 +307,8 @@ class TradePlan(BaseModel):
     is_chasing: bool = False
     breakout_confirmed: bool = False
     pullback_confirmed: bool = False
+    memory_citations: List[str] = Field(default_factory=list)
+    memory_influence: str = Field(default="", max_length=500)
 
     @field_validator("symbol")
     @classmethod
@@ -421,6 +423,10 @@ class ExecutionDecision(BaseModel):
     broker_status: str = ""
     broker_message: str = ""
     broker_idempotency_key: str = ""
+    memory_citations: List[str] = Field(default_factory=list)
+    memory_influence: str = Field(default="", max_length=500)
+    memory_scale: float = Field(default=1.0, ge=0, le=1)
+    pre_memory_final_weight: Optional[float] = Field(default=None, ge=-1, le=1)
 
 
 class DistilledMemory(BaseModel):
@@ -476,6 +482,58 @@ class DistilledMemory(BaseModel):
     @classmethod
     def normalize_string_lists(cls, value: List[str]) -> List[str]:
         return sorted({item.strip().lower() for item in value if item.strip()})
+
+
+class MemorySearchRequest(BaseModel):
+    """One bounded, auditable memory lookup owned by a downstream agent."""
+
+    symbol: str
+    consumer: Literal["trader", "portfolio_manager"]
+    phase: Literal["prefetch", "tool"] = "prefetch"
+    query: str = Field(default="", max_length=4000)
+    tags: List[str] = Field(default_factory=list)
+    market_regime: str = ""
+    timeframe: str = ""
+    memory_kinds: List[MemoryKind] = Field(default_factory=list)
+    limit: int = Field(default=3, ge=1, le=3)
+    run_id: str = ""
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol_field(cls, value: str) -> str:
+        normalized = normalize_symbol(value)
+        if not normalized:
+            raise ValueError("symbol is required")
+        return normalized
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_search_tags(cls, value: List[str]) -> List[str]:
+        return sorted({item.strip().lower() for item in value if item.strip()})
+
+    @field_validator("market_regime", "timeframe")
+    @classmethod
+    def normalize_search_values(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class MemorySearchHit(BaseModel):
+    """A scored memory and the explainable signals that produced its rank."""
+
+    memory: DistilledMemory
+    score: float
+    matched_by: List[str] = Field(default_factory=list)
+    rank: int = Field(ge=1)
+
+
+class MemoryRetrievalRecord(BaseModel):
+    """Graph-visible audit record; shadow IDs are observed but never injected."""
+
+    request: MemorySearchRequest
+    approved_ids: List[str] = Field(default_factory=list)
+    shadow_ids: List[str] = Field(default_factory=list)
+    scores: Dict[str, float] = Field(default_factory=dict)
+    cited_ids: List[str] = Field(default_factory=list)
 
 
 class RunOutcome(BaseModel):
@@ -592,6 +650,9 @@ __all__ = [
     "ClampEvent",
     "CopilotRunReport",
     "DistilledMemory",
+    "MemoryRetrievalRecord",
+    "MemorySearchHit",
+    "MemorySearchRequest",
     "MemoryEvaluation",
     "ExecutionDecision",
     "FundamentalAnalysisReport",

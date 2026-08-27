@@ -16,7 +16,12 @@
   -> 登记延迟市场结果
   -> holdout + 收益/回撤 + 安全门禁
   -> approved
-  -> 后续运行最多检索 5 条 approved 记忆
+  -> 分析师先完成当前市场分析
+  -> Trader 按结构化分析强制精召回最多 3 条
+  -> Trader 可追加工具查询 1 次，总计最多 6 条
+  -> Risk Manager 执行确定性门禁
+  -> Portfolio Manager 仅在扩大敞口时精召回
+  -> 记忆只能缩小或否决新增风险
 ```
 
 ## 为什么这样组合
@@ -25,8 +30,20 @@
 - `config/memory.jsonl` 只是兼容迁移与审计导出，不再承担并发写入或生命周期管理。
 - LangMem 只负责从结构化运行证据中提炼候选，不维护第二套 Store，避免双写与状态漂移。
 - `MemorySkillManager` 做相似候选合并。匹配到已批准记忆时，会创建独立证据候选，绝不把 `approved` 降级或原地改写。
-- Shadow 记忆会被检索并登记命中，但不会进入 Analyst/Trader Prompt，因此可以先积累结果证据。
+- 运行前不再设置粗粒度 `Retrieve Memories` 节点。Trader 在分析师完成后、Portfolio Manager 在 Risk Check 后，各自按当前结构化状态检索。
+- 每次查询由 SQLite 做状态、有效期、Scope、Symbol 和市场状态硬过滤，再以标签、关键词、置信度和本地向量相似度重排；SQLite 仍是唯一事实源。
+- Shadow 记忆使用相同精查询并登记命中，但不会进入任何 Agent Prompt，因此可以先积累结果证据。
+- Trader 和 Portfolio Manager 都先由程序强制预取，再允许 LLM 通过 `search_trading_memories` 追加查询一次，避免 LLM 漏查。
 - Autoharness 只能改 `config/prompts`。Risk Manager、Portfolio Manager、评测代码、holdout 集和测试均为受保护面。
+
+## 运行时读取与权限
+
+- 分析师不读取记忆，只生成当前市场、技术、新闻和基本面证据。
+- Trader 查询市场状态、趋势、支撑距离、Reward/Risk、事件风险和 Persona。输出必须用 `memory_id@version` 引用实际采用的记忆，伪造引用会被删除。
+- Risk Manager 不读取记忆，继续独立执行仓位、总敞口和交易资格门禁。
+- Portfolio Manager 只有在 `abs(final_weight) > abs(current_weight)` 时查询记忆。缩放比例被确定性限制在 `[0, 1]`，不能放大仓位、改变方向，也不能阻止减仓、卖出或平空。
+- 没有 LLM 时继续走原确定性流程，不召回也不登记未实际使用的记忆。
+- `memory_usage.mode` 区分 `trader`、`trader_applied`、`portfolio_manager`、`portfolio_applied` 和 `shadow`；运行末统一生成检索审计报告。
 
 ## 生命周期
 
@@ -123,13 +140,14 @@ ai-trading-copilot-harness rollback COMMIT_SHA
 
 - `config/memory.sqlite3`：本地事实库，已忽略 Git。
 - `config/memory.jsonl`：审计导出，已忽略 Git。
+- `config/memory.vectors.json`：可从 SQLite 当前记忆重建的本地相似度侧索引，已忽略 Git。
 - `.autoharness/`：campaign/champion 工作状态，已忽略 Git。
 - 每次 Prompt 晋升：独立 Git commit，可由 `ai-trading-copilot-harness rollback` 恢复并重新验证。
 
 ## 安全边界
 
 - 记忆永远是上下文，不是订单指令。
-- 只有 `approved` 会进入 Prompt，且每个标的最多 5 条。
+- 只有 `approved` 会进入 Prompt；每个 Agent/标的强制预取最多 3 条、最多追加查询一次，总计最多 6 条去重记忆。
 - 记忆不能修改最大仓位、总敞口、禁用工具或确认要求。
 - 自动晋升默认关闭；设置 `COPILOT_MEMORY_AUTO_PROMOTE=1` 后，登记延迟结果会自动复评相关 Shadow 记忆，但仍必须通过同一硬门禁。
 - 没有真实延迟结果时，不允许把一次运行中的“判断”当作已验证收益规律。

@@ -35,6 +35,10 @@ from ai_trading_copilot.copilot.services.memory_evaluation import (
 from ai_trading_copilot.copilot.services.rag_store import FundamentalRagStore
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
 from ai_trading_copilot.copilot.services.subscription_service import SubscriptionStore
+from ai_trading_copilot.copilot.services.vector_memory import (
+    LocalVectorMemoryIndex,
+    default_vector_index_path,
+)
 
 
 DEFAULT_SUBSCRIPTIONS_FILE = Path(__file__).resolve().parents[1] / "config" / "subscriptions.json"
@@ -345,7 +349,10 @@ def create_default_memory_agent(
     auto_ingest_seed: bool = True,
 ) -> PostTradeReviewLearningAgent:
     memory_path = Path(path)
-    store = DistilledMemoryStore(memory_path)
+    store = DistilledMemoryStore(
+        memory_path,
+        vector_index=LocalVectorMemoryIndex(default_vector_index_path(memory_path)),
+    )
     extractor = LangMemCandidateExtractor(create_default_deepseek_llm())
     learning_service = PostRunLearningService(
         MemoryReflector(extractor),

@@ -87,7 +87,13 @@ The copilot stores versioned trading memories in `config/memory.sqlite3`.
 Legacy `config/memory.jsonl` entries are migrated automatically; JSONL is now an
 audit/export format. Post-run LangMem reflection creates `candidate` memories,
 shadow memories are measured without prompt injection, and only `approved`
-memories can be retrieved by production agents. Fundamental research remains in
+memories can be retrieved by production agents. Analysts do not receive memory:
+the Trader performs a mandatory contextual lookup after analysis and may issue one
+additional bounded tool query; the Portfolio Manager does the same only when a
+decision would increase gross exposure. Its deterministic memory gate can only
+scale that increase down or hold, never enlarge it, reverse direction, or block a
+risk-reducing action. SQLite applies lifecycle/scope filters and a rebuildable local
+vector sidecar participates in ranking. Fundamental research remains in
 the persistent Chroma database at `config/rag_chroma`.
 
 Retrieval uses a hybrid RAG pipeline: the original request is rewritten by the

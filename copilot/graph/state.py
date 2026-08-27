@@ -12,6 +12,7 @@ from ai_trading_copilot.copilot.domain.models import (
     DistilledMemory,
     ExecutionDecision,
     FundamentalAnalysisReport,
+    MemoryRetrievalRecord,
     NewsSentimentReport,
     OpportunityRadarItem,
     PortfolioSnapshot,
@@ -55,6 +56,7 @@ class CopilotGraphState(TypedDict, total=False):
     execution_decisions: Dict[str, ExecutionDecision]
     memories: Dict[str, List[DistilledMemory]]
     shadow_memories: Dict[str, List[DistilledMemory]]
+    memory_retrievals: List[MemoryRetrievalRecord]
     memory_candidates: List[DistilledMemory]
     explanations: Dict[str, Any]
     report: CopilotRunReport

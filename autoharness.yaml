@@ -32,4 +32,6 @@ autonomy:
     - copilot/agents/risk_agent.py
     - copilot/agents/portfolio_manager.py
     - copilot/services/memory_evaluation.py
+    - copilot/services/memory_retrieval.py
+    - copilot/graph/copilot_langgraph.py
     - tests
