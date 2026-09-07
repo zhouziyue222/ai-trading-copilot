@@ -12,7 +12,7 @@ def _client(tmp_path):
     app = create_app(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
         )
     )

@@ -13,6 +13,7 @@ from ai_trading_copilot.copilot.domain import (
     DistilledMemory,
     FundamentalAnalysisReport,
     MarketRegime,
+    MemoryStatus,
     MemoryType,
     PortfolioSnapshot,
     SubscriptionStatus,
@@ -237,11 +238,12 @@ def test_portfolio_manager_never_submits_orders():
 
 
 def _memory_session(tmp_path, *, consumer, run_id="memory-run"):
-    store = DistilledMemoryStore(tmp_path / f"{consumer}.jsonl")
+    store = DistilledMemoryStore(tmp_path / f"{consumer}.sqlite3")
     memory = store.repository.upsert(
         DistilledMemory(
             memory_id=f"{consumer}-memory",
             memory_type=MemoryType.STRATEGY_PERFORMANCE,
+            status=MemoryStatus.APPROVED,
             lesson="Use half size until the support retest is confirmed.",
             trigger="AAPL uptrend pullback near support.",
             symbols=["AAPL"],

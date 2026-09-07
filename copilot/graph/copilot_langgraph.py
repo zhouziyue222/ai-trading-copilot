@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 """Explainable list-batch LangGraph for the AI trading copilot."""
 
 from __future__ import annotations
 
 import os
 import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -142,6 +144,7 @@ class CopilotLangGraph:
         fundamental_rag_retriever=None,
         force_sequential: bool | None = None,
         cancellation_checker: Optional[Callable[[], bool]] = None,
+        snapshot_callback: Optional[Callable[[dict, list[str], int], None]] = None,
     ):
         default_llm = None
         if llm is _DEFAULT_LLM:
@@ -195,6 +198,8 @@ class CopilotLangGraph:
         self.report_output_dir = str(report_output_dir or DEFAULT_REPORT_OUTPUT_DIR)
         self.run_tracker = run_tracker
         self.cancellation_checker = cancellation_checker
+        self.snapshot_callback = snapshot_callback
+        self._resume_snapshot = None
         self.trace_recorder: TraceRecorder | None = None
         self._compiled_graph = self._compile_graph()
         self.langgraph_available = self._compiled_graph is not None
@@ -217,10 +222,12 @@ class CopilotLangGraph:
         user_confirmed: bool = False,
         run_id: str | None = None,
     ) -> CopilotGraphState:
+        self._check_cancelled()
         resolved_portfolio, portfolio_report, portfolio_error = self._resolve_portfolio(
             portfolio=portfolio,
             portfolio_mode=portfolio_mode,
         )
+        self._check_cancelled()
         report_dir = str(report_output_dir or self.report_output_dir)
         portfolio_report_path = self._save_agent_report(
             state={"report_output_dir": report_dir},
@@ -232,36 +239,23 @@ class CopilotLangGraph:
             "persona_markdown": persona_markdown or self.default_persona_markdown,
             "persona_config": persona_config or self.default_persona_config,
             "subscription_symbols": subscription_symbols,
-            "selected_analysts": _normalize_analysts(
+            "selected_analysts": list(
                 self.default_selected_analysts
                 if selected_analysts is None
                 else selected_analysts
             ),
             "portfolio": resolved_portfolio,
             "portfolio_mode": portfolio_mode,
-            "price_history_by_symbol": _normalize_price_history(
-                price_history_by_symbol or {}
-            ),
+            "price_history_by_symbol": price_history_by_symbol or {},
             "fundamental_analysis_by_symbol": fundamental_analysis_by_symbol or {},
             "trade_date": trade_date,
             "look_back_days": look_back_days,
             "execution_mode": mode,
             "user_confirmed": user_confirmed,
             "run_id": run_id or "",
-            "trace_events": [],
+            "long_term_memory_enabled": self.memory_agent is not None,
             "errors": [portfolio_error] if portfolio_error else [],
-            "explanations": {},
-            "analyst_reports": {},
             "agent_reports": {"futu_portfolio": portfolio_report_path},
-            "market_reports_by_symbol": {},
-            "fundamental_analysis_reports_by_symbol": {},
-            "news_sentiment_reports_by_symbol": {},
-            "news_sentiment_by_symbol": {},
-            "technical_contexts": {},
-            "opportunity_reports_by_symbol": {},
-            "memories": {},
-            "shadow_memories": {},
-            "memory_retrievals": [],
             "report_output_dir": str(report_output_dir or self.report_output_dir),
         }
         return self.invoke(initial_state)
@@ -410,15 +404,13 @@ class CopilotLangGraph:
         workflow.add_edge(self.NODE_PERSIST_TRACE, END)
         return workflow.compile()
 
-    def _run_sequential(self, state: CopilotGraphState) -> CopilotGraphState:
-        current = dict(state)
-        node_map = self._node_map()
-        node_order = [
+    def _sequential_node_order(self, state: CopilotGraphState) -> list[str]:
+        return [
             self.NODE_LOAD_PERSONA_MARKDOWN,
             self.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
             *[
                 node
-                for node in self._route_analyst_nodes(current)
+                for node in self._route_analyst_nodes(state)
                 if node != self.NODE_TRADER
             ],
             self.NODE_TRADER,
@@ -427,9 +419,42 @@ class CopilotLangGraph:
             self.NODE_EXPLAIN_RUN,
             self.NODE_PERSIST_TRACE,
         ]
-        for node_name in node_order:
-            updates = node_map[node_name](current)
-            current = self._merge_state(current, updates)
+
+    @classmethod
+    def checkpoint_node_order(cls, selected_analysts: Iterable) -> list[str]:
+        """Validate compatibility without constructing agents or querying tools."""
+        selected = _normalize_analysts(selected_analysts)
+        routes = [(AnalystType.OPPORTUNITY_RADAR, cls.NODE_OPPORTUNITY_RADAR),
+                  (AnalystType.TECHNICAL_POSITION, cls.NODE_TECHNICAL_POSITION),
+                  (AnalystType.NEWS_SENTIMENT, cls.NODE_NEWS_SENTIMENT),
+                  (AnalystType.FUNDAMENTAL_ANALYSIS, cls.NODE_FUNDAMENTAL_ANALYSIS)]
+        return [cls.NODE_LOAD_PERSONA_MARKDOWN, cls.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
+                *[node for analyst, node in routes if analyst in selected],
+                cls.NODE_TRADER, cls.NODE_RISK_CHECK, cls.NODE_PORTFOLIO_MANAGER,
+                cls.NODE_EXPLAIN_RUN, cls.NODE_PERSIST_TRACE]
+
+    def resume(self, snapshot: dict) -> CopilotGraphState:
+        """Continue a validated snapshot without re-fetching initial inputs."""
+        if snapshot["node_order"] != self._sequential_node_order(snapshot["state"]):
+            raise ValueError("Checkpoint node order does not match this graph.")
+        self.force_sequential = True
+        self._resume_snapshot = snapshot
+        return self._invoke_with_tracing(snapshot["state"])
+
+    def _run_sequential(self, state: CopilotGraphState) -> CopilotGraphState:
+        current = deepcopy(state)
+        node_map = self._node_map()
+        node_order = self._sequential_node_order(current)
+        next_index = self._resume_snapshot["next_node_index"] if self._resume_snapshot else 0
+        if self.snapshot_callback is not None:
+            self.snapshot_callback(current, node_order, next_index)
+        for index in range(next_index, len(node_order)):
+            self._check_cancelled()
+            working = deepcopy(current)
+            updates = node_map[node_order[index]](working)
+            current = self._merge_state(working, updates)
+            if self.snapshot_callback is not None:
+                self.snapshot_callback(current, node_order, index + 1)
         return current
 
     def _route_analyst_nodes(self, state: CopilotGraphState) -> List[str]:
@@ -692,9 +717,10 @@ class CopilotLangGraph:
                         bars=bars,
                     )
                 )
-        report_path = self._save_analyst_report(
+        report_path = self._save_agent_report(
             state=state,
-            analyst=AnalystType.OPPORTUNITY_RADAR,
+            stage="1_analysts",
+            agent_name=AnalystType.OPPORTUNITY_RADAR.value,
             content=(
                 self._format_opportunity_radar_report(items)
                 + self._format_symbol_reports(reports_by_symbol)
@@ -788,9 +814,10 @@ class CopilotLangGraph:
                     rule_hits=sorted(set(tool_calls)),
                 )
             )
-        report_path = self._save_analyst_report(
+        report_path = self._save_agent_report(
             state=state,
-            analyst=AnalystType.TECHNICAL_POSITION,
+            stage="1_analysts",
+            agent_name=AnalystType.TECHNICAL_POSITION.value,
             content=(
                 self._format_technical_position_report(positions, contexts)
                 + self._format_symbol_reports(reports_by_symbol)
@@ -833,9 +860,10 @@ class CopilotLangGraph:
             reports_by_symbol[symbol] = result.markdown
             tool_calls.extend(result.tool_calls)
 
-        report_path = self._save_analyst_report(
+        report_path = self._save_agent_report(
             state=state,
-            analyst=AnalystType.NEWS_SENTIMENT,
+            stage="1_analysts",
+            agent_name=AnalystType.NEWS_SENTIMENT.value,
             content=(
                 _format_news_sentiment_report(
                     subscription_symbols=state["subscription_symbols"],
@@ -900,9 +928,10 @@ class CopilotLangGraph:
             reports_by_symbol[symbol] = result.markdown
             tool_calls.extend(result.tool_calls)
 
-        report_path = self._save_analyst_report(
+        report_path = self._save_agent_report(
             state=state,
-            analyst=AnalystType.FUNDAMENTAL_ANALYSIS,
+            stage="1_analysts",
+            agent_name=AnalystType.FUNDAMENTAL_ANALYSIS.value,
             content=self._format_fundamental_analysis_report(
                 subscription_symbols=state["subscription_symbols"],
                 reports=reports,
@@ -925,9 +954,6 @@ class CopilotLangGraph:
         )
 
     def _trader(self, state: CopilotGraphState) -> CopilotGraphState:
-        return self._trader_from_analyst_evidence(state)
-
-    def _trader_from_analyst_evidence(self, state: CopilotGraphState) -> CopilotGraphState:
         plans: Dict[str, TradePlan] = {}
         reports_by_symbol: Dict[str, str] = {}
         reviewed_items: List[OpportunityRadarItem] = []
@@ -1312,22 +1338,6 @@ class CopilotLangGraph:
             "trace_events": event_list,
         }
 
-    def _save_analyst_report(
-        self,
-        *,
-        state: CopilotGraphState,
-        analyst: AnalystType,
-        content: str,
-    ) -> str:
-        output_dir = Path(state.get("report_output_dir") or self.report_output_dir)
-        report_dir = output_dir / "1_analysts"
-        report_dir.mkdir(parents=True, exist_ok=True)
-        path = report_dir / f"{analyst.value}.md"
-        path.write_text(content, encoding="utf-8")
-        if self.run_tracker is not None:
-            self.run_tracker.record_report(analyst.value, path)
-        return str(path)
-
     def _save_agent_report(
         self,
         *,
@@ -1555,10 +1565,10 @@ def _format_news_sentiment_report(
             + " | ".join(
                 [
                     symbol,
-                    _fmt_score(report.sentiment_score),
-                    _fmt_score(report.company_news_score),
-                    _fmt_score(report.social_sentiment_score),
-                    _fmt_score(report.earnings_event_score),
+                    _fmt_number(report.sentiment_score),
+                    _fmt_number(report.company_news_score),
+                    _fmt_number(report.social_sentiment_score),
+                    _fmt_number(report.earnings_event_score),
                     zh_bool(report.material_risk),
                     zh_join(report.key_events),
                     zh_join(report.alerts),
@@ -1608,10 +1618,6 @@ def _format_news_sentiment_report(
         for symbol, report in context_sections:
             lines.extend(_downstream_context_lines(symbol, report))
     return "\n".join(lines) + "\n"
-
-
-def _fmt_score(value: float | None) -> str:
-    return "-" if value is None else f"{value:.2f}"
 
 
 def _analyst_context_for_symbol(state: CopilotGraphState, symbol: str) -> str:
@@ -1719,14 +1725,6 @@ def _format_memory_report(
                 ]
             )
     return "\n".join(lines) + "\n"
-
-
-def _memory_ids(memories: Dict[str, List[DistilledMemory]]) -> List[str]:
-    return [
-        f"{item.memory_id}@{item.version}"
-        for symbol in sorted(memories)
-        for item in memories[symbol]
-    ]
 
 
 def _merge_memories(

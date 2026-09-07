@@ -3,6 +3,12 @@ const state = {
   subscriptions: [],
   selectedSymbols: new Set(),
   currentRunId: null,
+  sessionId: null,
+  viewEpoch: 0,
+  activeRuns: [],
+  checkpoints: [],
+  runtimeTimer: null,
+  launchPending: false,
   pollTimer: null,
   progressTimer: null,
   activeReportKey: null,
@@ -23,6 +29,7 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const lastRunStorageKey = "aiTradingCopilot.lastRunId";
+const sessionStorageKey = "aiTradingCopilot.sessionId";
 
 const primaryWorkflowNodes = [
   "Load Persona Markdown",
@@ -57,6 +64,8 @@ const nodeStatusLabels = {
 };
 
 const runStatusLabels = {
+  idle: "空闲",
+  interrupted: "已中断",
   pending: "待执行",
   running: "运行中",
   succeeded: "成功",
@@ -98,6 +107,7 @@ const preferredReportOrder = [
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
+    cache: "no-store",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
@@ -109,7 +119,9 @@ async function api(path, options = {}) {
     } catch {
       message = await response.text();
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   const contentType = response.headers.get("content-type") || "";
   return contentType.includes("application/json") ? response.json() : response.text();
@@ -123,9 +135,6 @@ function switchView(view) {
   document.querySelectorAll(".view").forEach((section) => {
     section.classList.toggle("active", section.id === `view-${view}`);
   });
-  if (view === "rag") {
-    loadRagStatus().catch(showError);
-  }
   if (view === "portfolio" && !state.portfolio) {
     loadPortfolio().catch(showError);
   }
@@ -331,7 +340,7 @@ function renderRagStatus(payload = {}) {
   status.textContent = available
     ? `知识库可用 · ${count} docs`
     : checking
-      ? "正在检查"
+      ? "尚未检查"
       : "Fallback 检索";
   status.className = `${tone} inline-status`;
   summary.className = `rag-status-summary ${tone}`;
@@ -484,7 +493,7 @@ function renderSubscriptions() {
 function renderSelectedCount() {
   const counter = $("selectedCount");
   if (counter) {
-    counter.textContent = `宸查€?${state.selectedSymbols.size}`;
+    counter.textContent = `已选 ${state.selectedSymbols.size}`;
   }
 }
 
@@ -508,7 +517,14 @@ function selectedAnalysts() {
   );
 }
 
+async function loadRuntimeConfig() {
+  const payload = await api("/api/runtime-config");
+  $("longTermMemoryEnabled").checked = payload.long_term_memory_enabled !== false;
+}
+
 async function startRun() {
+  if (state.launchPending) return;
+  state.launchPending = true;
   showError("");
   const startButton = $("startRun");
   startButton.disabled = true;
@@ -524,8 +540,12 @@ async function startRun() {
         trade_date: $("tradeDate").value || null,
         look_back_days: Number($("lookBackDays").value || 90),
         portfolio_mode: $("portfolioMode").value,
+        long_term_memory_enabled: $("longTermMemoryEnabled").checked,
       }),
     });
+    state.sessionId = payload.session_id;
+    localStorage.setItem(sessionStorageKey, state.sessionId);
+    state.viewEpoch += 1;
     state.currentRunId = payload.run_id;
     localStorage.setItem(lastRunStorageKey, payload.run_id);
     state.activeReportKey = null;
@@ -537,9 +557,11 @@ async function startRun() {
     $("refreshRun").disabled = false;
     $("reportContent").textContent = "运行已启动，报告生成后可在下方切换查看。";
     renderRun(payload);
-    startPolling();
+    if (!isTerminalRunStatus(payload.status?.status)) startPolling();
+    await syncRuntime();
     loadRuns().catch(showError);
   } finally {
+    state.launchPending = false;
     startButton.disabled = false;
     startButton.textContent = "启动分析";
   }
@@ -547,25 +569,83 @@ async function startRun() {
 
 async function loadRuns() {
   const payload = await api("/api/runs");
+  if (state.sessionId && payload.session_id !== state.sessionId) return state.recentRuns;
   state.recentRuns = payload.items || [];
+  const checkpoints = await api("/api/checkpoints");
+  if (state.sessionId && checkpoints.session_id !== state.sessionId) return state.recentRuns;
+  state.checkpoints = checkpoints.items || [];
   renderRunHistory();
   return state.recentRuns;
 }
 
-async function restoreLastRun() {
-  const runs = await loadRuns();
-  const storedRunId = localStorage.getItem(lastRunStorageKey);
-  const storedRun = runs.find((run) => run.run_id === storedRunId);
-  const runningRun = runs.find((run) => run.status === "running");
-  const target = storedRun || runningRun;
-  if (!target) return;
-  await connectRun(target.run_id);
+function resetRunView() {
+  stopPolling();
+  state.viewEpoch += 1;
+  state.currentRunId = null;
+  state.lastRunPayload = null;
+  state.activeReportKey = null;
+  state.activeTraceSpanId = null;
+  state.traceRunId = null;
+  state.currentTrace = null;
+  state.activeNodeName = null;
+  state.cancelPending = false;
+  state.expandedActivityDetails.clear();
+  $("refreshRun").disabled = true;
+  $("reportContent").textContent = "空闲。点击启动分析，或手动查看历史运行。";
+  $("errors").textContent = "";
+  renderRun({ run_id: null, status: { status: "idle" }, reports: {}, errors: [] });
+}
+
+function renderRuntimeState() {
+  const live = state.activeRuns;
+  const cancelling = live.length && live.every((run) => run.cancel_requested);
+  $("runState").textContent = live.length ? (cancelling ? "正在取消" : "运行中") : "空闲";
+  $("runState").className = `run-state ${toneClass(live.length ? "running" : "idle")}`;
+  updateRunControls(state.lastRunPayload?.status || {});
+}
+
+async function syncRuntime(reconnect = false) {
+  const previousSession = state.sessionId;
+  const payload = await api("/api/runtime");
+  if (previousSession !== state.sessionId) return;
+  if (state.sessionId !== payload.session_id) {
+    resetRunView();
+    state.sessionId = payload.session_id;
+    if (localStorage.getItem(sessionStorageKey) !== state.sessionId) {
+      localStorage.removeItem(lastRunStorageKey);
+    }
+    localStorage.setItem(sessionStorageKey, state.sessionId);
+  }
+  state.activeRuns = payload.active_runs || [];
+  renderRuntimeState();
+  if (reconnect && !state.currentRunId) {
+    const stored = localStorage.getItem(lastRunStorageKey);
+    const live = state.activeRuns.find((run) => run.run_id === stored) || state.activeRuns[0];
+    if (live) await connectRun(live.run_id);
+  }
+}
+
+async function resumeCheckpoint(checkpointId) {
+  if (state.launchPending) return;
+  state.launchPending = true;
+  showError("");
+  try {
+    const payload = await api(`/api/checkpoints/${encodeURIComponent(checkpointId)}/resume`, { method: "POST" });
+    await syncRuntime();
+    if (payload.session_id !== state.sessionId) return;
+    await connectRun(payload.run_id);
+    await loadRuns();
+  } finally {
+    state.launchPending = false;
+  }
 }
 
 async function connectRun(runId) {
   showError("");
   stopPolling();
   state.currentRunId = runId;
+  const epoch = ++state.viewEpoch;
+  const sessionId = state.sessionId;
   state.activeReportKey = null;
   state.activeTraceSpanId = null;
   state.traceRunId = null;
@@ -575,6 +655,10 @@ async function connectRun(runId) {
   renderRunHistory();
   $("refreshRun").disabled = false;
   const payload = await api(`/api/runs/${encodeURIComponent(runId)}`);
+  if (epoch !== state.viewEpoch || sessionId !== state.sessionId || payload.session_id !== sessionId) return;
+  $("reportContent").textContent = payload.status?.status === "running"
+    ? "已连接运行。报告生成后可点击查看。"
+    : "已打开历史记录。点击下方报告查看结果。";
   renderRun(payload);
   if (payload.status?.status === "running") {
     startPolling();
@@ -585,7 +669,7 @@ function startPolling() {
   if (state.pollTimer) {
     clearInterval(state.pollTimer);
   }
-  state.pollTimer = setInterval(refreshRun, 2000);
+  state.pollTimer = setInterval(() => refreshRun().catch(showError), 2000);
   startProgressTicker();
 }
 
@@ -615,7 +699,23 @@ function startProgressTicker() {
 
 async function refreshRun() {
   if (!state.currentRunId) return;
-  const payload = await api(`/api/runs/${encodeURIComponent(state.currentRunId)}`);
+  const runId = state.currentRunId;
+  const epoch = state.viewEpoch;
+  const sessionId = state.sessionId;
+  let payload;
+  try {
+    payload = await api(`/api/runs/${encodeURIComponent(runId)}`);
+  } catch (error) {
+    if (epoch !== state.viewEpoch || sessionId !== state.sessionId) return;
+    if (error.status === 404) {
+      await syncRuntime();
+      if (!state.activeRuns.some((run) => run.run_id === runId)) resetRunView();
+      return;
+    }
+    throw error;
+  }
+  if (epoch !== state.viewEpoch || runId !== state.currentRunId || sessionId !== state.sessionId) return;
+  if (payload.session_id !== state.sessionId) { await syncRuntime(); return; }
   renderRun(payload);
   const status = payload.status?.status;
   if (isTerminalRunStatus(status)) {
@@ -627,10 +727,7 @@ async function refreshRun() {
 function renderRun(payload) {
   state.lastRunPayload = payload;
   const runStatus = payload.status || {};
-  const runState = $("runState");
-  const status = runStatus.status || "running";
-  runState.textContent = runStatus.cancel_requested && status === "running" ? "正在取消" : runStatusLabels[status] || status;
-  runState.className = `run-state ${toneClass(status)}`;
+  const status = runStatus.status || "idle";
   updateRunControls(runStatus);
 
   renderSummaryCards(runStatus);
@@ -648,10 +745,11 @@ function renderRun(payload) {
 function updateRunControls(runStatus = {}) {
   const cancelButton = $("cancelRun");
   if (!cancelButton) return;
-  const running = runStatus.status === "running";
-  const cancelRequested = runStatus.cancel_requested === true;
+  const running = runStatus.status === "running" && state.activeRuns.some((run) => run.run_id === state.currentRunId);
+  const cancelRequested = running && runStatus.cancel_requested === true;
   cancelButton.disabled = !state.currentRunId || !running || cancelRequested || state.cancelPending;
-  cancelButton.textContent = state.cancelPending || cancelRequested ? "取消中" : "取消运行";
+  cancelButton.textContent = state.cancelPending || cancelRequested ? "取消中"
+    : runStatus.status === "cancelled" ? (runStatus.resumable ? "已取消，可恢复" : "已取消") : "取消运行";
 }
 
 async function cancelRun() {
@@ -660,11 +758,14 @@ async function cancelRun() {
   state.cancelPending = true;
   updateRunControls(state.lastRunPayload?.status || {});
   try {
+    const epoch = state.viewEpoch;
     const payload = await api(`/api/runs/${encodeURIComponent(state.currentRunId)}/cancel`, {
       method: "POST",
     });
+    if (epoch !== state.viewEpoch || payload.session_id !== state.sessionId) return;
     renderRun(payload);
-    startPolling();
+    if (!isTerminalRunStatus(payload.status?.status)) startPolling();
+    await syncRuntime();
     await loadRuns();
   } finally {
     state.cancelPending = false;
@@ -676,7 +777,7 @@ function renderRunHistory() {
   const container = $("runHistory");
   if (!container) return;
   const runs = state.recentRuns || [];
-  if (!runs.length) {
+  if (!runs.length && !state.checkpoints.length) {
     container.innerHTML = "";
     return;
   }
@@ -684,9 +785,17 @@ function renderRunHistory() {
     <div class="section-heading compact">
       <div>
         <h3>最近运行</h3>
-        <span>刷新页面后可重新连接正在运行或已完成的 run。</span>
+        <span>历史记录仅供查看。已保存的断点需要手动恢复。</span>
       </div>
       <button class="ghost-button" type="button" data-refresh-runs>刷新列表</button>
+    </div>
+    <div class="run-history-list">
+      ${state.checkpoints.map((checkpoint) => `
+        <button class="run-history-item" type="button" data-resume-checkpoint="${escapeHtml(checkpoint.checkpoint_id)}">
+          <span class="status-chip status-neutral">恢复运行</span>
+          <strong>${escapeHtml(checkpoint.run_id)}</strong>
+          <small>${escapeHtml((checkpoint.symbols || []).join(", "))}</small>
+        </button>`).join("")}
     </div>
     <div class="run-history-list">
       ${runs.slice(0, 8).map(renderRunHistoryItem).join("")}
@@ -1070,8 +1179,11 @@ async function renderTrace(runId, runStatus = {}) {
   }
   timeline.innerHTML = '<div class="empty-state compact"><strong>正在读取 Trace</strong><span>正在加载本地 trace.json。</span></div>';
   details.textContent = "";
+  const epoch = state.viewEpoch;
+  const sessionId = state.sessionId;
   try {
     const payload = await api(`/api/runs/${encodeURIComponent(runId)}/trace`);
+    if (epoch !== state.viewEpoch || sessionId !== state.sessionId || runId !== state.currentRunId) return;
     state.traceRunId = runId;
     state.currentTrace = payload.trace || {};
     state.activeTraceSpanId = null;
@@ -1156,7 +1268,7 @@ function renderReportTabs(runId, reports) {
     return (left === -1 ? 99 : left) - (right === -1 ? 99 : right) || a.localeCompare(b);
   });
   if (!keys.length) {
-    tabs.innerHTML = '<span class="empty-inline">鏆傛棤鎶ュ憡銆?/span>';
+    tabs.innerHTML = '<span class="empty-inline">暂无报告。</span>';
     return;
   }
 
@@ -1173,9 +1285,16 @@ function renderReportTabs(runId, reports) {
       document.querySelectorAll("#reportTabs button").forEach((item) => item.classList.remove("active"));
       button.classList.add("active");
       state.activeReportKey = key;
-      $("reportContent").textContent = await api(
-        `/api/reports/${encodeURIComponent(runId)}/${encodeURIComponent(key)}`,
-      );
+      const epoch = state.viewEpoch;
+      const sessionId = state.sessionId;
+      try {
+        const content = await api(`/api/reports/${encodeURIComponent(runId)}/${encodeURIComponent(key)}`);
+        if (epoch === state.viewEpoch && sessionId === state.sessionId && state.activeReportKey === key) {
+          $("reportContent").textContent = content;
+        }
+      } catch (error) {
+        if (epoch === state.viewEpoch) showError(error);
+      }
     });
     tabs.appendChild(button);
   }
@@ -1273,7 +1392,7 @@ function toneClass(value) {
 }
 
 function isTerminalRunStatus(status) {
-  return ["succeeded", "failed", "cancelled"].includes(status);
+  return ["succeeded", "failed", "cancelled", "interrupted"].includes(status);
 }
 
 function marketLabel(value) {
@@ -1352,12 +1471,12 @@ function nodeDurationLabel(node = {}) {
   const status = node.status || "pending";
   const started = parseDate(node.started_at);
   const finished = parseDate(node.finished_at);
-  if (status === "pending") return "绛夊緟";
-  if (status === "skipped") return node.error ? `璺宠繃锛?{node.error}` : "璺宠繃";
+  if (status === "pending") return "等待";
+  if (status === "skipped") return node.error ? `跳过：${node.error}` : "跳过";
   if (!started) return "-";
   const end = finished || new Date();
   const label = formatDuration(end.getTime() - started.getTime());
-  return status === "running" ? `杩愯 ${label}` : `鑰楁椂 ${label}`;
+  return status === "running" ? `运行 ${label}` : `耗时 ${label}`;
 }
 
 function activityDurationLabel(activity = {}) {
@@ -1451,6 +1570,11 @@ function bindEvents() {
   $("cancelRun").addEventListener("click", () => cancelRun().catch(showError));
   $("refreshRun").addEventListener("click", () => refreshRun().catch(showError));
   $("runHistory").addEventListener("click", (event) => {
+    const resumeButton = event.target.closest("[data-resume-checkpoint]");
+    if (resumeButton) {
+      resumeCheckpoint(resumeButton.dataset.resumeCheckpoint).catch(showError);
+      return;
+    }
     const refreshButton = event.target.closest("[data-refresh-runs]");
     if (refreshButton) {
       loadRuns().catch(showError);
@@ -1509,9 +1633,11 @@ function bindEvents() {
   });
 }
 
-function init() {
+async function init() {
   bindEvents();
   switchView("analysis");
+  resetRunView();
+  renderRuntimeState();
   renderSummaryCards();
   renderProgress(null, {});
   renderNodeGuide({});
@@ -1531,8 +1657,10 @@ function init() {
     error: "点击刷新账户读取 Futu 模拟账户。",
   });
   loadSubscriptions().catch(showError);
-  loadRagStatus().catch(showError);
   loadObservabilityStatus().catch(showError);
-  restoreLastRun().catch(showError);
+  loadRuntimeConfig().catch(showError);
+  await syncRuntime(true);
+  await loadRuns();
+  state.runtimeTimer = setInterval(() => syncRuntime().catch(showError), 2000);
 }
-init();
+init().catch(showError);

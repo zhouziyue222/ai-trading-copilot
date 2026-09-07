@@ -432,15 +432,14 @@ class ExecutionDecision(BaseModel):
 class DistilledMemory(BaseModel):
     """Versioned, retrieval-oriented trading lesson.
 
-    Legacy JSONL entries remain valid: they default to ``approved`` so a
-    migration does not silently change existing production behaviour.
-    Newly reflected memories must explicitly be created as ``candidate``.
+    New memories are unverified candidates until they pass the explicit
+    shadow-evaluation and promotion workflow.
     """
 
     memory_id: str = ""
     memory_type: MemoryType
     memory_kind: MemoryKind = MemoryKind.PROCEDURAL
-    status: MemoryStatus = MemoryStatus.APPROVED
+    status: MemoryStatus = MemoryStatus.CANDIDATE
     scope: MemoryScope = MemoryScope.SYMBOL
     validation_target: MemoryValidationTarget = MemoryValidationTarget.OUTPERFORM
     lesson: str = Field(min_length=1, max_length=500)

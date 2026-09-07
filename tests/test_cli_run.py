@@ -52,6 +52,19 @@ def test_parse_args_accepts_technical_debug_for_single_technical_agent():
     assert run._resolve_analysts(args) == [AnalystType.TECHNICAL_POSITION]
 
 
+def test_long_term_memory_switch_precedence(monkeypatch):
+    monkeypatch.delenv("COPILOT_LONG_TERM_MEMORY_ENABLED", raising=False)
+    assert run.resolve_long_term_memory_enabled() is True
+
+    monkeypatch.setenv("COPILOT_LONG_TERM_MEMORY_ENABLED", "false")
+    assert run.resolve_long_term_memory_enabled() is False
+    assert run.resolve_long_term_memory_enabled(True) is True
+    assert run.resolve_long_term_memory_enabled(False) is False
+
+    assert run._parse_args(["AAPL", "--no-long-term-memory"]).long_term_memory is False
+    assert run._parse_args(["AAPL", "--long-term-memory"]).long_term_memory is True
+
+
 def test_parse_args_rejects_unknown_analyst():
     with pytest.raises(SystemExit):
         run._parse_args(["CRCL", "--analysts", "market"])
@@ -210,7 +223,7 @@ def test_main_passes_technical_debug_to_graph(monkeypatch, tmp_path):
 
 
 def test_default_memory_agent_uses_requested_path(tmp_path):
-    path = tmp_path / "memory.jsonl"
+    path = tmp_path / "memory.sqlite3"
     agent = run.create_default_memory_agent(path)
 
     assert agent.retrieve_context(symbol="AAPL") == []

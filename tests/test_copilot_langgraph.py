@@ -7,6 +7,7 @@ from ai_trading_copilot.copilot.domain import (
     DistilledMemory,
     ExecutionMode,
     FundamentalAnalysisReport,
+    MemoryStatus,
     MemoryType,
     NewsSentimentReport,
     PortfolioSnapshot,
@@ -281,7 +282,7 @@ def test_langgraph_can_use_live_portfolio_mode(tmp_path):
 
 
 def test_langgraph_without_llm_does_not_record_unused_memory(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
     store.append(
         DistilledMemory(
             memory_type=MemoryType.STRATEGY_PERFORMANCE,
@@ -467,11 +468,12 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
 
 def test_langgraph_retrieves_memory_inside_trader_and_portfolio_nodes(tmp_path):
     llm = RoutingLLM()
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
     memory = store.repository.upsert(
         DistilledMemory(
             memory_id="aapl-contextual-memory",
             memory_type=MemoryType.STRATEGY_PERFORMANCE,
+            status=MemoryStatus.APPROVED,
             lesson="Use smaller size until an AAPL support retest is confirmed.",
             trigger="AAPL uptrend pullback near support.",
             symbols=["AAPL"],

@@ -27,9 +27,9 @@
 ## 为什么这样组合
 
 - `SQLiteMemoryRepository` 是唯一事实源，保存当前记录、所有历史版本、状态事件、运行命中、延迟结果和评测结果。
-- `config/memory.jsonl` 只是兼容迁移与审计导出，不再承担并发写入或生命周期管理。
-- LangMem 只负责从结构化运行证据中提炼候选，不维护第二套 Store，避免双写与状态漂移。
-- `MemorySkillManager` 做相似候选合并。匹配到已批准记忆时，会创建独立证据候选，绝不把 `approved` 降级或原地改写。
+- 系统不再读写 JSONL；SQLite 同时承担事实源、版本和审计历史。
+- LangMem 只负责从结构化运行证据中提炼 insert/update 提案，不维护第二套 Store，避免双写与状态漂移。
+- `MemorySkillManager` 做相似候选合并。只有 `candidate` 可原 ID 更新；匹配到其他生命周期状态时会创建独立修订候选，绝不原地改写已冻结记忆。
 - 运行前不再设置粗粒度 `Retrieve Memories` 节点。Trader 在分析师完成后、Portfolio Manager 在 Risk Check 后，各自按当前结构化状态检索。
 - 每次查询由 SQLite 做状态、有效期、Scope、Symbol 和市场状态硬过滤，再以标签、关键词、置信度和本地向量相似度重排；SQLite 仍是唯一事实源。
 - Shadow 记忆使用相同精查询并登记命中，但不会进入任何 Agent Prompt，因此可以先积累结果证据。
@@ -64,6 +64,10 @@
 ```powershell
 ai-trading-copilot AAPL --no-memory-learning
 ```
+
+长期记忆默认开启。`COPILOT_LONG_TERM_MEMORY_ENABLED=false` 可全局关闭；
+CLI 的 `--long-term-memory/--no-long-term-memory` 和 Web 单次运行开关优先于环境变量。
+关闭总开关后既不提炼也不检索，但审批、评测和历史查看仍可使用。
 
 管理 CLI：
 
@@ -139,7 +143,6 @@ ai-trading-copilot-harness rollback COMMIT_SHA
 ## 运维文件
 
 - `config/memory.sqlite3`：本地事实库，已忽略 Git。
-- `config/memory.jsonl`：审计导出，已忽略 Git。
 - `config/memory.vectors.json`：可从 SQLite 当前记忆重建的本地相似度侧索引，已忽略 Git。
 - `.autoharness/`：campaign/champion 工作状态，已忽略 Git。
 - 每次 Prompt 晋升：独立 Git commit，可由 `ai-trading-copilot-harness rollback` 恢复并重新验证。

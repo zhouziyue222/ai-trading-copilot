@@ -7,9 +7,10 @@ a non-production candidate in SQLite.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from difflib import SequenceMatcher
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +48,22 @@ class LangMemCandidate(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
 
 
+class LangMemProposal(BaseModel):
+    """One local interpretation of a LangMem insert or update result."""
+
+    operation: Literal["insert", "update"]
+    candidate: LangMemCandidate
+    target_memory_id: str | None = None
+
+
+class ReflectedMemoryProposal(BaseModel):
+    """A LangMem proposal enriched with immutable run provenance."""
+
+    operation: Literal["insert", "update"]
+    memory: DistilledMemory
+    target_memory_id: str | None = None
+
+
 LANGMEM_INSTRUCTIONS = """
 You extract candidate memories from one completed trading-copilot run.
 Only retain compact observations that are reusable and falsifiable in later
@@ -77,7 +94,7 @@ class LangMemCandidateExtractor:
         snapshot: Mapping[str, Any],
         *,
         existing: Iterable[DistilledMemory] = (),
-    ) -> list[LangMemCandidate]:
+    ) -> list[LangMemProposal]:
         if self.llm is None:
             return []
         if self._manager is None:
@@ -88,9 +105,15 @@ class LangMemCandidateExtractor:
                 schemas=[LangMemCandidate],
                 instructions=LANGMEM_INSTRUCTIONS,
                 enable_inserts=True,
-                enable_updates=False,
+                enable_updates=True,
                 enable_deletes=False,
             )
+        existing_items = [
+            (memory.memory_id, _candidate_from_memory(memory))
+            for memory in existing
+            if memory.memory_id
+        ]
+        existing_by_id = dict(existing_items)
         messages = [
             {
                 "role": "user",
@@ -100,20 +123,40 @@ class LangMemCandidateExtractor:
             {
                 "role": "assistant",
                 "content": (
-                    "Extract only new candidate observations. Delayed market "
-                    "outcomes may not yet be available."
+                    "Insert new observations or update relevant existing ones. "
+                    "Delayed market outcomes may not yet be available."
                 ),
             },
         ]
         # Consolidation is intentionally local; LangMem is not a second store.
-        extracted = self._manager.invoke(messages)
-        result: list[LangMemCandidate] = []
+        extracted = self._manager.invoke(
+            {"messages": messages, "existing": existing_items}
+        )
+        result: list[LangMemProposal] = []
         for item in extracted:
+            item_id = str(getattr(item, "id", "") or "")
             content = getattr(item, "content", None)
-            if isinstance(content, LangMemCandidate):
-                result.append(content)
-            elif content is not None:
-                result.append(LangMemCandidate.model_validate(content))
+            try:
+                candidate = (
+                    content
+                    if isinstance(content, LangMemCandidate)
+                    else LangMemCandidate.model_validate(content)
+                )
+            except Exception:
+                continue
+            existing_candidate = existing_by_id.get(item_id)
+            if existing_candidate is not None:
+                if _candidate_payload(existing_candidate) == _candidate_payload(candidate):
+                    continue
+                result.append(
+                    LangMemProposal(
+                        operation="update",
+                        target_memory_id=item_id,
+                        candidate=candidate,
+                    )
+                )
+            else:
+                result.append(LangMemProposal(operation="insert", candidate=candidate))
         return result
 
 
@@ -131,7 +174,6 @@ class MemoryReflector:
         "trade_plans",
         "risk_assessments",
         "execution_decisions",
-        "memory_retrievals",
         "errors",
     )
 
@@ -143,7 +185,7 @@ class MemoryReflector:
         state: Mapping[str, Any],
         *,
         existing: Iterable[DistilledMemory] = (),
-    ) -> list[DistilledMemory]:
+    ) -> list[ReflectedMemoryProposal]:
         run_id = str(state.get("run_id") or "")
         snapshot = {
             key: _jsonable(state[key])
@@ -151,18 +193,35 @@ class MemoryReflector:
             if key in state
         }
         extracted = self.extractor.extract(snapshot, existing=existing)
-        return [
-            DistilledMemory(
-                **candidate.model_dump(mode="json"),
-                status=MemoryStatus.CANDIDATE,
-                source_run_id=run_id or None,
-                evidence_run_ids=[run_id] if run_id else [],
-                sample_count=1 if run_id else 0,
-                created_by="langmem_reflector",
-                metadata={"extractor": "langmem", "outcome_verified": False},
+        reflected = []
+        run_symbols = _state_symbols(state)
+        for proposal in extracted:
+            if (
+                proposal.candidate.scope == MemoryScope.SYMBOL
+                and run_symbols
+                and not run_symbols.intersection(proposal.candidate.symbols)
+            ):
+                continue
+            reflected.append(
+                ReflectedMemoryProposal(
+                    operation=proposal.operation,
+                    target_memory_id=proposal.target_memory_id,
+                    memory=DistilledMemory(
+                        **proposal.candidate.model_dump(mode="json"),
+                        status=MemoryStatus.CANDIDATE,
+                        source_run_id=run_id or None,
+                        evidence_run_ids=[run_id] if run_id else [],
+                        sample_count=1 if run_id else 0,
+                        created_by="langmem_reflector",
+                        metadata={
+                            "extractor": "langmem",
+                            "langmem_operation": proposal.operation,
+                            "outcome_verified": False,
+                        },
+                    ),
+                )
             )
-            for candidate in extracted
-        ]
+        return reflected
 
 
 class MemorySkillManager:
@@ -172,35 +231,68 @@ class MemorySkillManager:
         self.store = store
         self.similarity_threshold = similarity_threshold
 
-    def ingest(self, candidates: Iterable[DistilledMemory]) -> list[DistilledMemory]:
+    def ingest(
+        self,
+        proposals: Iterable[ReflectedMemoryProposal],
+    ) -> list[DistilledMemory]:
         saved: list[DistilledMemory] = []
-        for candidate in candidates:
-            existing = self._nearest(candidate)
-            if existing and existing.status in {
-                MemoryStatus.CANDIDATE,
-                MemoryStatus.SHADOW,
-            }:
-                saved.append(self._merge(existing, candidate))
+        for proposal in proposals:
+            candidate = proposal.memory
+            target = (
+                self.store.repository.get(proposal.target_memory_id)
+                if proposal.target_memory_id
+                else None
+            )
+            if target is not None:
+                if target.status == MemoryStatus.CANDIDATE:
+                    if _already_observed(target, candidate):
+                        saved.append(target)
+                    else:
+                        saved.append(self._merge(target, candidate, apply_update=True))
+                else:
+                    saved.append(self._save_revision(target, candidate))
                 continue
-            if existing and existing.status == MemoryStatus.APPROVED:
-                candidate = candidate.model_copy(
-                    update={
-                        "memory_id": "",
-                        "supersedes": existing.memory_id,
-                        "metadata": {
-                            **candidate.metadata,
-                            "matches_approved_memory": existing.memory_id,
-                        },
-                    }
-                )
-                # Keep validation evidence isolated from the approved version.
-                suffix = (candidate.source_run_id or "observation").lower()
-                candidate = candidate.model_copy(
-                    update={"trigger": f"{candidate.trigger} evidence:{suffix}".strip()}
-                )
+
+            existing = self._nearest(candidate)
+            if existing and existing.status == MemoryStatus.CANDIDATE:
+                if _already_observed(existing, candidate):
+                    saved.append(existing)
+                else:
+                    saved.append(self._merge(existing, candidate))
+                continue
+            if existing:
+                saved.append(self._save_revision(existing, candidate))
+                continue
             saved.append(self.store.save_candidate(candidate))
-        self.store.repository.export_jsonl(self.store.path)
         return saved
+
+    def _save_revision(
+        self,
+        existing: DistilledMemory,
+        candidate: DistilledMemory,
+    ) -> DistilledMemory:
+        revision = candidate.model_copy(
+            update={
+                "memory_id": _revision_memory_id(existing, candidate),
+                "status": MemoryStatus.CANDIDATE,
+                "supersedes": existing.memory_id,
+                "metadata": {
+                    **candidate.metadata,
+                    "frozen_memory_status": existing.status.value,
+                    "matches_frozen_memory": existing.memory_id,
+                },
+            }
+        )
+        current = self.store.repository.get(revision.memory_id)
+        if current is not None:
+            if _already_observed(current, candidate):
+                return current
+            return self._merge(current, candidate)
+        return self.store.save_candidate(
+            revision,
+            actor="skill_manager",
+            reason="propose_revision_of_frozen_memory",
+        )
 
     def _nearest(self, candidate: DistilledMemory) -> DistilledMemory | None:
         best: tuple[float, int, DistilledMemory] | None = None
@@ -217,9 +309,7 @@ class MemorySkillManager:
                 _normalized_text(memory.lesson),
                 _normalized_text(candidate.lesson),
             ).ratio()
-            lifecycle_priority = int(
-                memory.status in {MemoryStatus.CANDIDATE, MemoryStatus.SHADOW}
-            )
+            lifecycle_priority = int(memory.status == MemoryStatus.CANDIDATE)
             if best is None or (score, lifecycle_priority) > (best[0], best[1]):
                 best = (score, lifecycle_priority, memory)
         if best and best[0] >= self.similarity_threshold:
@@ -230,6 +320,8 @@ class MemorySkillManager:
         self,
         existing: DistilledMemory,
         candidate: DistilledMemory,
+        *,
+        apply_update: bool = False,
     ) -> DistilledMemory:
         evidence = sorted(
             set(existing.evidence_run_ids)
@@ -246,22 +338,37 @@ class MemorySkillManager:
             if confidence_values
             else None
         )
-        merged = existing.model_copy(
-            update={
-                "symbols": sorted(set(existing.symbols) | set(candidate.symbols)),
-                "tags": sorted(set(existing.tags) | set(candidate.tags)),
-                "market_regimes": sorted(
-                    set(existing.market_regimes) | set(candidate.market_regimes)
-                ),
-                "timeframes": sorted(
-                    set(existing.timeframes) | set(candidate.timeframes)
-                ),
-                "evidence_run_ids": evidence,
-                "sample_count": max(existing.sample_count, len(evidence)),
-                "confidence": confidence,
-                "metadata": {**existing.metadata, "last_merge": "reflector"},
-            }
-        )
+        updates: dict[str, Any] = {
+            "symbols": sorted(set(existing.symbols) | set(candidate.symbols)),
+            "tags": sorted(set(existing.tags) | set(candidate.tags)),
+            "market_regimes": sorted(
+                set(existing.market_regimes) | set(candidate.market_regimes)
+            ),
+            "timeframes": sorted(
+                set(existing.timeframes) | set(candidate.timeframes)
+            ),
+            "evidence_run_ids": evidence,
+            "sample_count": max(existing.sample_count, len(evidence)),
+            "confidence": confidence,
+            "metadata": {
+                **existing.metadata,
+                **candidate.metadata,
+                "last_merge": "reflector",
+            },
+        }
+        if apply_update:
+            updates.update(
+                {
+                    "memory_type": candidate.memory_type,
+                    "memory_kind": candidate.memory_kind,
+                    "scope": candidate.scope,
+                    "validation_target": candidate.validation_target,
+                    "lesson": candidate.lesson,
+                    "trigger": candidate.trigger,
+                    "rationale": candidate.rationale,
+                }
+            )
+        merged = existing.model_copy(update=updates)
         return self.store.repository.upsert(
             merged,
             actor="skill_manager",
@@ -279,11 +386,12 @@ class PostRunLearningService:
         return self.reflector.extractor.available
 
     def learn(self, state: Mapping[str, Any]) -> list[DistilledMemory]:
-        existing = self.skill_manager.store.list_all(
-            statuses=[MemoryStatus.CANDIDATE, MemoryStatus.SHADOW, MemoryStatus.APPROVED]
+        existing = _relevant_existing_memories(
+            state,
+            self.skill_manager.store.list_all(),
         )
-        candidates = self.reflector.reflect(state, existing=existing)
-        return self.skill_manager.ingest(candidates)
+        proposals = self.reflector.reflect(state, existing=existing)
+        return self.skill_manager.ingest(proposals)
 
 
 def _jsonable(value: Any) -> Any:
@@ -302,11 +410,94 @@ def _normalized_text(value: str) -> str:
     return " ".join(value.lower().split())
 
 
+def _candidate_from_memory(memory: DistilledMemory) -> LangMemCandidate:
+    return LangMemCandidate(
+        memory_type=memory.memory_type,
+        memory_kind=memory.memory_kind,
+        scope=memory.scope,
+        validation_target=memory.validation_target,
+        lesson=memory.lesson,
+        trigger=memory.trigger,
+        rationale=memory.rationale,
+        symbols=memory.symbols,
+        tags=memory.tags,
+        market_regimes=memory.market_regimes,
+        timeframes=memory.timeframes,
+        confidence=memory.confidence if memory.confidence is not None else 0.5,
+    )
+
+
+def _candidate_payload(candidate: LangMemCandidate) -> dict[str, Any]:
+    return candidate.model_dump(mode="json")
+
+
+def _already_observed(existing: DistilledMemory, candidate: DistilledMemory) -> bool:
+    run_id = (candidate.source_run_id or "").strip().lower()
+    return bool(run_id and run_id in existing.evidence_run_ids)
+
+
+def _revision_memory_id(
+    existing: DistilledMemory,
+    candidate: DistilledMemory,
+) -> str:
+    identity = {
+        "supersedes": existing.memory_id,
+        "memory_type": candidate.memory_type.value,
+        "memory_kind": candidate.memory_kind.value,
+        "scope": candidate.scope.value,
+        "lesson": _normalized_text(candidate.lesson),
+        "trigger": _normalized_text(candidate.trigger),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"mem_revision_{digest[:24]}"
+
+
+def _relevant_existing_memories(
+    state: Mapping[str, Any],
+    memories: Iterable[DistilledMemory],
+    *,
+    limit: int = 20,
+) -> list[DistilledMemory]:
+    symbols = _state_symbols(state)
+    relevant = [
+        memory
+        for memory in memories
+        if not symbols or not memory.symbols or symbols.intersection(memory.symbols)
+    ]
+    relevant.sort(
+        key=lambda memory: (
+            memory.status == MemoryStatus.CANDIDATE,
+            len(symbols.intersection(memory.symbols)),
+            memory.updated_at or memory.created_at or "",
+            memory.memory_id,
+        ),
+        reverse=True,
+    )
+    return relevant[:limit]
+
+
+def _state_symbols(state: Mapping[str, Any]) -> set[str]:
+    values = list(state.get("subscription_symbols", []))
+    for key in ("trade_plans", "risk_assessments", "execution_decisions"):
+        scoped = state.get(key, {})
+        if isinstance(scoped, Mapping):
+            values.extend(scoped.keys())
+    return {
+        str(symbol).strip().upper()
+        for symbol in values
+        if str(symbol).strip()
+    }
+
+
 __all__ = [
     "LANGMEM_INSTRUCTIONS",
     "LangMemCandidate",
     "LangMemCandidateExtractor",
+    "LangMemProposal",
     "MemoryReflector",
     "MemorySkillManager",
     "PostRunLearningService",
+    "ReflectedMemoryProposal",
 ]

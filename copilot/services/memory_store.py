@@ -1,4 +1,4 @@
-"""Compatibility facade over the versioned SQLite memory repository."""
+"""Facade over the versioned SQLite memory repository."""
 
 from __future__ import annotations
 
@@ -23,32 +23,27 @@ from ai_trading_copilot.copilot.services.vector_memory import (
 
 
 class DistilledMemoryStore:
-    """Store facade retaining the original API while SQLite owns the data."""
+    """Store facade that keeps unreviewed writes out of production retrieval."""
 
     def __init__(
         self,
-        path: str | Path,
+        database_path: str | Path,
         *,
         default_limit: int = 5,
         vector_index: LocalVectorMemoryIndex | None = None,
         repository: MemoryRepository | None = None,
-        database_path: str | Path | None = None,
     ):
         if default_limit <= 0:
             raise ValueError("default_limit must be positive")
-        self.path = Path(path)
+        self.database_path = Path(database_path)
         self.default_limit = default_limit
         self.vector_index = vector_index
         self.repository = repository or SQLiteMemoryRepository(
-            database_path or self.path.with_suffix(".sqlite3")
+            self.database_path
         )
-        self.repository.migrate_jsonl(self.path)
 
     def append(self, memory: DistilledMemory) -> None:
-        self.repository.upsert(memory, actor="legacy_api", reason="append")
-        self.repository.export_jsonl(self.path)
-        if self.vector_index is not None:
-            self.vector_index.sync(self.load())
+        self.save_candidate(memory, actor="memory_store", reason="append_candidate")
 
     def load(self) -> List[DistilledMemory]:
         return self.repository.list(statuses=[MemoryStatus.APPROVED])
@@ -70,7 +65,6 @@ class DistilledMemoryStore:
     ) -> DistilledMemory:
         candidate = memory.model_copy(update={"status": MemoryStatus.CANDIDATE})
         saved = self.repository.upsert(candidate, actor=actor, reason=reason)
-        self.repository.export_jsonl(self.path)
         return saved
 
     def retrieve(

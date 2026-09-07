@@ -13,6 +13,7 @@ from typing import Iterable, List
 from ai_trading_copilot.copilot.agents import PostTradeReviewLearningAgent
 from ai_trading_copilot.copilot.config import (
     DEFAULT_REPORT_OUTPUT_DIR,
+    DEFAULT_PRODUCT_CONFIG,
     create_default_deepseek_llm,
 )
 from ai_trading_copilot.copilot.config.defaults import DEFAULT_PERSONA_CONFIG
@@ -42,7 +43,7 @@ from ai_trading_copilot.copilot.services.vector_memory import (
 
 
 DEFAULT_SUBSCRIPTIONS_FILE = Path(__file__).resolve().parents[1] / "config" / "subscriptions.json"
-DEFAULT_MEMORY_FILE = Path(__file__).resolve().parents[1] / "config" / "memory.jsonl"
+DEFAULT_MEMORY_DATABASE = Path(__file__).resolve().parents[1] / "config" / "memory.sqlite3"
 DEFAULT_ANALYSTS = [
     AnalystType.NEWS_SENTIMENT,
     AnalystType.TECHNICAL_POSITION,
@@ -53,6 +54,7 @@ ALL_ANALYST_VALUES = [analyst.value for analyst in AnalystType]
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
+    long_term_memory_enabled = resolve_long_term_memory_enabled(args.long_term_memory)
     symbols = _resolve_symbols(args)
     selected_analysts = _resolve_analysts(args)
     run_label = symbols[0] if len(symbols) == 1 else "BATCH"
@@ -79,6 +81,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "portfolio_mode_default": ExecutionMode.SIMULATION.value,
         "look_back_days_default": 90,
         "technical_debug": args.technical_debug,
+        "long_term_memory_enabled": long_term_memory_enabled,
     }
     tracker = RunTracker(
         output_dir=output_dir,
@@ -88,7 +91,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         defaults=defaults,
         nodes=CopilotLangGraph.NODE_ORDER,
     )
-    memory_agent = create_default_memory_agent()
+    memory_agent = (
+        create_default_memory_agent() if long_term_memory_enabled else None
+    )
     graph = _create_graph(
         CopilotLangGraph,
         run_tracker=tracker,
@@ -104,7 +109,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     error = None
     try:
         state = graph.run(**params)
-        if not args.no_memory_learning:
+        if memory_agent is not None and not args.no_memory_learning:
             try:
                 candidates = memory_agent.learn_from_run(state)
                 if candidates:
@@ -190,6 +195,16 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         "--no-memory-learning",
         action="store_true",
         help="Skip post-run LangMem candidate extraction for this run.",
+    )
+    parser.add_argument(
+        "--long-term-memory",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable or disable post-run learning and pre-trade memory retrieval "
+            "for this run. Defaults to COPILOT_LONG_TERM_MEMORY_ENABLED or the "
+            "product default."
+        ),
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -343,15 +358,12 @@ def _require_symbols(symbols: Iterable[str], message: str) -> List[str]:
 
 
 def create_default_memory_agent(
-    path: str | Path = DEFAULT_MEMORY_FILE,
-    *,
-    rag_chroma_dir: str | Path | None = None,
-    auto_ingest_seed: bool = True,
+    database_path: str | Path = DEFAULT_MEMORY_DATABASE,
 ) -> PostTradeReviewLearningAgent:
-    memory_path = Path(path)
+    memory_database = Path(database_path)
     store = DistilledMemoryStore(
-        memory_path,
-        vector_index=LocalVectorMemoryIndex(default_vector_index_path(memory_path)),
+        memory_database,
+        vector_index=LocalVectorMemoryIndex(default_vector_index_path(memory_database)),
     )
     extractor = LangMemCandidateExtractor(create_default_deepseek_llm())
     learning_service = PostRunLearningService(
@@ -379,18 +391,27 @@ def create_default_memory_agent(
 
 
 def create_default_fundamental_research_retriever(
-    path: str | Path = DEFAULT_MEMORY_FILE,
     *,
     rag_chroma_dir: str | Path | None = None,
     auto_ingest_seed: bool = False,
 ) -> FundamentalResearchRetriever:
-    memory_path = Path(path)
     retriever = FundamentalResearchRetriever(
-        FundamentalRagStore(rag_chroma_dir or memory_path.parent / "rag_chroma")
+        FundamentalRagStore(rag_chroma_dir) if rag_chroma_dir else FundamentalRagStore()
     )
     if auto_ingest_seed:
         retriever.ingest_seed_knowledge()
     return retriever
+
+
+def resolve_long_term_memory_enabled(explicit: bool | None = None) -> bool:
+    """Resolve a per-run override over environment and product defaults."""
+
+    if explicit is not None:
+        return explicit
+    raw = os.getenv("COPILOT_LONG_TERM_MEMORY_ENABLED")
+    if raw is None or not raw.strip():
+        return bool(DEFAULT_PRODUCT_CONFIG["learning_loop"]["enabled"])
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _create_graph(
@@ -401,17 +422,17 @@ def _create_graph(
     fundamental_rag_retriever=None,
     technical_position_debug: bool = False,
 ):
-    if _accepts_keyword(graph_cls, "memory_agent"):
+    if accepts_keyword(graph_cls, "memory_agent"):
         kwargs = {"run_tracker": run_tracker, "memory_agent": memory_agent}
-        if _accepts_keyword(graph_cls, "fundamental_rag_retriever"):
+        if accepts_keyword(graph_cls, "fundamental_rag_retriever"):
             kwargs["fundamental_rag_retriever"] = fundamental_rag_retriever
-        if _accepts_keyword(graph_cls, "technical_position_debug"):
+        if accepts_keyword(graph_cls, "technical_position_debug"):
             kwargs["technical_position_debug"] = technical_position_debug
         return graph_cls(**kwargs)
     return graph_cls(run_tracker=run_tracker)
 
 
-def _accepts_keyword(callable_obj, name: str) -> bool:
+def accepts_keyword(callable_obj, name: str) -> bool:
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):

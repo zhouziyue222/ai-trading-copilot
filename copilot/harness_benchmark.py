@@ -63,7 +63,7 @@ def run_benchmark() -> dict:
         root = Path(directory)
         repository = SQLiteMemoryRepository(root / "memory.sqlite3")
         store = DistilledMemoryStore(
-            root / "memory.jsonl",
+            root / "memory.sqlite3",
             repository=repository,
             default_limit=5,
         )

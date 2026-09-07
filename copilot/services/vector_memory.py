@@ -162,7 +162,7 @@ class LocalVectorMemoryIndex:
 
 
 def default_vector_index_path(memory_path: str | Path) -> Path:
-    """Return the sidecar path used for a JSONL memory file."""
+    """Return the rebuildable sidecar path used for a SQLite memory database."""
 
     return Path(memory_path).with_suffix(".vectors.json")
 

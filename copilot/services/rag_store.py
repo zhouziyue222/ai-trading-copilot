@@ -508,21 +508,6 @@ class ChromaRagStore:
             errors=[*errors, *result.errors],
         )
 
-    def ingest_online_stock_research(
-        self,
-        *,
-        symbols: Iterable[str],
-        trade_date: str | None = None,
-        look_back_days: int = 7,
-        fundamentals_fetcher: Callable[[str, str], str] = get_fundamentals_text,
-    ) -> RagIngestResult:
-        return self.ingest_online_fundamental_research(
-            symbols=symbols,
-            trade_date=trade_date,
-            look_back_days=look_back_days,
-            fundamentals_fetcher=fundamentals_fetcher,
-        )
-
     def search(
         self,
         *,
@@ -1485,23 +1470,6 @@ def _keyword_tokens(value: str) -> List[str]:
         tokens.extend(run)
         tokens.extend(run[index : index + 2] for index in range(len(run) - 1))
     return tokens
-
-
-def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
-    if not left or not right:
-        return 0.0
-    dot = 0.0
-    left_norm = 0.0
-    right_norm = 0.0
-    for left_value, right_value in zip(left, right):
-        left_float = float(left_value)
-        right_float = float(right_value)
-        dot += left_float * right_float
-        left_norm += left_float * left_float
-        right_norm += right_float * right_float
-    if left_norm <= 0 or right_norm <= 0:
-        return 0.0
-    return dot / math.sqrt(left_norm * right_norm)
 
 
 def _rrf_fuse(

@@ -13,7 +13,6 @@ dist/
 config/rag_chroma*/
 config/chroma*/
 config/memory.vectors.json
-config/memory.jsonl
 config/memory.sqlite3*
 .autoharness/
 /output/

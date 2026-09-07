@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """CLI for managing the fundamental-only Chroma RAG knowledge base."""
 
 from __future__ import annotations
@@ -9,19 +10,16 @@ import sys
 from pathlib import Path
 from typing import Iterable, List
 
-from ai_trading_copilot.copilot.run import (
-    DEFAULT_MEMORY_FILE,
-    create_default_fundamental_research_retriever,
-)
+from ai_trading_copilot.copilot.run import create_default_fundamental_research_retriever
+from ai_trading_copilot.copilot.services.rag_store import DEFAULT_CHROMA_DIR
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
-    chroma_dir = args.chroma_dir or args.memory_file.parent / "rag_chroma"
+    chroma_dir = args.chroma_dir
 
     if args.command == "_probe-status-worker":
         agent = create_default_fundamental_research_retriever(
-            args.memory_file,
             rag_chroma_dir=chroma_dir,
             auto_ingest_seed=False,
         )
@@ -29,11 +27,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
 
     if args.command == "status" and args.probe:
-        _print_json(_probe_status_subprocess(args.memory_file, chroma_dir))
+        _print_json(_probe_status_subprocess(chroma_dir))
         return 0
 
     agent = create_default_fundamental_research_retriever(
-        args.memory_file,
         rag_chroma_dir=chroma_dir,
         auto_ingest_seed=False,
     )
@@ -82,13 +79,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     raise SystemExit(f"Unknown command: {args.command}")
 
 
-def _probe_status_subprocess(memory_file: Path, chroma_dir: Path) -> dict:
+def _probe_status_subprocess(chroma_dir: Path) -> dict:
     command = [
-        sys.executable,
+        sys.executable, "-X", "utf8",
         "-m",
         "ai_trading_copilot.copilot.rag",
-        "--memory-file",
-        str(memory_file),
         "--chroma-dir",
         str(chroma_dir),
         "_probe-status-worker",
@@ -98,6 +93,8 @@ def _probe_status_subprocess(memory_file: Path, chroma_dir: Path) -> dict:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             timeout=30,
             check=False,
         )
@@ -147,8 +144,7 @@ def _print_json(payload) -> None:
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage AI Trading Copilot fundamental RAG knowledge base.")
-    parser.add_argument("--memory-file", type=Path, default=DEFAULT_MEMORY_FILE)
-    parser.add_argument("--chroma-dir", type=Path, default=None)
+    parser.add_argument("--chroma-dir", type=Path, default=DEFAULT_CHROMA_DIR)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     status = subparsers.add_parser("status")

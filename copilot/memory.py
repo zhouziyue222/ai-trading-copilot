@@ -8,12 +8,15 @@ from pathlib import Path
 from typing import Iterable
 
 from ai_trading_copilot.copilot.domain import MemoryStatus, RunOutcome
-from ai_trading_copilot.copilot.run import DEFAULT_MEMORY_FILE, create_default_memory_agent
+from ai_trading_copilot.copilot.run import (
+    DEFAULT_MEMORY_DATABASE,
+    create_default_memory_agent,
+)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
-    agent = create_default_memory_agent(Path(args.memory_file))
+    agent = create_default_memory_agent(Path(args.memory_database))
     repository = agent.store.repository
 
     if args.command == "status":
@@ -48,7 +51,6 @@ def main(argv: Iterable[str] | None = None) -> int:
                 actor=args.actor,
                 reason=args.reason,
             )
-        repository.export_jsonl(args.memory_file)
         return _print({"item": item.model_dump(mode="json")})
     if args.command == "evaluate":
         if agent.evaluator is None:
@@ -62,7 +64,6 @@ def main(argv: Iterable[str] | None = None) -> int:
             actor=args.actor,
             reason=args.reason,
         )
-        repository.export_jsonl(args.memory_file)
         return _print({"item": item.model_dump(mode="json")})
     if args.command == "outcome":
         outcome = RunOutcome(
@@ -78,15 +79,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             notes=args.notes,
         )
         return _print({"outcome": agent.record_outcome(outcome).model_dump(mode="json")})
-    if args.command == "export":
-        path = repository.export_jsonl(args.output or args.memory_file)
-        return _print({"path": str(path), "counts": repository.counts_by_status()})
     raise SystemExit(f"unknown command: {args.command}")
 
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage versioned copilot memories.")
-    parser.add_argument("--memory-file", default=str(DEFAULT_MEMORY_FILE))
+    parser.add_argument("--memory-database", default=str(DEFAULT_MEMORY_DATABASE))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("status")
@@ -122,8 +120,6 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     outcome.add_argument("--source", default="manual_cli")
     outcome.add_argument("--notes", default="")
 
-    export = subparsers.add_parser("export")
-    export.add_argument("--output")
     return parser.parse_args(list(argv) if argv is not None else None)
 
 

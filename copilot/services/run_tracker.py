@@ -1,12 +1,16 @@
+# -*- coding: utf-8 -*-
 """Persistent run tracking for copilot graph executions."""
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ai_trading_copilot.copilot.services.tracing import sanitize_value
 
@@ -291,7 +295,7 @@ class RunTracker:
 
     def flush(self) -> None:
         with self._lock:
-            _write_json_atomic(self.status_path, self.status)
+            write_json_atomic(self.status_path, self.status)
 
     def _touch(self) -> None:
         self.status["updated_at"] = _utc_now()
@@ -315,10 +319,28 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+def write_json_atomic(path: Path, payload: dict[str, Any], *, before_replace: Callable[[], None] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, allow_nan=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(20):
+            if before_replace is not None:
+                before_replace()
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                # Windows readers / virus scanners can briefly deny replace.
+                if os.name != "nt" or getattr(exc, "winerror", None) not in {5, 32} or attempt == 19:
+                    raise
+                time.sleep(0.01)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _node_status_label(status: str) -> str:

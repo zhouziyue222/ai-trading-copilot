@@ -57,6 +57,7 @@ class CopilotGraphState(TypedDict, total=False):
     memories: Dict[str, List[DistilledMemory]]
     shadow_memories: Dict[str, List[DistilledMemory]]
     memory_retrievals: List[MemoryRetrievalRecord]
+    long_term_memory_enabled: bool
     memory_candidates: List[DistilledMemory]
     explanations: Dict[str, Any]
     report: CopilotRunReport

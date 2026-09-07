@@ -1,8 +1,4 @@
-"""Versioned memory repository backed by SQLite.
-
-SQLite is the source of truth. JSONL is supported only as a migration input and
-an audit/export format so lifecycle state and version history cannot diverge.
-"""
+"""Versioned memory repository backed by SQLite."""
 
 from __future__ import annotations
 
@@ -527,42 +523,6 @@ class SQLiteMemoryRepository:
             ).fetchone()
         return MemoryEvaluation.model_validate_json(row["payload_json"]) if row else None
 
-    def migrate_jsonl(self, path: str | Path) -> int:
-        source = Path(path)
-        if not source.exists():
-            return 0
-        imported = 0
-        for line_number, line in enumerate(
-            source.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if not line.strip():
-                continue
-            try:
-                memory = DistilledMemory.model_validate_json(line)
-            except Exception as exc:
-                raise ValueError(f"invalid memory JSONL at line {line_number}: {exc}") from exc
-            before = self.get(memory.memory_id or memory_fingerprint(memory))
-            self.upsert(memory, actor="migration", reason=f"migrate:{source.name}")
-            if before is None:
-                imported += 1
-        return imported
-
-    def export_jsonl(
-        self,
-        path: str | Path,
-        *,
-        statuses: Iterable[MemoryStatus | str] | None = None,
-    ) -> Path:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        memories = self.list(statuses=statuses, include_expired=True)
-        content = "".join(
-            json.dumps(memory.model_dump(mode="json"), sort_keys=True) + "\n"
-            for memory in memories
-        )
-        target.write_text(content, encoding="utf-8")
-        return target
-
     def counts_by_status(self) -> dict[str, int]:
         counts = {status.value: 0 for status in MemoryStatus}
         with self._connection() as connection:
@@ -575,7 +535,7 @@ class SQLiteMemoryRepository:
 
 
 def memory_fingerprint(memory: DistilledMemory) -> str:
-    """Stable ID used for legacy migration and exact candidate deduplication."""
+    """Stable ID used for exact candidate deduplication."""
 
     identity = {
         "memory_type": memory.memory_type.value,

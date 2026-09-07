@@ -30,7 +30,7 @@ def _memory(memory_id: str, lesson: str, **updates) -> DistilledMemory:
 
 
 def test_retrieval_session_returns_approved_and_hides_paired_shadow(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
     approved = store.repository.upsert(_memory("approved-aapl", "Wait for support confirmation."))
     shadow = store.repository.upsert(
         _memory(
@@ -58,7 +58,7 @@ def test_retrieval_session_returns_approved_and_hides_paired_shadow(tmp_path):
 
 
 def test_retrieval_session_caps_optional_tool_calls_and_validates_citations(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
     approved = store.repository.upsert(_memory("approved-aapl", "Wait for support confirmation."))
     session = MemoryRetrievalSession(
         store,
@@ -81,7 +81,7 @@ def test_retrieval_session_caps_optional_tool_calls_and_validates_citations(tmp_
 
 
 def test_retrieval_session_caps_combined_prompt_context_to_six(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
     for index in range(3):
         store.repository.upsert(
             _memory(f"alpha-{index}", f"Alpha setup lesson {index}.")
@@ -113,7 +113,7 @@ def test_retrieval_session_caps_combined_prompt_context_to_six(tmp_path):
 
 
 def test_scored_retrieval_enforces_scope_and_minimum_relevance(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
     matching = store.repository.upsert(_memory("matching", "AAPL support retest."))
     store.repository.upsert(
         _memory(

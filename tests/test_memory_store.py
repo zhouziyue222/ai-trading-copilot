@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from ai_trading_copilot.copilot.domain import DistilledMemory, MemoryType
+from ai_trading_copilot.copilot.domain import DistilledMemory, MemoryStatus, MemoryType
 from ai_trading_copilot.copilot.services import DistilledMemoryStore, LocalVectorMemoryIndex
 
 
@@ -27,28 +27,37 @@ def _memory(lesson: str, symbol="AAPL", tags=None):
     )
 
 
-def test_memory_store_loads_empty_when_file_missing(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+def _save_approved(store, memory):
+    return store.repository.upsert(
+        memory.model_copy(update={"status": MemoryStatus.APPROVED}),
+        actor="test",
+        reason="approved_fixture",
+    )
+
+
+def test_memory_store_loads_empty_when_database_missing(tmp_path):
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
 
     assert store.load() == []
 
 
-def test_memory_store_appends_jsonl_entries(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
+def test_memory_store_appends_candidates_without_jsonl(tmp_path):
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
 
     store.append(_memory("20-day average pullback worked better than chasing."))
     store.append(_memory("Avoid entries far above support.", symbol="SPY"))
 
-    loaded = store.load()
+    loaded = store.list_all(statuses=[MemoryStatus.CANDIDATE])
     assert len(loaded) == 2
     assert loaded[0].symbols == ["AAPL"]
     assert loaded[1].symbols == ["SPY"]
+    assert not (tmp_path / "memory.jsonl").exists()
 
 
 def test_memory_retrieval_prioritizes_symbol_matches(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
-    store.append(_memory("AAPL lesson.", symbol="AAPL"))
-    store.append(_memory("SPY lesson.", symbol="SPY"))
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    _save_approved(store, _memory("AAPL lesson.", symbol="AAPL"))
+    _save_approved(store, _memory("SPY lesson.", symbol="SPY"))
 
     retrieved = store.retrieve(symbol="spy")
 
@@ -56,9 +65,9 @@ def test_memory_retrieval_prioritizes_symbol_matches(tmp_path):
 
 
 def test_memory_retrieval_uses_tags_as_secondary_signal(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
-    store.append(_memory("Generic pullback lesson.", symbol="AAPL", tags=["pullback"]))
-    store.append(_memory("False breakout lesson.", symbol="MSFT", tags=["breakout"]))
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    _save_approved(store, _memory("Generic pullback lesson.", symbol="AAPL", tags=["pullback"]))
+    _save_approved(store, _memory("False breakout lesson.", symbol="MSFT", tags=["breakout"]))
 
     retrieved = store.retrieve(tags=["breakout"])
 
@@ -66,9 +75,9 @@ def test_memory_retrieval_uses_tags_as_secondary_signal(tmp_path):
 
 
 def test_memory_retrieval_uses_query_terms(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
-    store.append(_memory("Support held after earnings gap.", symbol="AAPL"))
-    store.append(_memory("Avoid chasing extended breakouts.", symbol="MSFT"))
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    _save_approved(store, _memory("Support held after earnings gap.", symbol="AAPL"))
+    _save_approved(store, _memory("Avoid chasing extended breakouts.", symbol="MSFT"))
 
     retrieved = store.retrieve(query="chasing breakout")
 
@@ -76,9 +85,9 @@ def test_memory_retrieval_uses_query_terms(tmp_path):
 
 
 def test_memory_retrieval_prioritizes_tags_over_query_terms(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
-    store.append(_memory("Generic setup with breakout word.", symbol="AAPL", tags=["pullback"]))
-    store.append(_memory("Tagged risk memory.", symbol="MSFT", tags=["breakout"]))
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    _save_approved(store, _memory("Generic setup with breakout word.", symbol="AAPL", tags=["pullback"]))
+    _save_approved(store, _memory("Tagged risk memory.", symbol="MSFT", tags=["breakout"]))
 
     retrieved = store.retrieve(tags=["breakout"], query="breakout")
 
@@ -86,9 +95,9 @@ def test_memory_retrieval_prioritizes_tags_over_query_terms(tmp_path):
 
 
 def test_memory_retrieval_caps_context_to_default_limit(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl", default_limit=5)
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3", default_limit=5)
     for i in range(7):
-        store.append(_memory(f"Lesson {i}.", symbol="AAPL"))
+        _save_approved(store, _memory(f"Lesson {i}.", symbol="AAPL"))
 
     retrieved = store.retrieve(symbol="AAPL", limit=7)
 
@@ -106,8 +115,9 @@ def test_memory_rejects_full_report_sized_lessons():
 
 
 def test_memory_loads_optional_rag_metadata(tmp_path):
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl")
-    store.append(
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    _save_approved(
+        store,
         DistilledMemory(
             memory_type=MemoryType.USER_BEHAVIOR,
             lesson="User prefers waiting for support confirmation.",
@@ -129,14 +139,15 @@ def test_memory_loads_optional_rag_metadata(tmp_path):
     assert loaded.confidence == 0.8
 
 
-def test_vector_memory_index_persists_sidecar_on_append(tmp_path):
+def test_vector_memory_index_persists_sidecar_on_retrieval(tmp_path):
     vector_path = tmp_path / "memory.vectors.json"
     store = DistilledMemoryStore(
-        tmp_path / "memory.jsonl",
+        tmp_path / "memory.sqlite3",
         vector_index=LocalVectorMemoryIndex(vector_path),
     )
 
-    store.append(_memory("Wait for support confirmation before adding size."))
+    _save_approved(store, _memory("Wait for support confirmation before adding size."))
+    store.retrieve(symbol="AAPL")
 
     assert vector_path.exists()
     assert "local_hashing_text_embedder" in vector_path.read_text(encoding="utf-8")
@@ -144,14 +155,15 @@ def test_vector_memory_index_persists_sidecar_on_append(tmp_path):
 
 def test_vector_memory_retrieval_uses_injected_embedding_similarity(tmp_path):
     store = DistilledMemoryStore(
-        tmp_path / "memory.jsonl",
+        tmp_path / "memory.sqlite3",
         vector_index=LocalVectorMemoryIndex(
             tmp_path / "memory.vectors.json",
             embedder=SemanticTestEmbedder(),
         ),
     )
-    store.append(_memory("Confirm a support retest before adding size.", symbol="AAPL"))
-    store.append(
+    _save_approved(store, _memory("Confirm a support retest before adding size.", symbol="AAPL"))
+    _save_approved(
+        store,
         _memory(
             "Avoid initiating positions before earnings.",
             symbol="MSFT",

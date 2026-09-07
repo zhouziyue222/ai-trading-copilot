@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Evaluation suites for agent workflow quality and RAG retrieval performance."""
 
 from __future__ import annotations
@@ -445,50 +446,6 @@ class RagEvalCase:
     relevant_count: int = 1
 
 
-DEFAULT_RAG_EVAL_CASES: tuple[RagEvalCase, ...] = (
-    RagEvalCase(
-        name="micron_hbm_supply",
-        user_input="MU calendar 2026 memory supply booked HBM4",
-        symbol="MU",
-        tags=("hbm", "memory"),
-        reference="Micron AI memory demand was described as outstripping supply through 2026, with calendar-2026 HBM supply sold out.",
-        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
-    ),
-    RagEvalCase(
-        name="samsung_hbm4e_samples",
-        user_input="faster sample shipments for Samsung advanced memory",
-        symbol="005930.KS",
-        tags=("hbm",),
-        reference="Samsung reportedly began shipping 12-layer HBM4E samples to major global customers in late May 2026.",
-        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
-    ),
-    RagEvalCase(
-        name="sk_hynix_capacity_risk",
-        user_input="capacity expansion future oversupply for SK Hynix",
-        symbol="000660.KS",
-        tags=("hbm", "risk"),
-        reference="SK Hynix planned to double wafer capacity over five years, creating future oversupply risk context.",
-        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
-    ),
-    RagEvalCase(
-        name="broadcom_custom_ai",
-        user_input="AVGO non GPU accelerator memory demand networking",
-        symbol="AVGO",
-        tags=("ai_chips",),
-        reference="Broadcom custom AI accelerators and AI networking are read-throughs for advanced memory demand.",
-        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
-    ),
-    RagEvalCase(
-        name="memory_drawdown_risk",
-        user_input="memory stocks drawdown valuation after rally",
-        symbol="MU",
-        tags=("risk", "memory"),
-        reference="Memory stocks were under pressure from geopolitical tension, profit-taking, demand questions, and valuation pressure.",
-        reference_source_substrings=("semiconductor_hbm_yfinance_2026-07-18.md",),
-    ),
-)
-
-
 RagSearcher = Callable[..., Sequence[RagDocument]]
 
 
@@ -586,15 +543,16 @@ class RagEvaluator:
         self,
         store: ChromaRagStore,
         *,
-        cases: Sequence[RagEvalCase] = DEFAULT_RAG_EVAL_CASES,
+        cases: Sequence[RagEvalCase] | None = None,
         top_k: int = 5,
         backend: str = "ragas",
         answer_quality: str = "auto",
     ) -> EvaluationReport:
+        resolved_cases = cases if cases is not None else DEFAULT_RAG_EVAL_CASES
         baseline = self.evaluate_system(
             system_name="pre_optimization_keyword_index",
             searcher=store.search_keyword_baseline,
-            cases=cases,
+            cases=resolved_cases,
             top_k=top_k,
             backend=backend,
             answer_quality="off",
@@ -602,7 +560,7 @@ class RagEvaluator:
         optimized = self.evaluate_system(
             system_name="optimized_hybrid_index",
             searcher=store.search,
-            cases=cases,
+            cases=resolved_cases,
             top_k=top_k,
             backend=backend,
             answer_quality=answer_quality,
@@ -648,7 +606,7 @@ class RagEvaluator:
                     "deltas": deltas,
                 },
                 "top_k": top_k,
-                "case_count": len(cases),
+                "case_count": len(resolved_cases),
                 "backend": backend,
                 "answer_quality": answer_quality,
             },
@@ -824,7 +782,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 def _run_rag_compare_subprocess(args: argparse.Namespace) -> EvaluationReport:
     command = [
-        sys.executable,
+        sys.executable, "-X", "utf8",
         "-m",
         "ai_trading_copilot.copilot.evaluation",
         "_rag-compare-worker",
@@ -848,6 +806,8 @@ def _run_rag_compare_subprocess(args: argparse.Namespace) -> EvaluationReport:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             timeout=DEFAULT_RAG_COMPARE_TIMEOUT_SECONDS,
             check=False,
         )
@@ -1993,6 +1953,9 @@ def _load_rag_cases(path: str | Path) -> tuple[RagEvalCase, ...]:
     return tuple(cases)
 
 
+DEFAULT_RAG_EVAL_CASES = _load_rag_cases(DEFAULT_RAG_EVAL_CASES_FILE)
+
+
 def _emit_report(
     report: EvaluationReport,
     *,
@@ -2031,9 +1994,9 @@ __all__ = [
     "AgentEvaluator",
     "AnalystEvalExpectation",
     "AnalystEvaluator",
+    "DEFAULT_RAG_EVAL_CASES",
     "EvaluationMetric",
     "EvaluationReport",
-    "DEFAULT_RAG_EVAL_CASES",
     "RagEvalCase",
     "RagEvaluator",
     "run_analyst_smoke_evaluation",

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from ai_trading_copilot.copilot.domain import (
@@ -32,20 +30,15 @@ def _memory(lesson: str = "Wait for support confirmation.", **updates) -> Distil
     return DistilledMemory(**values)
 
 
-def test_legacy_jsonl_migrates_as_approved(tmp_path):
-    legacy = DistilledMemory(
-        memory_type=MemoryType.SYMBOL_CHARACTERISTIC,
-        lesson="AAPL often retests support.",
-        symbols=["AAPL"],
-    )
-    path = tmp_path / "memory.jsonl"
-    path.write_text(json.dumps(legacy.model_dump(mode="json")) + "\n", encoding="utf-8")
+def test_store_uses_sqlite_without_creating_jsonl(tmp_path):
+    database = tmp_path / "memory.sqlite3"
+    store = DistilledMemoryStore(database)
 
-    store = DistilledMemoryStore(path)
+    saved = store.save_candidate(_memory())
 
-    assert len(store.load()) == 1
-    assert store.load()[0].status == MemoryStatus.APPROVED
-    assert store.load()[0].memory_id.startswith("mem_")
+    assert database.exists()
+    assert saved.status == MemoryStatus.CANDIDATE
+    assert not (tmp_path / "memory.jsonl").exists()
 
 
 def test_repository_keeps_versions_and_rolls_back_by_creating_a_new_version(tmp_path):
@@ -72,7 +65,7 @@ def test_repository_keeps_versions_and_rolls_back_by_creating_a_new_version(tmp_
 
 def test_production_retrieval_excludes_candidate_shadow_and_expired(tmp_path):
     repository = SQLiteMemoryRepository(tmp_path / "memory.sqlite3")
-    store = DistilledMemoryStore(tmp_path / "memory.jsonl", repository=repository)
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3", repository=repository)
     approved = repository.upsert(_memory(status=MemoryStatus.APPROVED))
     repository.upsert(_memory("candidate", status=MemoryStatus.CANDIDATE))
     repository.upsert(_memory("shadow", status=MemoryStatus.SHADOW))

@@ -12,8 +12,8 @@ from ai_trading_copilot.copilot.ui.app import UISettings, create_app
 
 
 def test_memory_review_api_stages_and_evaluates_candidate(tmp_path):
-    memory_file = tmp_path / "memory.jsonl"
-    store = DistilledMemoryStore(memory_file)
+    memory_database = tmp_path / "memory.sqlite3"
+    store = DistilledMemoryStore(memory_database)
     candidate = store.save_candidate(
         DistilledMemory(
             memory_type=MemoryType.STRATEGY_PERFORMANCE,
@@ -27,7 +27,7 @@ def test_memory_review_api_stages_and_evaluates_candidate(tmp_path):
         create_app(
             UISettings(
                 subscriptions_file=tmp_path / "subscriptions.json",
-                memory_file=memory_file,
+                memory_database=memory_database,
                 reports_dir=tmp_path / "reports",
                 run_in_background=False,
             )
@@ -55,7 +55,7 @@ def test_memory_outcome_api_is_idempotent(tmp_path):
         create_app(
             UISettings(
                 subscriptions_file=tmp_path / "subscriptions.json",
-                memory_file=tmp_path / "memory.jsonl",
+                memory_database=tmp_path / "memory.sqlite3",
                 reports_dir=tmp_path / "reports",
                 run_in_background=False,
             )
@@ -77,3 +77,18 @@ def test_memory_outcome_api_is_idempotent(tmp_path):
     assert second.status_code == 200
     assert second.json()["outcome"]["symbol"] == "AAPL"
     assert second.json()["outcome"]["realized_return"] == 0.04
+
+
+def test_memory_jsonl_export_endpoint_is_removed(tmp_path):
+    client = TestClient(
+        create_app(
+            UISettings(
+                subscriptions_file=tmp_path / "subscriptions.json",
+                memory_database=tmp_path / "memory.sqlite3",
+                reports_dir=tmp_path / "reports",
+                run_in_background=False,
+            )
+        )
+    )
+
+    assert client.post("/api/memories/export").status_code == 405

@@ -191,7 +191,7 @@ def client(tmp_path):
     app = create_app(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
             graph_cls=FakeGraph,
             run_in_background=False,
@@ -206,7 +206,7 @@ def _order_client(tmp_path, graph_cls=PendingOrderGraph, broker=None):
     app = create_app(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
             graph_cls=graph_cls,
             run_in_background=False,
@@ -221,7 +221,7 @@ def _portfolio_client(tmp_path, portfolio_getter, *, timeout_seconds=5.0):
     app = create_app(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
             graph_cls=FakeGraph,
             run_in_background=False,
@@ -311,6 +311,35 @@ def test_create_run_constructs_graph_params_and_status(client):
     assert FakeGraph.memory_agents[0].retrieve_context(symbol="AAPL") == []
 
 
+def test_web_run_can_disable_long_term_memory(client):
+    response = client.post(
+        "/api/runs",
+        json={"manual_symbols": "AAPL", "long_term_memory_enabled": False},
+    )
+
+    assert response.status_code == 200
+    assert FakeGraph.memory_agents[-1] is None
+
+
+def test_runtime_config_reports_environment_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("COPILOT_LONG_TERM_MEMORY_ENABLED", "false")
+    app = create_app(
+        UISettings(
+            subscriptions_file=tmp_path / "config" / "subscriptions.json",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
+            reports_dir=tmp_path / "reports",
+            graph_cls=FakeGraph,
+            run_in_background=False,
+            fundamental_retriever_factory=lambda settings, auto_ingest_seed: FakeFundamentalRetriever(),
+        )
+    )
+
+    response = TestClient(app).get("/api/runtime-config")
+
+    assert response.status_code == 200
+    assert response.json()["long_term_memory_enabled"] is False
+
+
 def test_get_run_returns_status(client):
     created = client.post("/api/runs", json={"manual_symbols": "AAPL"}).json()
 
@@ -335,7 +364,7 @@ def test_cancel_running_background_run_finishes_as_cancelled(tmp_path):
     app = create_app(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
             graph_cls=CancellableGraph,
             run_in_background=True,
@@ -364,11 +393,11 @@ def test_cancel_running_background_run_finishes_as_cancelled(tmp_path):
     assert final_status["reports"]["run_audit"]["exists"] is True
 
 
-def test_cancel_file_only_running_run_marks_cancel_requested(tmp_path):
+def test_cancel_file_only_running_run_rejects_missing_worker(tmp_path):
     app = create_app(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
             run_in_background=False,
             fundamental_retriever_factory=lambda settings, auto_ingest_seed: FakeFundamentalRetriever(),
@@ -394,11 +423,10 @@ def test_cancel_file_only_running_run_marks_cancel_requested(tmp_path):
 
     response = client.post("/api/runs/run_file_only/cancel")
 
-    assert response.status_code == 200
-    status = response.json()["status"]
+    assert response.status_code == 409
+    status = json.loads((run_dir / "run_status.json").read_text(encoding="utf-8"))
     assert status["status"] == "running"
-    assert status["cancel_requested"] is True
-    assert status["cancel_requested_at"]
+    assert status["cancel_requested"] is False
 
 
 def test_cancel_run_rejects_unsafe_run_id(client):
@@ -541,7 +569,7 @@ def test_rag_status_endpoint_reports_missing_embedding_key(tmp_path, monkeypatch
     app = create_app(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
             run_in_background=False,
         )
@@ -575,7 +603,7 @@ def test_rag_status_probe_uses_utf8_env_and_longer_timeout(tmp_path, monkeypatch
     payload = ui_app._probe_rag_status_subprocess(
         UISettings(
             subscriptions_file=tmp_path / "config" / "subscriptions.json",
-            memory_file=tmp_path / "config" / "memory.jsonl",
+            memory_database=tmp_path / "config" / "memory.sqlite3",
             reports_dir=tmp_path / "reports",
             rag_chroma_dir=tmp_path / "config" / "rag_chroma",
         )
@@ -585,6 +613,9 @@ def test_rag_status_probe_uses_utf8_env_and_longer_timeout(tmp_path, monkeypatch
     assert payload["document_count"] == 7
     assert captured["timeout"] == 30.0
     assert captured["env"]["PYTHONUTF8"] == "1"
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "strict"
 
 
 def test_rag_ingest_text_endpoint_returns_ingest_result(client):

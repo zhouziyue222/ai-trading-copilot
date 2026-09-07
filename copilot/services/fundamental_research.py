@@ -98,9 +98,5 @@ class FundamentalResearchRetriever:
         )
         return {"added": result.added, "skipped": result.skipped, "errors": result.errors}
 
-    def ingest_online_stock_research(self, **kwargs) -> dict:
-        return self.ingest_online_fundamental_research(**kwargs)
-
-
 def create_fundamental_research_retriever(path: str | Path) -> FundamentalResearchRetriever:
     return FundamentalResearchRetriever(FundamentalRagStore(path))

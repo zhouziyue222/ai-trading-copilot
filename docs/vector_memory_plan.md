@@ -5,12 +5,13 @@
 Add a retrieval layer that lets the fundamental analyst reuse company
 fundamental documents instead of relying only on the latest run inputs. The
 default backend is OpenAI-compatible embeddings plus a persistent local Chroma
-database. Distilled post-trade lessons remain in JSONL memory and are not
-synced into the vector database.
+database. Distilled post-trade lessons remain in the versioned SQLite memory
+repository and use a separate rebuildable local vector side index.
 
 ## Current Implementation
 
-- Historical lesson source: `config/memory.jsonl`
+- Historical lesson source: `config/memory.sqlite3`
+- Historical lesson vector sidecar: `config/memory.vectors.json`
 - Seed fundamental documents: `knowledge/fundamentals/`
 - Vector database: Chroma at `config/rag_chroma`
 - Runtime service: `copilot.services.FundamentalRagStore`
@@ -20,14 +21,14 @@ synced into the vector database.
 
 Only the fundamental analyst retrieves Chroma RAG context. News sentiment and
 technical position prompts use live tools and deterministic analysis, while
-post-trade lessons continue through JSONL memory retrieval.
+post-trade lessons continue through the bounded SQLite/local-vector memory layer.
 Retrieval is hybrid: embedding vector recall and BM25 keyword recall run as
 separate child-chunk recall channels, RRF merges the ranked lists, rerank orders
 the fused candidates, and results are aggregated back to parent context.
 
 ## Data Model
 
-Historical memory remains compact JSONL:
+Historical memory remains a compact structured `DistilledMemory` record:
 
 - `memory_type`: user behavior, strategy performance, or symbol characteristic
 - `lesson`: distilled text, capped at 500 characters
@@ -45,11 +46,12 @@ Chroma stores child `RagDocument` chunks from fundamental sources only:
   fiscal/source fields, `embedding_model`, and content hash
 
 Chroma is a rebuildable index. Fundamental source files and online fundamental
-fetches are durable inputs. JSONL memories are separate durable inputs.
+fetches are durable inputs. The SQLite memory repository is the separate durable
+input for historical lessons; its local vector sidecar can be rebuilt.
 
 ## Retrieval Flow
 
-1. Load distilled memories from JSONL for history-aware downstream decisions.
+1. Load approved distilled memories from SQLite for history-aware downstream decisions.
 2. In the fundamental analyst node, build a base query from symbol, tags, and
    analyst query text.
 3. Ask the available LLM to rewrite the query into JSON fields:

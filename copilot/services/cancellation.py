@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Cooperative cancellation primitives for UI runs and tool calls."""
 
 from __future__ import annotations
@@ -7,12 +8,18 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from threading import RLock
 from typing import Any, Callable, Iterator
 
 
 class RunCancelled(Exception):
-    """Raised when a run should stop and discard the current result."""
+    """Stop executing; the run owner decides whether to save or discard."""
+
+
+class StopReason(str, Enum):
+    USER_CANCEL = "user_cancel"
+    SERVER_SHUTDOWN = "server_shutdown"
 
 
 CancellationChecker = Callable[[], bool]
@@ -79,7 +86,11 @@ class CancellationManager:
             ]
         cancelled_ids = []
         for execution in executions:
-            execution.request_cancel()
+            try:
+                execution.request_cancel()
+            except Exception:
+                # A broken tool callback must not prevent other tools stopping.
+                pass
             cancelled_ids.append(execution.execution_id)
         return cancelled_ids
 

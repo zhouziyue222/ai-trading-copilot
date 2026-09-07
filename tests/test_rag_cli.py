@@ -23,8 +23,6 @@ def test_print_json_falls_back_to_ascii_when_console_rejects_unicode(monkeypatch
 def test_rag_cli_status_outputs_json(tmp_path, capsys):
     result = rag.main(
         [
-            "--memory-file",
-            str(tmp_path / "memory.jsonl"),
             "--chroma-dir",
             str(tmp_path / "rag_chroma"),
             "status",

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """FastAPI application for the local AI trading copilot dashboard."""
 
 from __future__ import annotations
@@ -5,19 +6,24 @@ from __future__ import annotations
 import json
 import os
 import re
-import inspect
 import socket
 import subprocess
 import sys
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from copy import deepcopy
+from functools import wraps
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Event, Lock, Thread
+from threading import Thread
 from typing import Callable, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -47,19 +53,28 @@ from ai_trading_copilot.copilot.domain.models import (
 from ai_trading_copilot.copilot.graph import CopilotLangGraph, RunCancelled
 from ai_trading_copilot.copilot.run import (
     DEFAULT_ANALYSTS,
-    DEFAULT_MEMORY_FILE,
+    DEFAULT_MEMORY_DATABASE,
     DEFAULT_SUBSCRIPTIONS_FILE,
+    accepts_keyword,
     create_default_fundamental_research_retriever,
     create_default_memory_agent,
+    resolve_long_term_memory_enabled,
 )
 from ai_trading_copilot.copilot.services.run_tracker import (
     NODE_CANCELLED,
     NODE_FAILED,
     NODE_SUCCEEDED,
     RunTracker,
+    write_json_atomic,
 )
-from ai_trading_copilot.copilot.services.cancellation import GLOBAL_CANCELLATION_MANAGER
-from ai_trading_copilot.copilot.services.rag_store import DEFAULT_COLLECTION_NAME
+from ai_trading_copilot.copilot.services.run_lifecycle import (
+    RunControl, RunLifecycle, checked_path, remove_owned,
+    safe_id,
+)
+from ai_trading_copilot.copilot.services.rag_store import (
+    DEFAULT_CHROMA_DIR,
+    DEFAULT_COLLECTION_NAME,
+)
 from ai_trading_copilot.copilot.services.tracing import get_observability_status
 from ai_trading_copilot.copilot.services.subscription_service import SubscriptionStore
 
@@ -70,7 +85,7 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 @dataclass(frozen=True)
 class UISettings:
     subscriptions_file: Path = DEFAULT_SUBSCRIPTIONS_FILE
-    memory_file: Path = DEFAULT_MEMORY_FILE
+    memory_database: Path = DEFAULT_MEMORY_DATABASE
     rag_chroma_dir: Optional[Path] = None
     reports_dir: Path = DEFAULT_REPORT_OUTPUT_DIR
     graph_cls: type = CopilotLangGraph
@@ -80,15 +95,11 @@ class UISettings:
     simulated_broker_factory: Optional[Callable[[], object]] = None
     portfolio_snapshot_getter: Optional[Callable[[ExecutionMode], object]] = None
     portfolio_snapshot_timeout_seconds: float = 5.0
+    long_term_memory_enabled: Optional[bool] = None
 
 
-@dataclass
-class RunControl:
-    run_id: str
-    output_dir: Path
-    tracker: RunTracker
-    cancel_event: Event
-    thread: Thread | None = None
+class UTF8JSONResponse(JSONResponse):
+    media_type = "application/json; charset=utf-8"
 
 
 class SubscriptionCreateRequest(BaseModel):
@@ -114,6 +125,7 @@ class RunCreateRequest(BaseModel):
     trade_date: Optional[str] = None
     look_back_days: int = Field(default=90, ge=1, le=1000)
     portfolio_mode: ExecutionMode = ExecutionMode.SIMULATION
+    long_term_memory_enabled: Optional[bool] = None
 
 
 class RagTextIngestRequest(BaseModel):
@@ -144,13 +156,78 @@ class MemoryRollbackRequest(BaseModel):
 
 
 def create_app(settings: UISettings | None = None) -> FastAPI:
-    resolved = settings or UISettings()
+    resolved = settings or UISettings(reports_dir=Path(os.getenv("COPILOT_UI_REPORTS_DIR") or DEFAULT_REPORT_OUTPUT_DIR))
     static_dir = Path(__file__).resolve().parent / "static"
-    app = FastAPI(title="AI Trading Copilot UI")
+    runtime = RunLifecycle(resolved.reports_dir)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        runtime.start()
+        try:
+            yield
+        finally:
+            runtime.shutdown()
+
+    app = FastAPI(title="AI Trading Copilot UI", lifespan=lifespan,
+                  default_response_class=UTF8JSONResponse)
     app.state.ui_settings = resolved
-    app.state.run_controls = {}
-    app.state.run_controls_lock = Lock()
+    app.state.runtime = runtime
+    app.state.run_controls = runtime.controls
+    app.state.run_controls_lock = runtime.lock
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request, exc):
+        return UTF8JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        return UTF8JSONResponse({"detail": jsonable_encoder(exc.errors())}, status_code=422)
+
+    @app.exception_handler(Exception)
+    async def internal_error(request, exc):
+        return UTF8JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
+    def run_dir_for(run_id: str) -> Path:
+        try:
+            return runtime.locate(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def locked_run_io(function):
+        @wraps(function)
+        def wrapper(*args, **kwargs):
+            with runtime.lock:
+                return function(*args, **kwargs)
+        return wrapper
+
+    def run_response(run_id: str) -> dict:
+        with runtime.lock:
+            directory = run_dir_for(run_id)
+            control = runtime.controls.get(run_id)
+            if control is not None:
+                with control.tracker._lock:
+                    status = deepcopy(control.tracker.status)
+                payload = {"run_id": run_id, "output_dir": str(directory), "status": status,
+                           "reports": status.get("reports", {}), "errors": status.get("errors", [])}
+            else:
+                payload = _run_response(run_id, directory)
+            if not payload["status"]:
+                raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+            if payload["status"].get("status") == "running" and run_id not in runtime.controls:
+                payload["status"]["status"] = "interrupted"
+                payload["status"]["cancel_requested"] = False
+            if payload["status"].get("status") == "cancelled":
+                checkpoint_id = payload["status"].get("checkpoint_id") or ""
+                payload["status"]["resumable"] = bool(
+                    safe_id(checkpoint_id) and
+                    checked_path(runtime.root, runtime.checkpoints_dir / f"{checkpoint_id}.json").is_file())
+            payload["session_id"] = runtime.session_id
+            return payload
+
+    @app.get("/api/runtime")
+    def get_runtime() -> dict:
+        return runtime.runtime_status()
 
     @app.get("/")
     def index() -> FileResponse:
@@ -228,13 +305,21 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
     def observability_status() -> dict:
         return get_observability_status()
 
+    @app.get("/api/runtime-config")
+    def runtime_config() -> dict:
+        return {
+            "long_term_memory_enabled": resolve_long_term_memory_enabled(
+                resolved.long_term_memory_enabled
+            )
+        }
+
     @app.get("/api/memories")
     def list_memories(status: Optional[MemoryStatus] = None, symbol: str | None = None) -> dict:
         agent = _memory_agent(resolved, auto_ingest_seed=False)
         statuses = [status] if status is not None else None
         items = agent.list_memories(statuses=statuses, symbol=symbol)
         return {
-            "database_path": str(resolved.memory_file.with_suffix(".sqlite3")),
+            "database_path": str(resolved.memory_database),
             "counts": agent.store.repository.counts_by_status(),
             "items": [item.model_dump(mode="json") for item in items],
         }
@@ -274,7 +359,6 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
                     actor=request.actor,
                     reason=request.reason,
                 )
-            agent.store.repository.export_jsonl(resolved.memory_file)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (ValueError, PermissionError) as exc:
@@ -304,7 +388,6 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
                 actor=request.actor,
                 reason=request.reason,
             )
-            agent.store.repository.export_jsonl(resolved.memory_file)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"item": memory.model_dump(mode="json")}
@@ -314,12 +397,6 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
         agent = _memory_agent(resolved, auto_ingest_seed=False)
         saved = agent.record_outcome(outcome)
         return {"outcome": saved.model_dump(mode="json")}
-
-    @app.post("/api/memories/export")
-    def export_memories() -> dict:
-        agent = _memory_agent(resolved, auto_ingest_seed=False)
-        path = agent.store.repository.export_jsonl(resolved.memory_file)
-        return {"path": str(path), "counts": agent.store.repository.counts_by_status()}
 
     @app.post("/api/rag/ingest-defaults")
     def rag_ingest_defaults() -> dict:
@@ -389,8 +466,7 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             "error": None,
         }
 
-    @app.post("/api/runs")
-    def create_run(request: RunCreateRequest) -> dict:
+    def launch_run(request: RunCreateRequest, checkpoint: dict | None = None) -> dict:
         if request.portfolio_mode not in {
             ExecutionMode.SIMULATION,
             ExecutionMode.LIVE,
@@ -400,8 +476,12 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
         if not symbols:
             raise HTTPException(status_code=400, detail="At least one symbol is required.")
 
-        run_id = _new_ui_run_id(resolved.reports_dir)
-        output_dir = resolved.reports_dir / run_id
+        run_id, output_dir = runtime.new_run_dir()
+        long_term_memory_enabled = resolve_long_term_memory_enabled(
+            request.long_term_memory_enabled
+            if request.long_term_memory_enabled is not None
+            else resolved.long_term_memory_enabled
+        )
         params = {
             "subscription_symbols": symbols,
             "selected_analysts": request.selected_analysts,
@@ -422,6 +502,7 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             "execution_mode_default": ExecutionMode.SIMULATION.value,
             "portfolio_mode_default": ExecutionMode.SIMULATION.value,
             "look_back_days_default": 90,
+            "long_term_memory_enabled": long_term_memory_enabled,
         }
         tracker = resolved.tracker_cls(
             output_dir=output_dir,
@@ -431,46 +512,79 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             defaults=defaults,
             nodes=resolved.graph_cls.NODE_ORDER,
         )
-        cancel_event = Event()
-
-        if resolved.run_in_background:
-            thread = Thread(
+        control = RunControl(run_id=run_id, output_dir=output_dir, tracker=tracker, params=params)
+        try:
+            if checkpoint is not None:
+                runtime.consume(checkpoint["checkpoint_id"], control, checkpoint)
+            runtime.controls[run_id] = control
+            job_args = (resolved.graph_cls, control, runtime, resolved.memory_database,
+                        resolved.rag_chroma_dir, long_term_memory_enabled)
+            if resolved.run_in_background:
+                thread = Thread(
                 target=_run_copilot_job,
-                args=(
-                    resolved.graph_cls,
-                    tracker,
-                    params,
-                    resolved.memory_file,
-                    resolved.rag_chroma_dir,
-                    cancel_event,
-                ),
+                args=job_args,
                 name=f"copilot-ui-{run_id}",
                 daemon=True,
-            )
-            control = RunControl(
-                run_id=run_id,
-                output_dir=output_dir,
-                tracker=tracker,
-                cancel_event=cancel_event,
-                thread=thread,
-            )
-            with app.state.run_controls_lock:
-                app.state.run_controls[run_id] = control
-            thread.start()
-        else:
-            _run_copilot_job(
-                resolved.graph_cls,
-                tracker,
-                params,
-                resolved.memory_file,
-                resolved.rag_chroma_dir,
-                cancel_event,
-            )
+                )
+                control.thread = thread
+                thread.start()
+            else:
+                _run_copilot_job(*job_args)
+        except BaseException:
+            runtime.controls.pop(run_id, None)
+            remove_owned(runtime.root, output_dir)
+            raise
+        return run_response(run_id)
 
-        return _run_response(run_id, output_dir)
+    @app.post("/api/runs")
+    def create_run(request: RunCreateRequest) -> dict:
+        with runtime.lock:
+            if runtime.shutting_down.is_set():
+                raise HTTPException(status_code=503, detail="UI service is shutting down.")
+            return launch_run(request)
+
+    @app.get("/api/checkpoints")
+    def list_checkpoints() -> dict:
+        runtime.start()
+        with runtime.lock:
+            return {"items": runtime.list_checkpoints(), "session_id": runtime.session_id}
+
+    @app.post("/api/checkpoints/{checkpoint_id}/resume")
+    def resume_checkpoint(checkpoint_id: str) -> dict:
+        runtime.start()
+        with runtime.lock:
+            if runtime.shutting_down.is_set():
+                raise HTTPException(status_code=503, detail="UI service is shutting down.")
+            try:
+                allowed = list(resolved.graph_cls.NODE_ORDER)
+                optional = getattr(resolved.graph_cls, "NODE_OPPORTUNITY_RADAR", None)
+                if optional:
+                    allowed.append(optional)
+                checkpoint = runtime.read_checkpoint(checkpoint_id, allowed)
+                params = checkpoint["params"]
+                request = RunCreateRequest(
+                    symbols=params["subscription_symbols"], selected_analysts=params["selected_analysts"],
+                    trade_date=params.get("trade_date"), look_back_days=params["look_back_days"],
+                    portfolio_mode=params["portfolio_mode"],
+                    long_term_memory_enabled=checkpoint.get("defaults", {}).get("long_term_memory_enabled", True),
+                )
+                if checkpoint["snapshot"]["state"] is not None and not hasattr(resolved.graph_cls, "resume"):
+                    raise ValueError("This graph does not support checkpoint recovery.")
+                snapshot = checkpoint["snapshot"]
+                if snapshot["state"] is not None:
+                    expected = resolved.graph_cls.checkpoint_node_order(snapshot["state"].get("selected_analysts", []))
+                    if expected != snapshot["node_order"]:
+                        raise ValueError("Checkpoint node order does not match this graph.")
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except (ValueError, KeyError, TypeError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return launch_run(request, checkpoint)
 
     @app.get("/api/runs")
+    @locked_run_io
     def list_runs() -> dict:
+        runtime.start()
         runs = []
         reports_dir = resolved.reports_dir
         if reports_dir.exists():
@@ -481,48 +595,42 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
                 runs.append(
                     {
                         "run_id": path.name,
-                        "status": status.get("status") if status else None,
+                        "status": ("interrupted" if status.get("status") == "running" else status.get("status")) if status else None,
                         "cancel_requested": bool(status.get("cancel_requested")) if status else False,
                         "symbols": status.get("symbols", []) if status else [],
                         "updated_at": status.get("updated_at") if status else None,
                         "path": str(path),
                     }
                 )
+        with runtime.lock:
+            for control in runtime.controls.values():
+                status = control.tracker.status
+                runs.append({"run_id": control.run_id, "status": status["status"],
+                             "cancel_requested": status.get("cancel_requested", False),
+                             "symbols": status["symbols"], "updated_at": status["updated_at"],
+                             "path": str(control.output_dir)})
+        runs = list({run["run_id"]: run for run in runs}.values())
         runs.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
-        return {"items": runs[:50]}
+        return {"items": runs[:50], "session_id": runtime.session_id}
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:
-        run_dir = _safe_run_dir(resolved.reports_dir, run_id)
-        if not run_dir.exists():
-            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
-        return _run_response(run_id, run_dir)
+        return run_response(run_id)
 
     @app.post("/api/runs/{run_id}/cancel")
     def cancel_run(run_id: str) -> dict:
-        run_dir = _safe_run_dir(resolved.reports_dir, run_id)
-        if not run_dir.exists():
-            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
-        with app.state.run_controls_lock:
-            control = app.state.run_controls.get(run_id)
-        if control is not None:
-            if control.tracker.request_cancel():
-                control.cancel_event.set()
-                GLOBAL_CANCELLATION_MANAGER.request_cancel(run_id)
-            return _run_response(run_id, control.output_dir)
-
-        status_path = run_dir / "run_status.json"
-        status = _read_json(status_path)
-        if not status:
-            raise HTTPException(status_code=404, detail=f"Run status not found: {run_id}")
-        if not _is_terminal_run_status(status.get("status")):
-            _request_cancel_status(status)
-            _write_json(status_path, status)
-        return _run_response(run_id, run_dir)
+        run_dir_for(run_id)
+        if runtime.request_user_cancel(run_id):
+            return run_response(run_id)
+        payload = run_response(run_id)
+        if not _is_terminal_run_status(payload["status"].get("status")):
+            raise HTTPException(status_code=409, detail="Run has no active worker.")
+        return payload
 
     @app.get("/api/runs/{run_id}/trace")
+    @locked_run_io
     def get_trace(run_id: str) -> dict:
-        run_dir = _safe_run_dir(resolved.reports_dir, run_id)
+        run_dir = run_dir_for(run_id)
         if not run_dir.exists():
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
         trace_path = run_dir / "trace.json"
@@ -535,13 +643,15 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
 
     @app.post("/api/runs/{run_id}/orders/{symbol}/confirm-simulated")
     def confirm_simulated_order(run_id: str, symbol: str) -> dict:
-        run_dir = _safe_run_dir(resolved.reports_dir, run_id)
+        run_dir = run_dir_for(run_id)
         if not run_dir.exists():
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
         status_path = run_dir / "run_status.json"
         status = _read_json(status_path)
         if not status:
             raise HTTPException(status_code=404, detail=f"Run status not found: {run_id}")
+        if status.get("status") != "succeeded":
+            raise HTTPException(status_code=409, detail="Only completed runs can confirm orders.")
         try:
             order = _confirm_simulated_broker_order(
                 settings=resolved,
@@ -552,17 +662,18 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         status["updated_at"] = datetime.utcnow().isoformat()
-        _write_json(status_path, status)
+        write_json_atomic(status_path, status)
         response = _run_response(run_id, run_dir)
         response["order"] = order
         return response
 
     @app.get("/api/reports/{run_id}/{report_key}", response_class=PlainTextResponse)
+    @locked_run_io
     def get_report(run_id: str, report_key: str) -> PlainTextResponse:
-        run_dir = _safe_run_dir(resolved.reports_dir, run_id)
+        run_dir = run_dir_for(run_id)
         if not _is_safe_id(report_key):
             raise HTTPException(status_code=400, detail="Invalid report key.")
-        status = _read_json(run_dir / "run_status.json")
+        status = run_response(run_id)["status"]
         report = status.get("reports", {}).get(report_key) if status else None
         if not report:
             raise HTTPException(status_code=404, detail=f"Report not found: {report_key}")
@@ -861,7 +972,7 @@ def _missing_rag_embedding_key_status(settings: UISettings) -> dict | None:
     )
     if api_key:
         return None
-    chroma_dir = settings.rag_chroma_dir or settings.memory_file.parent / "rag_chroma"
+    chroma_dir = settings.rag_chroma_dir or DEFAULT_CHROMA_DIR
     return {
         "backend": "fundamental_chroma",
         "available": False,
@@ -879,22 +990,23 @@ def _missing_rag_embedding_key_status(settings: UISettings) -> dict | None:
 
 
 def _probe_rag_status_subprocess(settings: UISettings, timeout_seconds: float = 30.0) -> dict:
-    chroma_dir = settings.rag_chroma_dir or settings.memory_file.parent / "rag_chroma"
-    env = {**os.environ, "PYTHONUTF8": "1"}
+    chroma_dir = settings.rag_chroma_dir or DEFAULT_CHROMA_DIR
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     code = (
         "import json, sys\n"
         "from ai_trading_copilot.copilot.run import create_default_fundamental_research_retriever\n"
-        "memory_file = sys.argv[1]\n"
-        "chroma_dir = sys.argv[2]\n"
-        "retriever = create_default_fundamental_research_retriever(memory_file, rag_chroma_dir=chroma_dir, auto_ingest_seed=False)\n"
+        "chroma_dir = sys.argv[1]\n"
+        "retriever = create_default_fundamental_research_retriever(rag_chroma_dir=chroma_dir, auto_ingest_seed=False)\n"
         "print(json.dumps(retriever.rag_status(probe=True), ensure_ascii=False))\n"
     )
     try:
         result = subprocess.run(
-            [sys.executable, "-c", code, str(settings.memory_file), str(chroma_dir)],
+            [sys.executable, "-X", "utf8", "-c", code, str(chroma_dir)],
             cwd=str(Path(__file__).resolve().parents[2]),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             env=env,
             timeout=timeout_seconds,
         )
@@ -920,7 +1032,7 @@ def _probe_rag_status_subprocess(settings: UISettings, timeout_seconds: float = 
 
 
 def _rag_probe_error_status(settings: UISettings, error: str) -> dict:
-    chroma_dir = settings.rag_chroma_dir or settings.memory_file.parent / "rag_chroma"
+    chroma_dir = settings.rag_chroma_dir or DEFAULT_CHROMA_DIR
     return {
         "backend": "fundamental_chroma",
         "available": False,
@@ -972,76 +1084,76 @@ def _get_portfolio_snapshot_with_timeout(
 
 
 def _memory_agent(settings: UISettings, *, auto_ingest_seed: bool = True):
-    return create_default_memory_agent(
-        settings.memory_file,
-        rag_chroma_dir=settings.rag_chroma_dir or settings.memory_file.parent / "rag_chroma",
-        auto_ingest_seed=auto_ingest_seed,
-    )
+    return create_default_memory_agent(settings.memory_database)
 
 
 def _fundamental_retriever(settings: UISettings, *, auto_ingest_seed: bool = True):
     if settings.fundamental_retriever_factory is not None:
         return settings.fundamental_retriever_factory(settings, auto_ingest_seed)
     return create_default_fundamental_research_retriever(
-        settings.memory_file,
-        rag_chroma_dir=settings.rag_chroma_dir or settings.memory_file.parent / "rag_chroma",
+        rag_chroma_dir=settings.rag_chroma_dir or DEFAULT_CHROMA_DIR,
         auto_ingest_seed=auto_ingest_seed,
     )
 
 
 def _run_copilot_job(
     graph_cls: type,
-    tracker: RunTracker,
-    params: dict,
-    memory_file: Path = DEFAULT_MEMORY_FILE,
+    control: RunControl,
+    runtime: RunLifecycle,
+    memory_database: Path = DEFAULT_MEMORY_DATABASE,
     rag_chroma_dir: Path | None = None,
-    cancel_event: Event | None = None,
+    long_term_memory_enabled: bool = True,
 ) -> None:
+    tracker = control.tracker
     state = None
     error = None
-    cancelled = False
-    cancel_event = cancel_event or Event()
     try:
-        params = dict(params)
+        if control.cancel_event.is_set():
+            raise RunCancelled("Run stopped before initialization.")
+        params = dict(control.params)
         fundamental_rag_retriever = None
         if (
-            _accepts_keyword(graph_cls, "fundamental_rag_retriever")
+            accepts_keyword(graph_cls, "fundamental_rag_retriever")
             and _ui_enable_fundamental_rag()
         ):
             fundamental_rag_retriever = create_default_fundamental_research_retriever(
-                memory_file,
-                rag_chroma_dir=rag_chroma_dir or memory_file.parent / "rag_chroma",
+                rag_chroma_dir=rag_chroma_dir or DEFAULT_CHROMA_DIR,
             )
-        memory_agent = create_default_memory_agent(
-            memory_file,
-            rag_chroma_dir=rag_chroma_dir or memory_file.parent / "rag_chroma",
+        memory_agent = (
+            create_default_memory_agent(memory_database)
+            if long_term_memory_enabled
+            else None
         )
         graph = _create_graph(
             graph_cls,
             run_tracker=tracker,
             memory_agent=memory_agent,
             fundamental_rag_retriever=fundamental_rag_retriever,
-            cancellation_checker=lambda: cancel_event.is_set() or tracker.is_cancel_requested(),
+            cancellation_checker=control.cancel_event.is_set,
+            snapshot_callback=lambda state, order, index: runtime.capture(control, state, order, index),
         )
-        state = graph.run(**params)
-        try:
-            candidates = memory_agent.learn_from_run(state)
-            if candidates:
-                state["memory_candidates"] = candidates
-        except Exception as learning_error:
-            tracker.add_error(f"memory reflection skipped: {learning_error}")
+        if control.cancel_event.is_set():
+            raise RunCancelled("Run stopped before graph execution.")
+        state = graph.resume(control.resume_snapshot) if control.resume_snapshot is not None else graph.run(**params)
+        if memory_agent is not None and not control.cancel_event.is_set():
+            try:
+                candidates = memory_agent.learn_from_run(state)
+                if candidates:
+                    state["memory_candidates"] = candidates
+            except Exception as learning_error:
+                tracker.add_error(f"memory reflection skipped: {learning_error}")
     except RunCancelled as exc:
-        cancelled = True
         error = exc
     except Exception as exc:  # pragma: no cover - covered through API behavior
         error = exc
-        tracker.add_error(str(exc))
+    except BaseException:
+        runtime.request_discard()
+        raise
     finally:
-        if cancelled:
-            tracker.cancel()
-        else:
-            tracker.finish(failed=error is not None)
-        tracker.write_audit(state=state, error=error)
+        try:
+            runtime.finalize(control, state=state, error=error)
+        finally:
+            runtime.unregister(control)
 
 
 def _create_graph(
@@ -1051,36 +1163,28 @@ def _create_graph(
     memory_agent,
     fundamental_rag_retriever=None,
     cancellation_checker: Callable[[], bool] | None = None,
+    snapshot_callback: Callable | None = None,
 ):
     kwargs = {"run_tracker": run_tracker}
-    if _accepts_keyword(graph_cls, "memory_agent"):
+    if accepts_keyword(graph_cls, "memory_agent"):
         kwargs["memory_agent"] = memory_agent
     if (
         fundamental_rag_retriever is not None
-        and _accepts_keyword(graph_cls, "fundamental_rag_retriever")
+        and accepts_keyword(graph_cls, "fundamental_rag_retriever")
     ):
         kwargs["fundamental_rag_retriever"] = fundamental_rag_retriever
-    if _accepts_keyword(graph_cls, "force_sequential"):
+    if accepts_keyword(graph_cls, "force_sequential"):
         kwargs["force_sequential"] = True
-    if cancellation_checker is not None and _accepts_keyword(graph_cls, "cancellation_checker"):
+    if cancellation_checker is not None and accepts_keyword(graph_cls, "cancellation_checker"):
         kwargs["cancellation_checker"] = cancellation_checker
+    if snapshot_callback is not None and accepts_keyword(graph_cls, "snapshot_callback"):
+        kwargs["snapshot_callback"] = snapshot_callback
     return graph_cls(**kwargs)
 
 
 def _ui_enable_fundamental_rag() -> bool:
     value = os.getenv("COPILOT_UI_ENABLE_FUNDAMENTAL_RAG", "").strip().lower()
     return value in {"1", "true", "yes", "on"}
-
-
-def _accepts_keyword(callable_obj, name: str) -> bool:
-    try:
-        signature = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return True
-    return any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
-        for parameter in signature.parameters.values()
-    )
 
 
 def _run_response(run_id: str, output_dir: Path) -> dict:
@@ -1098,37 +1202,14 @@ def _is_terminal_run_status(status: str | None) -> bool:
     return status in {NODE_SUCCEEDED, NODE_FAILED, NODE_CANCELLED}
 
 
-def _request_cancel_status(status: dict) -> None:
-    now = datetime.utcnow().isoformat()
-    status["cancel_requested"] = True
-    status["cancel_requested_at"] = status.get("cancel_requested_at") or now
-    status["updated_at"] = now
-
-
 def _read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8-sig")
         return json.loads(content) if content.strip() else {}
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeError):
         return {}
-
-
-def _write_json(path: Path, payload: dict) -> None:
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
-
-
-def _new_ui_run_id(reports_dir: Path) -> str:
-    base = f"run_UI_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    run_id = base
-    suffix = 1
-    while (reports_dir / run_id).exists():
-        suffix += 1
-        run_id = f"{base}_{suffix}"
-    return run_id
 
 
 def _parse_symbol_text(value: str) -> List[str]:
@@ -1148,20 +1229,13 @@ def _unique_symbols(values: Iterable[str]) -> List[str]:
     return normalized
 
 
-def _safe_run_dir(reports_dir: Path, run_id: str) -> Path:
-    if not _is_safe_id(run_id):
-        raise HTTPException(status_code=400, detail="Invalid run id.")
-    run_dir = (reports_dir / run_id).resolve()
-    reports_root = reports_dir.resolve()
-    if reports_root != run_dir and reports_root not in run_dir.parents:
-        raise HTTPException(status_code=400, detail="Invalid run id.")
-    return run_dir
-
-
 def _safe_report_path(reports_dir: Path, raw_path: str) -> Path:
     if not raw_path:
         raise HTTPException(status_code=404, detail="Report path missing.")
-    path = Path(raw_path).resolve()
+    try:
+        path = checked_path(reports_dir, Path(raw_path))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     reports_root = reports_dir.resolve()
     if reports_root != path and reports_root not in path.parents:
         raise HTTPException(status_code=400, detail="Invalid report path.")
