@@ -13,12 +13,85 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
+from threading import RLock
+from ai_trading_copilot.copilot.services.diagnostics import CONTEXT, record, redact, exception_data
 
 
 TRACE_JSON_REPORT_KEY = "trace_json"
+_PROVIDERS = {}
+_PROVIDER_LOCK = RLock()
 TRACE_MARKDOWN_REPORT_KEY = "trace_markdown"
 DEFAULT_SERVICE_NAME = "ai-trading-copilot"
 DEFAULT_JAEGER_UI_URL = "http://127.0.0.1:16686"
+_EXPORT_HEALTH = {"last_success_at": None, "last_error": None, "failed_batches": 0}
+
+
+class ObservedExporter:
+    def __init__(self, exporter):
+        self.exporter = exporter
+
+    def export(self, spans):
+        from opentelemetry.sdk.trace.export import SpanExportResult
+        try:
+            result = self.exporter.export(spans)
+            if result == SpanExportResult.SUCCESS:
+                _EXPORT_HEALTH.update(last_success_at=_utc_now(), last_error=None)
+            else:
+                _EXPORT_HEALTH["last_error"] = "OTLP export failed"
+                _EXPORT_HEALTH["failed_batches"] += 1
+            return result
+        except Exception as exc:
+            _EXPORT_HEALTH["last_error"] = type(exc).__name__
+            _EXPORT_HEALTH["failed_batches"] += 1
+            return SpanExportResult.FAILURE
+
+    def shutdown(self):
+        self.exporter.shutdown()
+
+    def force_flush(self, timeout_millis=30000):
+        return self.exporter.force_flush(timeout_millis)
+
+
+def configure_otel(endpoint=None, service_name=None):
+    endpoint = (endpoint if endpoint is not None else os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")).strip()
+    service_name = service_name or os.getenv("OTEL_SERVICE_NAME") or DEFAULT_SERVICE_NAME
+    if not endpoint:
+        return None, None
+    with _PROVIDER_LOCK:
+        key = (endpoint, service_name)
+        if key not in _PROVIDERS:
+            try:
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+                from opentelemetry.sdk.resources import Resource
+                from opentelemetry.sdk.trace import TracerProvider
+                from opentelemetry.sdk.trace.export import BatchSpanProcessor
+                exporter = ObservedExporter(OTLPSpanExporter(endpoint=endpoint, headers=_parse_headers(os.getenv("OTEL_EXPORTER_OTLP_HEADERS", ""))))
+                provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
+                provider.add_span_processor(BatchSpanProcessor(exporter))
+                _PROVIDERS[key] = (provider, provider.get_tracer(__name__))
+            except Exception as exc:
+                _EXPORT_HEALTH["last_error"] = type(exc).__name__
+                return None, None
+        return _PROVIDERS[key]
+
+
+def start_http_span(incoming):
+    _, tracer = configure_otel()
+    if tracer is None:
+        return None
+    from opentelemetry import propagate
+    from opentelemetry.trace import SpanKind
+    return tracer.start_span("http.server", context=propagate.extract({"traceparent": incoming}), kind=SpanKind.SERVER)
+
+
+def trace_headers():
+    recorder = get_current_trace_recorder()
+    context = CONTEXT.get()
+    trace_id = recorder.trace_id if recorder else context.get("trace_id")
+    span_id = _current_span_id.get() or context.get("span_id")
+    return {"traceparent": f"00-{trace_id}-{span_id}-{context.get('trace_flags', '01')}"} if trace_id and span_id else {}
+
+
 SENSITIVE_KEY_PARTS = (
     "key",
     "token",
@@ -71,7 +144,9 @@ class TraceSpanScope:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
-        if exc is not None:
+        if exc is not None and type(exc).__name__ == "RunCancelled":
+            self.end(status="cancelled")
+        elif exc is not None:
             self.record_exception(exc)
             self.end(status="error", error=str(exc))
         else:
@@ -106,10 +181,11 @@ class TraceSpanScope:
             {
                 "exception.type": type(exc).__name__,
                 "exception.message": str(exc),
+                **exception_data(exc),
             },
         )
-        if self.span._otel_span is not None:
-            self.span._otel_span.record_exception(exc)
+        record("span.exception", trace_id=self.span.trace_id, span_id=self.span.span_id,
+               level="ERROR", **exception_data(exc))
 
     def end(self, *, status: str = "ok", error: str | None = None) -> None:
         if self.span.ended_at is not None:
@@ -135,7 +211,7 @@ class TraceRecorder:
         self.run_id = run_id
         self.symbols = list(symbols or [])
         self.service_name = service_name or os.getenv("OTEL_SERVICE_NAME") or DEFAULT_SERVICE_NAME
-        self.trace_id = secrets.token_hex(16)
+        self.trace_id = CONTEXT.get().get("trace_id") or secrets.token_hex(16)
         self.spans: list[SpanRecord] = []
         self._span_by_id: dict[str, SpanRecord] = {}
         self._otel_provider = None
@@ -169,7 +245,7 @@ class TraceRecorder:
         attributes: dict[str, Any] | None = None,
         parent_span_id: str | None = None,
     ) -> TraceSpanScope:
-        parent_id = parent_span_id if parent_span_id is not None else _current_span_id.get()
+        parent_id = parent_span_id if parent_span_id is not None else (_current_span_id.get() or CONTEXT.get().get("span_id"))
         resolved_attributes = {
             **self._common_span_attributes(),
             **(attributes or {}),
@@ -185,9 +261,17 @@ class TraceRecorder:
             _start_perf=time.perf_counter(),
         )
         span._otel_span = self._start_otel_span(span)
+        if span._otel_span is not None:
+            sdk_context = span._otel_span.get_span_context()
+            span.trace_id = self.trace_id = format(sdk_context.trace_id, "032x")
+            span.span_id = format(sdk_context.span_id, "016x")
         self.spans.append(span)
         self._span_by_id[span.span_id] = span
         self.notify_activity("start", span)
+        record("span.start", trace_id=span.trace_id, span_id=span.span_id, parent_span_id=parent_id,
+               name=name, node=resolved_attributes.get("graph.node.name"), tool=resolved_attributes.get("tool.name"),
+               input_summary={key: value for key, value in resolved_attributes.get("tool.args", {}).items()
+                              if key in {"symbol", "ticker", "start_date", "end_date", "look_back_days", "limit"}})
         return TraceSpanScope(self, span)
 
     def instant_span(
@@ -209,9 +293,10 @@ class TraceRecorder:
             return scope.span
 
     def end_span(self, span_id: str, *, status: str = "ok", error: str | None = None) -> None:
+        error = redact(error)
         span = self._span_by_id[span_id]
         span.status = status
-        span.error = error
+        span.error = redact(error)
         span.ended_at = _utc_now()
         span.duration_ms = round((time.perf_counter() - span._start_perf) * 1000, 3)
         span.attributes["status"] = status
@@ -226,6 +311,12 @@ class TraceRecorder:
             _set_otel_status(span._otel_span, status, error)
             span._otel_span.end()
         self.notify_activity("end", span)
+        record("span.end", trace_id=span.trace_id, span_id=span.span_id, parent_span_id=span.parent_span_id,
+               name=span.name, tool=span.attributes.get("tool.name"), node=span.attributes.get("graph.node.name"),
+               cache_hit=span.attributes.get("tool.cache_hit", False), duration_ms=span.duration_ms,
+               outcome=status, output_summary={key: value for key, value in span.attributes.items()
+                   if key.startswith(("tool.output.", "llm.response.")) and key.endswith((".chars", ".bytes", ".sha256"))},
+               **{"error.message": redact(error)})
 
     def notify_activity(self, event: str, span: SpanRecord) -> None:
         if self._activity_callback is None:
@@ -242,8 +333,7 @@ class TraceRecorder:
             encoding="utf-8",
         )
         self.trace_markdown_path.write_text(self.to_markdown(), encoding="utf-8")
-        if self._otel_provider is not None:
-            self._otel_provider.force_flush()
+        # Batch export must not block a run's completion.
         return self.trace_json_path, self.trace_markdown_path
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,6 +356,7 @@ class TraceRecorder:
             "otlp_endpoint": self._otlp_endpoint or None,
             "service_name": self.service_name,
             "jaeger_ui_url": os.getenv("JAEGER_UI_URL", DEFAULT_JAEGER_UI_URL),
+        "export_health": dict(_EXPORT_HEALTH),
         }
 
     def to_markdown(self) -> str:
@@ -301,27 +392,9 @@ class TraceRecorder:
         return "\n".join(lines) + "\n"
 
     def _configure_otel(self, endpoint: str | None) -> None:
-        resolved_endpoint = endpoint if endpoint is not None else os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-        self._otlp_endpoint = resolved_endpoint.strip()
-        if not resolved_endpoint:
-            return
-        try:
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-            from opentelemetry.sdk.resources import Resource
-            from opentelemetry.sdk.trace import TracerProvider
-            from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        except Exception:
-            return
-        exporter = OTLPSpanExporter(
-            endpoint=resolved_endpoint,
-            headers=_parse_headers(os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "")),
-        )
-        self._otel_provider = TracerProvider(
-            resource=Resource.create({"service.name": self.service_name})
-        )
-        self._otel_provider.add_span_processor(BatchSpanProcessor(exporter))
-        self._otel_tracer = self._otel_provider.get_tracer(__name__)
-        self._otel_enabled = True
+        self._otlp_endpoint = (endpoint if endpoint is not None else os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")).strip()
+        self._otel_provider, self._otel_tracer = configure_otel(self._otlp_endpoint, self.service_name)
+        self._otel_enabled = self._otel_provider is not None
 
     def _start_otel_span(self, span: SpanRecord):
         if self._otel_tracer is None:
@@ -329,12 +402,17 @@ class TraceRecorder:
         try:
             from opentelemetry import trace
             from opentelemetry.trace import SpanKind
+            from opentelemetry.trace import SpanContext, NonRecordingSpan, TraceFlags
 
             parent_span = self._span_by_id.get(span.parent_span_id or "")
             context = (
                 trace.set_span_in_context(parent_span._otel_span)
                 if parent_span is not None and parent_span._otel_span is not None
-                else None
+                else trace.set_span_in_context(NonRecordingSpan(SpanContext(
+                    trace_id=int(self.trace_id, 16),
+                    span_id=int(span.parent_span_id or secrets.token_hex(8), 16),
+                    is_remote=True, trace_flags=TraceFlags(int(CONTEXT.get().get("trace_flags", "01"), 16)),
+                )))
             )
             return self._otel_tracer.start_span(
                 span.name,
@@ -368,6 +446,7 @@ def get_observability_status() -> dict[str, Any]:
         "otlp_endpoint": endpoint or None,
         "service_name": service_name,
         "jaeger_ui_url": os.getenv("JAEGER_UI_URL", DEFAULT_JAEGER_UI_URL),
+        "export_health": dict(_EXPORT_HEALTH),
     }
 
 
@@ -382,6 +461,7 @@ def summarize_text(value: Any, prefix: str) -> dict[str, Any]:
 
 
 def sanitize_value(value: Any, *, text_limit: int = 500) -> Any:
+    value = redact(value)
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():

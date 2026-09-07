@@ -177,11 +177,19 @@ def _get_json(path: str, params: Dict[str, Any]) -> Any:
     token = os.getenv("FINNHUB_API_KEY", "").strip()
     if not token:
         raise FinnhubUnavailableError("FINNHUB_API_KEY is not set")
-    response = requests.get(
-        f"{_BASE_URL}{path}",
-        params={**params, "token": token},
-        timeout=_TIMEOUT_SECONDS,
-    )
+    from ai_trading_copilot.copilot.services.diagnostics import external_request
+    from ai_trading_copilot.copilot.services.tracing import trace_headers
+    with external_request("Finnhub", _TIMEOUT_SECONDS * 1000) as span:
+        response = requests.get(
+            f"{_BASE_URL}{path}",
+            params={**params, "token": token},
+            timeout=_TIMEOUT_SECONDS,
+            **({"headers": trace_headers()} if trace_headers() else {}),
+        )
+        if span:
+            span.set_attribute("http.response.status_code", response.status_code)
+            if response.status_code >= 400:
+                span.end(status="error", error=f"HTTP {response.status_code}")
     if response.status_code == 429:
         raise FinnhubUnavailableError("Finnhub rate limit exceeded")
     try:

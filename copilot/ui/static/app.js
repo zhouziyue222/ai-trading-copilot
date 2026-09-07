@@ -1,14 +1,13 @@
 const state = {
+  sessionId: null,
+  epoch: 0,
+  pollBusy: false,
+  pollFailures: 0,
+  runtime: { status: "idle", active_runs: [] },
   activeView: "analysis",
   subscriptions: [],
   selectedSymbols: new Set(),
   currentRunId: null,
-  sessionId: null,
-  viewEpoch: 0,
-  activeRuns: [],
-  checkpoints: [],
-  runtimeTimer: null,
-  launchPending: false,
   pollTimer: null,
   progressTimer: null,
   activeReportKey: null,
@@ -29,7 +28,6 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const lastRunStorageKey = "aiTradingCopilot.lastRunId";
-const sessionStorageKey = "aiTradingCopilot.sessionId";
 
 const primaryWorkflowNodes = [
   "Load Persona Markdown",
@@ -101,13 +99,10 @@ const preferredReportOrder = [
   "technical_position",
   "futu_portfolio",
   "run_audit",
-  "trace_markdown",
-  "trace_json",
 ];
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
-    cache: "no-store",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
@@ -115,16 +110,17 @@ async function api(path, options = {}) {
     let message = response.statusText;
     try {
       const payload = await response.json();
-      message = payload.detail || message;
+      message = typeof payload.detail === "string" ? payload.detail : "请检查输入参数";
+      if (payload.request_id) message += `（故障编号 ${payload.request_id}）`;
     } catch {
       message = await response.text();
     }
-    const error = new Error(message);
-    error.status = response.status;
-    throw error;
+    throw new Error(message);
   }
   const contentType = response.headers.get("content-type") || "";
-  return contentType.includes("application/json") ? response.json() : response.text();
+  const payload = contentType.includes("application/json") ? await response.json() : await response.text();
+  if (payload && typeof payload === "object") payload._session_id = response.headers.get("X-Session-ID");
+  return payload;
 }
 
 function switchView(view) {
@@ -135,6 +131,9 @@ function switchView(view) {
   document.querySelectorAll(".view").forEach((section) => {
     section.classList.toggle("active", section.id === `view-${view}`);
   });
+  if (view === "rag") {
+    loadRagStatus().catch(showError);
+  }
   if (view === "portfolio" && !state.portfolio) {
     loadPortfolio().catch(showError);
   }
@@ -286,8 +285,8 @@ async function loadSubscriptions() {
   renderSelectedCount();
 }
 
-async function loadRagStatus() {
-  const payload = await api("/api/rag/status?probe=true");
+async function loadRagStatus(probe = false) {
+  const payload = await api(`/api/rag/status?probe=${probe}`);
   state.ragStatus = payload;
   renderRagStatus(payload);
 }
@@ -523,8 +522,6 @@ async function loadRuntimeConfig() {
 }
 
 async function startRun() {
-  if (state.launchPending) return;
-  state.launchPending = true;
   showError("");
   const startButton = $("startRun");
   startButton.disabled = true;
@@ -543,9 +540,8 @@ async function startRun() {
         long_term_memory_enabled: $("longTermMemoryEnabled").checked,
       }),
     });
-    state.sessionId = payload.session_id;
-    localStorage.setItem(sessionStorageKey, state.sessionId);
-    state.viewEpoch += 1;
+    state.epoch += 1;
+    state.sessionId = payload._session_id || state.sessionId;
     state.currentRunId = payload.run_id;
     localStorage.setItem(lastRunStorageKey, payload.run_id);
     state.activeReportKey = null;
@@ -557,95 +553,91 @@ async function startRun() {
     $("refreshRun").disabled = false;
     $("reportContent").textContent = "运行已启动，报告生成后可在下方切换查看。";
     renderRun(payload);
-    if (!isTerminalRunStatus(payload.status?.status)) startPolling();
-    await syncRuntime();
+    startPolling();
     loadRuns().catch(showError);
   } finally {
-    state.launchPending = false;
-    startButton.disabled = false;
+    startButton.disabled = state.lastRunPayload?.status?.status === "running";
     startButton.textContent = "启动分析";
   }
 }
 
 async function loadRuns() {
   const payload = await api("/api/runs");
-  if (state.sessionId && payload.session_id !== state.sessionId) return state.recentRuns;
   state.recentRuns = payload.items || [];
-  const checkpoints = await api("/api/checkpoints");
-  if (state.sessionId && checkpoints.session_id !== state.sessionId) return state.recentRuns;
-  state.checkpoints = checkpoints.items || [];
   renderRunHistory();
   return state.recentRuns;
 }
 
 function resetRunView() {
   stopPolling();
-  state.viewEpoch += 1;
+  state.epoch += 1;
   state.currentRunId = null;
   state.lastRunPayload = null;
   state.activeReportKey = null;
-  state.activeTraceSpanId = null;
-  state.traceRunId = null;
-  state.currentTrace = null;
-  state.activeNodeName = null;
   state.cancelPending = false;
-  state.expandedActivityDetails.clear();
-  $("refreshRun").disabled = true;
-  $("reportContent").textContent = "空闲。点击启动分析，或手动查看历史运行。";
-  $("errors").textContent = "";
-  renderRun({ run_id: null, status: { status: "idle" }, reports: {}, errors: [] });
+  state.pollFailures = 0;
+  $("runState").textContent = "空闲";
+  $("runState").className = "run-state status-neutral";
+  $("reportContent").textContent = "选择标的后开始分析。";
+  $("reportTabs").replaceChildren();
+  $("errors").replaceChildren();
+  $("connectionStatus").textContent = "";
+  $("startRun").disabled = false;
+  $("refreshRun").hidden = true;
+  updateRunControls();
+  renderSummaryCards();
+  renderProgress(null, {});
+  renderDecisionRows(null, {});
 }
 
-function renderRuntimeState() {
-  const live = state.activeRuns;
-  const cancelling = live.length && live.every((run) => run.cancel_requested);
-  $("runState").textContent = live.length ? (cancelling ? "正在取消" : "运行中") : "空闲";
-  $("runState").className = `run-state ${toneClass(live.length ? "running" : "idle")}`;
-  updateRunControls(state.lastRunPayload?.status || {});
-}
-
-async function syncRuntime(reconnect = false) {
-  const previousSession = state.sessionId;
-  const payload = await api("/api/runtime");
-  if (previousSession !== state.sessionId) return;
-  if (state.sessionId !== payload.session_id) {
+async function refreshRuntime() {
+  const runtime = await api("/api/runtime");
+  if (state.sessionId && state.sessionId !== runtime.session_id) {
     resetRunView();
-    state.sessionId = payload.session_id;
-    if (localStorage.getItem(sessionStorageKey) !== state.sessionId) {
-      localStorage.removeItem(lastRunStorageKey);
-    }
-    localStorage.setItem(sessionStorageKey, state.sessionId);
+    localStorage.removeItem(lastRunStorageKey);
   }
-  state.activeRuns = payload.active_runs || [];
-  renderRuntimeState();
-  if (reconnect && !state.currentRunId) {
-    const stored = localStorage.getItem(lastRunStorageKey);
-    const live = state.activeRuns.find((run) => run.run_id === stored) || state.activeRuns[0];
-    if (live) await connectRun(live.run_id);
-  }
+  state.sessionId = runtime.session_id;
+  state.runtime = runtime;
+  $("runState").textContent = runtime.status === "running" ? "运行中" : "空闲";
+  $("runState").className = `run-state ${runtime.status === "running" ? "status-warning" : "status-neutral"}`;
+  return runtime;
 }
 
-async function resumeCheckpoint(checkpointId) {
-  if (state.launchPending) return;
-  state.launchPending = true;
-  showError("");
-  try {
-    const payload = await api(`/api/checkpoints/${encodeURIComponent(checkpointId)}/resume`, { method: "POST" });
-    await syncRuntime();
-    if (payload.session_id !== state.sessionId) return;
-    await connectRun(payload.run_id);
-    await loadRuns();
-  } finally {
-    state.launchPending = false;
+async function restoreLastRun() {
+  const stored = localStorage.getItem(lastRunStorageKey);
+  const runtime = await refreshRuntime();
+  await loadRuns();
+  await loadCheckpoints();
+  const active = runtime.active_runs || [];
+  const target = active.find(run => run.run_id === stored) || [...active].sort((a, b) => a.started_at.localeCompare(b.started_at)).at(-1);
+  if (target) await connectRun(target.run_id);
+}
+
+async function loadCheckpoints() {
+  const payload = await api("/api/checkpoints");
+  $("checkpoints").replaceChildren();
+  for (const item of payload.items || []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost-button";
+    button.textContent = `手动恢复 ${(item.symbols || []).join("、")}`;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const run = await api(`/api/checkpoints/${item.checkpoint_id}/resume`, { method: "POST" });
+        await connectRun(run.run_id);
+        await loadCheckpoints();
+      } catch (error) { showError(error); button.disabled = false; }
+    });
+    $("checkpoints").appendChild(button);
   }
 }
 
 async function connectRun(runId) {
+  const epoch = ++state.epoch;
   showError("");
   stopPolling();
   state.currentRunId = runId;
-  const epoch = ++state.viewEpoch;
-  const sessionId = state.sessionId;
   state.activeReportKey = null;
   state.activeTraceSpanId = null;
   state.traceRunId = null;
@@ -654,13 +646,12 @@ async function connectRun(runId) {
   localStorage.setItem(lastRunStorageKey, runId);
   renderRunHistory();
   $("refreshRun").disabled = false;
+  const runtime = await refreshRuntime();
+  if (epoch !== state.epoch) return;
   const payload = await api(`/api/runs/${encodeURIComponent(runId)}`);
-  if (epoch !== state.viewEpoch || sessionId !== state.sessionId || payload.session_id !== sessionId) return;
-  $("reportContent").textContent = payload.status?.status === "running"
-    ? "已连接运行。报告生成后可点击查看。"
-    : "已打开历史记录。点击下方报告查看结果。";
+  if (epoch !== state.epoch || (state.sessionId && payload._session_id !== state.sessionId)) return;
   renderRun(payload);
-  if (payload.status?.status === "running") {
+  if (payload.status?.status === "running" || runtime.active_runs?.length) {
     startPolling();
   }
 }
@@ -669,7 +660,7 @@ function startPolling() {
   if (state.pollTimer) {
     clearInterval(state.pollTimer);
   }
-  state.pollTimer = setInterval(() => refreshRun().catch(showError), 2000);
+  state.pollTimer = setInterval(refreshRun, 2000);
   startProgressTicker();
 }
 
@@ -698,58 +689,78 @@ function startProgressTicker() {
 }
 
 async function refreshRun() {
-  if (!state.currentRunId) return;
-  const runId = state.currentRunId;
-  const epoch = state.viewEpoch;
-  const sessionId = state.sessionId;
-  let payload;
+  if (!state.currentRunId || state.pollBusy) return;
+  state.pollBusy = true;
+  const runId = state.currentRunId, epoch = state.epoch;
   try {
-    payload = await api(`/api/runs/${encodeURIComponent(runId)}`);
-  } catch (error) {
-    if (epoch !== state.viewEpoch || sessionId !== state.sessionId) return;
-    if (error.status === 404) {
-      await syncRuntime();
-      if (!state.activeRuns.some((run) => run.run_id === runId)) resetRunView();
+    await refreshRuntime();
+    if (epoch !== state.epoch) return;
+    const selectedStatus = state.lastRunPayload?.status?.status;
+    if (isTerminalRunStatus(selectedStatus) && !(state.runtime.active_runs || []).length) {
+      stopPolling();
       return;
     }
-    throw error;
-  }
-  if (epoch !== state.viewEpoch || runId !== state.currentRunId || sessionId !== state.sessionId) return;
-  if (payload.session_id !== state.sessionId) { await syncRuntime(); return; }
-  renderRun(payload);
-  const status = payload.status?.status;
-  if (isTerminalRunStatus(status)) {
-    stopPolling();
-    loadRuns().catch(showError);
+    if (isTerminalRunStatus(selectedStatus)) {
+      return;
+    }
+    const payload = await api(`/api/runs/${encodeURIComponent(runId)}`);
+    if (epoch !== state.epoch || runId !== state.currentRunId || payload._session_id !== state.sessionId) return;
+    state.pollFailures = 0;
+    $("connectionStatus").textContent = "";
+    $("refreshRun").hidden = true;
+    renderRun(payload);
+    if (isTerminalRunStatus(payload.status?.status)) {
+      await loadRuns();
+      await loadCheckpoints();
+      if (!(state.runtime.active_runs || []).length) stopPolling();
+    }
+  } catch (error) {
+    if (epoch !== state.epoch) return;
+    if (++state.pollFailures >= 3) {
+      $("connectionStatus").textContent = "连接中断，保留最后已知状态；正在尝试重新连接。";
+      $("refreshRun").hidden = false;
+    }
+  } finally {
+    state.pollBusy = false;
   }
 }
 
 function renderRun(payload) {
   state.lastRunPayload = payload;
   const runStatus = payload.status || {};
+  const runState = $("runState");
   const status = runStatus.status || "idle";
+  // The header describes live service work, not the selected historical report.
+  runState.textContent = state.runtime.status === "running" || status === "running" ? "运行中" : "空闲";
+  runState.className = `run-state ${runState.textContent === "运行中" ? "status-warning" : "status-neutral"}`;
   updateRunControls(runStatus);
 
   renderSummaryCards(runStatus);
   renderProgress(payload.run_id, runStatus);
-  renderNodeGuide(runStatus);
+
   renderDecisionRows(payload.run_id, runStatus);
-  renderTrace(payload.run_id, runStatus);
-  renderObservabilityStatus(state.observability || {}, state.currentTrace);
 
   const errors = payload.errors || runStatus.errors || [];
-  $("errors").textContent = errors.map((item) => item.message || item).join("\n");
+  $("errors").textContent = errors.length ? "本次分析出现问题，请查看失败阶段。" : "";
+  if (status === "failed") {
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.textContent = "复制故障编号";
+    copy.addEventListener("click", () => navigator.clipboard.writeText(`Request ID: ${runStatus.origin_request_id || "未知"}\nRun ID: ${payload.run_id}\nTrace ID: ${runStatus.trace_id || "未知"}`).catch(showError));
+    $("errors").appendChild(copy);
+  }
+  $("startRun").disabled = status === "running";
   renderReportTabs(payload.run_id, payload.reports || {});
 }
 
 function updateRunControls(runStatus = {}) {
   const cancelButton = $("cancelRun");
   if (!cancelButton) return;
-  const running = runStatus.status === "running" && state.activeRuns.some((run) => run.run_id === state.currentRunId);
+  const running = runStatus.status === "running";
   const cancelRequested = running && runStatus.cancel_requested === true;
+  cancelButton.hidden = !running;
   cancelButton.disabled = !state.currentRunId || !running || cancelRequested || state.cancelPending;
-  cancelButton.textContent = state.cancelPending || cancelRequested ? "取消中"
-    : runStatus.status === "cancelled" ? (runStatus.resumable ? "已取消，可恢复" : "已取消") : "取消运行";
+  cancelButton.textContent = state.cancelPending || cancelRequested ? "取消中" : "取消并保存";
 }
 
 async function cancelRun() {
@@ -758,14 +769,11 @@ async function cancelRun() {
   state.cancelPending = true;
   updateRunControls(state.lastRunPayload?.status || {});
   try {
-    const epoch = state.viewEpoch;
     const payload = await api(`/api/runs/${encodeURIComponent(state.currentRunId)}/cancel`, {
       method: "POST",
     });
-    if (epoch !== state.viewEpoch || payload.session_id !== state.sessionId) return;
     renderRun(payload);
-    if (!isTerminalRunStatus(payload.status?.status)) startPolling();
-    await syncRuntime();
+    startPolling();
     await loadRuns();
   } finally {
     state.cancelPending = false;
@@ -777,7 +785,7 @@ function renderRunHistory() {
   const container = $("runHistory");
   if (!container) return;
   const runs = state.recentRuns || [];
-  if (!runs.length && !state.checkpoints.length) {
+  if (!runs.length) {
     container.innerHTML = "";
     return;
   }
@@ -785,17 +793,9 @@ function renderRunHistory() {
     <div class="section-heading compact">
       <div>
         <h3>最近运行</h3>
-        <span>历史记录仅供查看。已保存的断点需要手动恢复。</span>
+        <span>点击查看历史报告；可恢复任务需要手动启动。</span>
       </div>
       <button class="ghost-button" type="button" data-refresh-runs>刷新列表</button>
-    </div>
-    <div class="run-history-list">
-      ${state.checkpoints.map((checkpoint) => `
-        <button class="run-history-item" type="button" data-resume-checkpoint="${escapeHtml(checkpoint.checkpoint_id)}">
-          <span class="status-chip status-neutral">恢复运行</span>
-          <strong>${escapeHtml(checkpoint.run_id)}</strong>
-          <small>${escapeHtml((checkpoint.symbols || []).join(", "))}</small>
-        </button>`).join("")}
     </div>
     <div class="run-history-list">
       ${runs.slice(0, 8).map(renderRunHistoryItem).join("")}
@@ -833,7 +833,7 @@ function renderSummaryCards(runStatus = {}) {
 
   const cards = [
     { label: "标的", value: metrics.symbol_count ?? (runStatus.symbols || []).length, tone: "neutral" },
-    { label: "主流程节点", value: `${completedNodes}/${primaryWorkflowNodes.length}`, tone: failedNodes ? "danger" : "success" },
+    { label: "累计用时", value: runElapsed(runStatus), tone: failedNodes ? "danger" : "neutral" },
     { label: "风控调整/持平", value: `${riskAdjusted}/${riskHeld}`, tone: riskAdjusted || riskHeld || failedNodes ? "warning" : "neutral" },
     { label: "报告", value: reportCount, tone: reportCount ? "success" : "neutral" },
   ];
@@ -841,45 +841,42 @@ function renderSummaryCards(runStatus = {}) {
   $("summaryCards").innerHTML = cards.map(summaryCard).join("");
 }
 
+const visibleStages = [
+  ["准备数据", ["Load Persona Markdown", "Load Subscription Symbols"]],
+  ["分析标的", ["Technical Position", "News Sentiment", "Fundamental Analysis", "Opportunity Radar"]],
+  ["形成建议", ["Trader"]],
+  ["风险检查", ["Risk Check", "Portfolio Manager"]],
+  ["生成报告", ["Explain Run", "Persist Trace"]],
+];
+
 function renderProgress(runId, runStatus = {}) {
   const nodes = runStatus.nodes || {};
-  const primaryEntries = primaryWorkflowNodes.map((name) => [name, nodes[name] || { status: "pending" }]);
-  const optionalEntries = Object.entries(nodes).filter(([name]) => !primaryWorkflowNodes.includes(name));
-  const currentNode = runStatus.current_node || "-";
-  const elapsed = runElapsed(runStatus);
-  const primaryStats = primaryEntries.reduce(
-    (acc, [, node]) => {
-      acc[node.status || "pending"] = (acc[node.status || "pending"] || 0) + 1;
-      return acc;
-    },
-    {},
-  );
-
-  $("progress").innerHTML = `
-    <div class="progress-heading">
-      <div>
-        <h3>运行流程</h3>
-        <span>${escapeHtml(runId || "等待启动")}</span>
-      </div>
-      <strong>${escapeHtml((runStatus.symbols || []).join(", ") || "暂无标的")}</strong>
-    </div>
-    <div class="run-overview">
-      <span>当前步骤：${escapeHtml(currentNode)}</span>
-      <span>总耗时：${escapeHtml(elapsed)}</span>
-      <span>完成 ${primaryStats.succeeded || 0} / 跳过 ${primaryStats.skipped || 0} / 失败 ${primaryStats.failed || 0}</span>
-    </div>
-    <div class="node-grid">${primaryEntries.map(([name, node]) => nodeCard(name, node)).join("")}</div>
-    ${
-      optionalEntries.length
-        ? `<div class="optional-node-block">
-            <div class="mini-heading">可选分析节点</div>
-            <div class="node-grid optional">${optionalEntries.map(([name, node]) => nodeCard(name, node, true)).join("")}</div>
-          </div>`
-        : ""
-    }
-    ${renderNodeActivityDetails(runStatus)}
-  `;
+  const stages = visibleStages.map(([label, names]) => {
+    const selected = names.map(name => nodes[name]).filter(Boolean);
+    let status = "pending";
+    if (selected.some(node => node.status === "failed")) status = "failed";
+    else if (selected.some(node => node.status === "cancelled" || node.error === "cancelled")) status = "cancelled";
+    else if (selected.some(node => node.status === "running")) status = "running";
+    else if (selected.length && selected.every(node => ["succeeded", "skipped"].includes(node.status))) status = "succeeded";
+    return { label, status };
+  });
+  const current = nodes[runStatus.current_node] || {};
+  const activity = current.activity || {};
+  const stage = stages.find(item => item.status === "running" || item.status === "failed");
+  const completed = stages.filter(item => item.status === "succeeded").length;
+  const elapsed = activityDurationLabel(activity);
+  let message = runStatus.status === "running" ? `正在${stage?.label || "准备数据"}，已用时 ${runElapsed(runStatus)}` : "选择标的后开始分析";
+  if (runStatus.status === "running" && activity.tool_name && activity.status === "running") message += `；等待数据服务响应 ${elapsed}`;
+  const activityStart = parseDate(activity.started_at || current.started_at);
+  if (runStatus.status === "running" && activityStart && Date.now() - activityStart.getTime() > 60000) message += "；当前步骤耗时较长，尚未确认失败";
+  if (runStatus.cancel_requested && runStatus.status === "running") message = "正在取消；等待当前调用结束后保存完整节点。";
+  if (runStatus.status === "succeeded") message = (runStatus.errors || []).length || (runStatus.graph_errors || []).length ? "分析完成，但部分数据不完整，请检查报告中的限制。" : "分析完成，结果摘要已更新。";
+  if (runStatus.status === "failed") message = `${stage?.label || "分析"}失败；请复制故障编号排查。`;
+  if (runStatus.status === "cancelled") message = runStatus.resumable ? "已取消并保存，可在历史记录中手动恢复。" : "已取消，没有可恢复断点。";
+  const tone = runStatus.status === "failed" ? "status-danger" : runStatus.status === "running" || (runStatus.graph_errors || []).length ? "status-warning" : runStatus.status === "succeeded" ? "status-success" : "status-neutral";
+  $("progress").innerHTML = `<ol class="stage-list">${stages.map(item => `<li class="stage-${item.status}"><span>${item.status === "succeeded" ? "✓" : item.status === "failed" ? "!" : item.status === "running" ? "●" : "○"}</span>${item.label}</li>`).join("")}</ol><progress max="5" value="${completed}" aria-label="已完成阶段"></progress><p class="run-message ${tone}" role="status">${escapeHtml(message)}</p>`;
 }
+
 function nodeCard(name, node = {}, optional = false) {
   const status = node.status || "pending";
   const duration = nodeDurationLabel(node);
@@ -1084,6 +1081,8 @@ function renderNodeGuide(runStatus = {}) {
 }
 
 function renderDecisionRows(runId, runStatus = {}) {
+  const decisions = runStatus.status === "succeeded" ? runStatus.decision_summary?.symbols || [] : [];
+  $("resultSummary").innerHTML = decisions.length ? decisions.map(row => `<article class="result-card"><strong>${escapeHtml(row.symbol)} · ${escapeHtml(directionLabels[row.direction] || "待复核")}</strong><p>${escapeHtml(row.suggested_action || row.execution_message || "请查看完整报告")}</p><small>风控：${row.approved_by_risk === true ? "通过" : row.approved_by_risk === false ? "保持不动" : "待复核"}</small></article>`).join("") : "完成分析后将在此展示结论。";
   const rows = runStatus.decision_summary?.symbols || [];
   if (!rows.length) {
     $("decisionRows").innerHTML =
@@ -1179,15 +1178,11 @@ async function renderTrace(runId, runStatus = {}) {
   }
   timeline.innerHTML = '<div class="empty-state compact"><strong>正在读取 Trace</strong><span>正在加载本地 trace.json。</span></div>';
   details.textContent = "";
-  const epoch = state.viewEpoch;
-  const sessionId = state.sessionId;
   try {
     const payload = await api(`/api/runs/${encodeURIComponent(runId)}/trace`);
-    if (epoch !== state.viewEpoch || sessionId !== state.sessionId || runId !== state.currentRunId) return;
     state.traceRunId = runId;
     state.currentTrace = payload.trace || {};
     state.activeTraceSpanId = null;
-    renderObservabilityStatus(state.observability || {}, state.currentTrace);
     renderTracePayload(state.currentTrace);
   } catch (error) {
     timeline.innerHTML = `<div class="empty-state compact"><strong>Trace 不可用</strong><span>${escapeHtml(error.message || error)}</span></div>`;
@@ -1262,11 +1257,13 @@ async function confirmSimulatedOrder(symbol, button) {
 function renderReportTabs(runId, reports) {
   const tabs = $("reportTabs");
   tabs.innerHTML = "";
-  const keys = Object.keys(reports).sort((a, b) => {
-    const left = preferredReportOrder.indexOf(a);
-    const right = preferredReportOrder.indexOf(b);
-    return (left === -1 ? 99 : left) - (right === -1 ? 99 : right) || a.localeCompare(b);
-  });
+  const keys = Object.keys(reports)
+    .filter((key) => !["trace_json", "trace_markdown"].includes(key))
+    .sort((a, b) => {
+      const left = preferredReportOrder.indexOf(a);
+      const right = preferredReportOrder.indexOf(b);
+      return (left === -1 ? 99 : left) - (right === -1 ? 99 : right) || a.localeCompare(b);
+    });
   if (!keys.length) {
     tabs.innerHTML = '<span class="empty-inline">暂无报告。</span>';
     return;
@@ -1285,16 +1282,11 @@ function renderReportTabs(runId, reports) {
       document.querySelectorAll("#reportTabs button").forEach((item) => item.classList.remove("active"));
       button.classList.add("active");
       state.activeReportKey = key;
-      const epoch = state.viewEpoch;
-      const sessionId = state.sessionId;
-      try {
-        const content = await api(`/api/reports/${encodeURIComponent(runId)}/${encodeURIComponent(key)}`);
-        if (epoch === state.viewEpoch && sessionId === state.sessionId && state.activeReportKey === key) {
-          $("reportContent").textContent = content;
-        }
-      } catch (error) {
-        if (epoch === state.viewEpoch) showError(error);
-      }
+      const epoch = state.epoch;
+      const text = await api(
+        `/api/reports/${encodeURIComponent(runId)}/${encodeURIComponent(key)}`,
+      );
+      if (epoch === state.epoch && state.currentRunId === runId && state.activeReportKey === key) $("reportContent").textContent = text;
     });
     tabs.appendChild(button);
   }
@@ -1392,7 +1384,7 @@ function toneClass(value) {
 }
 
 function isTerminalRunStatus(status) {
-  return ["succeeded", "failed", "cancelled", "interrupted"].includes(status);
+  return ["succeeded", "failed", "cancelled"].includes(status);
 }
 
 function marketLabel(value) {
@@ -1415,8 +1407,6 @@ function reportLabel(value) {
     technical_position: "技术位置",
     futu_portfolio: "Futu 组合",
     run_audit: "运行审计",
-    trace_markdown: "Trace",
-    trace_json: "Trace JSON",
   }[value] || value;
 }
 function formatNumber(value) {
@@ -1570,11 +1560,6 @@ function bindEvents() {
   $("cancelRun").addEventListener("click", () => cancelRun().catch(showError));
   $("refreshRun").addEventListener("click", () => refreshRun().catch(showError));
   $("runHistory").addEventListener("click", (event) => {
-    const resumeButton = event.target.closest("[data-resume-checkpoint]");
-    if (resumeButton) {
-      resumeCheckpoint(resumeButton.dataset.resumeCheckpoint).catch(showError);
-      return;
-    }
     const refreshButton = event.target.closest("[data-refresh-runs]");
     if (refreshButton) {
       loadRuns().catch(showError);
@@ -1610,13 +1595,13 @@ function bindEvents() {
     if (!symbol) return;
     confirmSimulatedOrder(symbol, event.target).catch(showError);
   });
-  $("traceTimeline").addEventListener("click", (event) => {
+  $("traceTimeline")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-trace-span]");
     if (!button) return;
     state.activeTraceSpanId = button.dataset.traceSpan;
     renderTracePayload(state.currentTrace || {});
   });
-  $("refreshRag").addEventListener("click", () => loadRagStatus().catch(showError));
+  $("refreshRag").addEventListener("click", () => loadRagStatus(true).catch(showError));
   $("ingestDefaults").addEventListener("click", () => ingestDefaults().catch(showError));
   $("ingestOnline").addEventListener("click", () => ingestOnlineResearch().catch(showError));
   $("ingestText").addEventListener("click", () => ingestTextKnowledge().catch(showError));
@@ -1633,14 +1618,12 @@ function bindEvents() {
   });
 }
 
-async function init() {
+function init() {
   bindEvents();
   switchView("analysis");
-  resetRunView();
-  renderRuntimeState();
   renderSummaryCards();
   renderProgress(null, {});
-  renderNodeGuide({});
+  resetRunView();
   renderRagStatus({
     backend: "fundamental_chroma",
     available: null,
@@ -1657,10 +1640,8 @@ async function init() {
     error: "点击刷新账户读取 Futu 模拟账户。",
   });
   loadSubscriptions().catch(showError);
-  loadObservabilityStatus().catch(showError);
+
   loadRuntimeConfig().catch(showError);
-  await syncRuntime(true);
-  await loadRuns();
-  state.runtimeTimer = setInterval(() => syncRuntime().catch(showError), 2000);
+  restoreLastRun().catch(showError);
 }
-init().catch(showError);
+init();

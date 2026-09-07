@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>开发诊断 · AI Trading Copilot</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/styles.css"></head>
+<body>
+<header class="app-shell"><div><h1>开发诊断</h1><p>请求关联 · 调用耗时 · 异常定位</p></div><a href="/">用户工作台</a></header>
+<main class="workspace">
+  <form id="search" class="panel"><label>输入完整 Request ID、Run ID 或 Trace ID<input id="query" maxlength="128" placeholder="留空查看最近事件"></label><button type="submit">查询 / 刷新</button><span id="feedback" role="status"></span></form>
+  <section class="panel"><h2>执行器与采集状态</h2><p id="health"></p><div id="workers"></div></section>
+  <section class="panel"><h2>工具与模型耗时</h2><p>工具总耗时含重试与本地处理；模型耗时为完整调用耗时。不是纯网络 RTT。</p><div class="table-wrap"><table class="decision-table"><thead><tr><th>调用</th><th>样本数</th><th>p50 / ms</th><th>p95 / ms</th><th>失败数</th><th>缓存命中</th></tr></thead><tbody id="services"></tbody></table></div></section>
+  <section class="panel"><h2>异常聚合</h2><div id="errors"></div></section>
+  <section class="panel"><h2>执行时间线</h2><p>点击事件查看脱敏详情；行号对应记录中的源码哈希。</p><div class="trace-layout"><div id="timeline" class="trace-timeline"></div><pre id="detail" class="trace-details">选择一次调用或异常。</pre></div></section>
+</main><script src="/static/internal.js"></script>
+</body></html>

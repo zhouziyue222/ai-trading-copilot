@@ -26,6 +26,25 @@
   --shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
 }
 
+[hidden] { display: none !important; }
+summary { cursor: pointer; padding: 12px 0; font-weight: 600; }
+.advanced-settings[open] { display: grid; gap: 14px; }
+.settings-menu { position: relative; }
+.settings-menu[open] { background: white; padding: 0 12px; border-radius: 8px; }
+.stage-list { display: flex; flex-wrap: wrap; gap: 12px; padding: 0; list-style: none; }
+.stage-list li { display: flex; align-items: center; gap: 8px; padding: 12px; border-radius: 8px; background: var(--surface-muted); }
+.stage-list .stage-running { color: var(--warning); background: var(--warning-soft); }
+.stage-list .stage-cancelled { color: var(--warning); background: var(--warning-soft); }
+.stage-list .stage-succeeded { color: var(--success); background: var(--success-soft); }
+.stage-list .stage-failed { color: var(--danger); background: var(--danger-soft); }
+.stage-running span { animation: stage-pulse 1.5s ease-in-out infinite; }
+@keyframes stage-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .stage-running span { animation: none; } }
+progress { width: 100%; accent-color: var(--success); height: 10px; }
+.run-message { padding: 12px; border-radius: 8px; }
+.result-card { padding: 14px; border-bottom: 1px solid var(--border); }
+#connectionStatus:not(:empty) { background: var(--warning-soft); color: var(--warning); padding: 12px; }
+
 * {
   box-sizing: border-box;
 }

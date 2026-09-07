@@ -7,6 +7,9 @@ import json
 import os
 import re
 import socket
+import secrets
+import time
+from contextvars import copy_context
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -19,7 +22,7 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import Callable, Iterable, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
@@ -75,7 +78,8 @@ from ai_trading_copilot.copilot.services.rag_store import (
     DEFAULT_CHROMA_DIR,
     DEFAULT_COLLECTION_NAME,
 )
-from ai_trading_copilot.copilot.services.tracing import get_observability_status
+from ai_trading_copilot.copilot.services.tracing import get_observability_status, configure_otel, start_http_span
+from ai_trading_copilot.copilot.services.diagnostics import CONTEXT, DiagnosticStore, record, exception_data
 from ai_trading_copilot.copilot.services.subscription_service import SubscriptionStore
 
 
@@ -159,14 +163,17 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
     resolved = settings or UISettings(reports_dir=Path(os.getenv("COPILOT_UI_REPORTS_DIR") or DEFAULT_REPORT_OUTPUT_DIR))
     static_dir = Path(__file__).resolve().parent / "static"
     runtime = RunLifecycle(resolved.reports_dir)
+    diagnostics = DiagnosticStore(resolved.reports_dir / ".diagnostics")
 
     @asynccontextmanager
     async def lifespan(app):
         runtime.start()
+        configure_otel()
         try:
             yield
         finally:
             runtime.shutdown()
+            diagnostics.close()
 
     app = FastAPI(title="AI Trading Copilot UI", lifespan=lifespan,
                   default_response_class=UTF8JSONResponse)
@@ -176,13 +183,58 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
     app.state.run_controls_lock = runtime.lock
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        request_id = secrets.token_hex(16)
+        incoming = request.headers.get("traceparent", "")
+        parts = incoming.split("-")
+        valid = bool(re.fullmatch(r"00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]", incoming)) and int(parts[1], 16) != 0 and int(parts[2], 16) != 0
+        trace_id = parts[1] if valid else secrets.token_hex(16)
+        http_span = start_http_span(incoming if valid else "") if request.method != "GET" else None
+        span_id = secrets.token_hex(8)
+        if http_span is not None:
+            sdk_context = http_span.get_span_context()
+            trace_id, span_id = format(sdk_context.trace_id, "032x"), format(sdk_context.span_id, "016x")
+        token = CONTEXT.set({"request_id": request_id, "trace_id": trace_id, "span_id": span_id, "trace_flags": parts[3] if valid else "01",
+                             "session_id": runtime.session_id, "store": diagnostics})
+        started = time.perf_counter()
+        if request.method != "GET":
+            record("span.start", name="http.server", parent_span_id=parts[2] if valid else None)
+        try:
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                record("request.failed", level="ERROR", **exception_data(exc))
+                response = UTF8JSONResponse({"detail": "请求失败，请复制故障编号联系开发人员。", "request_id": request_id}, status_code=500)
+            response.headers["X-Request-ID"] = request_id
+            response.headers["X-Session-ID"] = runtime.session_id
+            response.headers["Cache-Control"] = "no-store"
+            if request.method != "GET" or response.status_code >= 400:
+                route = getattr(request.scope.get("route"), "path", "unmatched")
+                if request.method != "GET":
+                    record("span.end", name="http.server", outcome="error" if response.status_code >= 500 else "ok",
+                           duration_ms=round((time.perf_counter()-started)*1000, 3))
+                if http_span is not None:
+                    http_span.set_attribute("http.route", route)
+                    http_span.set_attribute("http.response.status_code", response.status_code)
+                    if response.status_code >= 500:
+                        from opentelemetry.trace import Status, StatusCode
+                        http_span.set_status(Status(StatusCode.ERROR))
+                record("request.end", method=request.method, route=route, status_code=response.status_code,
+                       duration_ms=round((time.perf_counter()-started)*1000, 3))
+            return response
+        finally:
+            if http_span is not None:
+                http_span.end()
+            CONTEXT.reset(token)
+
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request, exc):
-        return UTF8JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+        return UTF8JSONResponse({"detail": exc.detail, "request_id": CONTEXT.get().get("request_id")}, status_code=exc.status_code, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
-        return UTF8JSONResponse({"detail": jsonable_encoder(exc.errors())}, status_code=422)
+        return UTF8JSONResponse({"detail": jsonable_encoder(exc.errors()), "request_id": CONTEXT.get().get("request_id")}, status_code=422)
 
     @app.exception_handler(Exception)
     async def internal_error(request, exc):
@@ -227,7 +279,26 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
 
     @app.get("/api/runtime")
     def get_runtime() -> dict:
-        return runtime.runtime_status()
+        with runtime.lock:
+            status = runtime.runtime_status()
+            for run in status["active_runs"]:
+                run.update(worker_alive=True, heartbeat_at=datetime.now().astimezone().isoformat(),
+                           last_progress_at=runtime.controls[run["run_id"]].tracker.status["updated_at"])
+            return status
+
+    def require_internal(request):
+        if os.getenv("COPILOT_INTERNAL_UI", "").lower() not in {"1", "true"} or request.client.host not in {"127.0.0.1", "::1", "testclient"}:
+            raise HTTPException(404, "Not found")
+
+    @app.get("/internal/observability")
+    def internal_page(request: Request):
+        require_internal(request)
+        return FileResponse(static_dir / "internal.html")
+
+    @app.get("/api/internal/observability")
+    def internal_data(request: Request, query: str = ""):
+        require_internal(request)
+        return {**diagnostics.query(query), "runtime": get_runtime(), "export": get_observability_status()}
 
     @app.get("/")
     def index() -> FileResponse:
@@ -512,6 +583,9 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             defaults=defaults,
             nodes=resolved.graph_cls.NODE_ORDER,
         )
+        context = CONTEXT.get()
+        tracker.status.update(origin_request_id=context.get("request_id", ""), trace_id=context.get("trace_id", ""))
+        tracker.flush()
         control = RunControl(run_id=run_id, output_dir=output_dir, tracker=tracker, params=params)
         try:
             if checkpoint is not None:
@@ -519,17 +593,25 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             runtime.controls[run_id] = control
             job_args = (resolved.graph_cls, control, runtime, resolved.memory_database,
                         resolved.rag_chroma_dir, long_term_memory_enabled)
+            job_context = copy_context()
+            def job():
+                token = CONTEXT.set({**CONTEXT.get(), "run_id": run_id,
+                                     "origin_request_id": tracker.status["origin_request_id"]})
+                try:
+                    _run_copilot_job(*job_args)
+                finally:
+                    CONTEXT.reset(token)
             if resolved.run_in_background:
                 thread = Thread(
-                target=_run_copilot_job,
-                args=job_args,
+                target=job_context.run,
+                args=(job,),
                 name=f"copilot-ui-{run_id}",
                 daemon=True,
                 )
                 control.thread = thread
                 thread.start()
             else:
-                _run_copilot_job(*job_args)
+                job_context.run(job)
         except BaseException:
             runtime.controls.pop(run_id, None)
             remove_owned(runtime.root, output_dir)
@@ -629,7 +711,8 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/trace")
     @locked_run_io
-    def get_trace(run_id: str) -> dict:
+    def get_trace(run_id: str, request: Request) -> dict:
+        require_internal(request)
         run_dir = run_dir_for(run_id)
         if not run_dir.exists():
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
@@ -669,7 +752,9 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
 
     @app.get("/api/reports/{run_id}/{report_key}", response_class=PlainTextResponse)
     @locked_run_io
-    def get_report(run_id: str, report_key: str) -> PlainTextResponse:
+    def get_report(run_id: str, report_key: str, request: Request) -> PlainTextResponse:
+        if report_key in {"trace_json", "trace_markdown"}:
+            require_internal(request)
         run_dir = run_dir_for(run_id)
         if not _is_safe_id(report_key):
             raise HTTPException(status_code=400, detail="Invalid report key.")
@@ -1108,6 +1193,7 @@ def _run_copilot_job(
     state = None
     error = None
     try:
+        record("run.start")
         if control.cancel_event.is_set():
             raise RunCancelled("Run stopped before initialization.")
         params = dict(control.params)
@@ -1146,12 +1232,14 @@ def _run_copilot_job(
         error = exc
     except Exception as exc:  # pragma: no cover - covered through API behavior
         error = exc
+        record("run.failed", level="ERROR", **exception_data(exc))
     except BaseException:
         runtime.request_discard()
         raise
     finally:
         try:
             runtime.finalize(control, state=state, error=error)
+            record("run.end", outcome=tracker.status["status"], stop_reason=control.reason)
         finally:
             runtime.unregister(control)
 

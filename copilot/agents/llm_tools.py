@@ -282,7 +282,13 @@ def _create_deepseek_completion(
         request["reasoning_effort"] = config["reasoning_effort"]
     if config.get("extra_body"):
         request["extra_body"] = config["extra_body"]
-    response = client.chat.completions.create(**request)
+    from ai_trading_copilot.copilot.services.diagnostics import external_request
+    from ai_trading_copilot.copilot.services.tracing import trace_headers
+    with external_request("DeepSeek"):
+        headers = trace_headers()
+        if headers:
+            request["extra_headers"] = headers
+        response = client.chat.completions.create(**request)
     return response.choices[0].message
 
 

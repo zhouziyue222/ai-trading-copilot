@@ -119,7 +119,7 @@ def test_trace_recorder_configures_otlp_exporter_when_endpoint_is_set(tmp_path, 
     assert calls["endpoint"] == "http://collector:4317"
     assert calls["headers"] == {"x-api-key": "test"}
     assert calls["resource_attrs"] == {"service.name": "ai-trading-copilot"}
-    assert calls["flushed"] is True
+    assert "flushed" not in calls  # Remote export must not block report completion.
 
 
 def test_otel_attributes_use_summaries_for_large_llm_payloads():

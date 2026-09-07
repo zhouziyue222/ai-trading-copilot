@@ -24,3 +24,5 @@ knowledge/fundamentals_pending/raw/*
 !knowledge/fundamentals_pending/raw/.gitkeep
 tmp/yfinance_hbm_embeddings.json
 tmp/uv-cache/
+
+.playwright-cli/

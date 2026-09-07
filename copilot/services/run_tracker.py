@@ -101,7 +101,7 @@ class RunTracker:
             node = self._node(node_name)
             node["status"] = NODE_FAILED
             node["finished_at"] = _utc_now()
-            node["error"] = str(error)
+            node["error"] = sanitize_value(str(error))
             self.status["current_node"] = node_name
             self.add_error(f"{node_name}: {error}", flush=False)
             self._touch()
@@ -151,7 +151,7 @@ class RunTracker:
         with self._lock:
             self.status["errors"].append(
                 {
-                    "message": str(error),
+                    "message": sanitize_value(str(error)),
                     "timestamp": _utc_now(),
                 }
             )
@@ -223,7 +223,7 @@ class RunTracker:
             f"- Status file: `{self.status_path}`",
         ]
         if error is not None:
-            lines.append(f"- Exception: `{type(error).__name__}: {error}`")
+            lines.append(f"- Exception: `{type(error).__name__}: {sanitize_value(str(error))}`")
 
         lines.extend(["", "## Node Progress", ""])
         for node_name, node in self.status["nodes"].items():

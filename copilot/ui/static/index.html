@@ -2,6 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Trading Copilot</title>
     <link rel="stylesheet" href="/static/styles.css" />
@@ -12,7 +13,7 @@
         <div class="brand-mark">AI</div>
         <div class="brand-copy">
           <h1>AI Trading Copilot</h1>
-          <p>股票分析 / 自选股管理 / RAG 知识库 / 模拟账户</p>
+          <p>选择标的 · 查看进度 · 理解结果</p>
         </div>
       </div>
       <div class="shell-actions">
@@ -27,8 +28,8 @@
     <nav class="page-nav" aria-label="主页面">
       <button class="nav-button active" type="button" data-view="analysis">股票分析</button>
       <button class="nav-button" type="button" data-view="watchlist">我的自选股</button>
-      <button class="nav-button" type="button" data-view="rag">RAG 知识库</button>
-      <button class="nav-button" type="button" data-view="memory">记忆审批</button>
+      <details class="settings-menu"><summary>资料与设置</summary><button class="nav-button" type="button" data-view="rag">研究资料</button>
+      <button class="nav-button" type="button" data-view="memory">记忆审批</button></details>
       <button class="nav-button" type="button" data-view="portfolio">模拟账户概况</button>
     </nav>
 
@@ -41,8 +42,8 @@
           </div>
           <div class="view-actions">
             <button id="startRun" type="button">启动分析</button>
-            <button id="cancelRun" class="ghost-button danger-text" type="button" disabled>取消运行</button>
-            <button id="refreshRun" class="ghost-button" type="button" disabled>刷新进度</button>
+            <button id="cancelRun" class="ghost-button danger-text" type="button" disabled>取消并保存</button>
+            <button id="refreshRun" hidden class="ghost-button" type="button" disabled>重新连接</button>
           </div>
         </div>
 
@@ -51,7 +52,7 @@
             <div class="panel-title">
               <div>
                 <p class="eyebrow">Run Control</p>
-                <h3>分析参数</h3>
+                <h3>选择标的</h3>
               </div>
             </div>
 
@@ -66,7 +67,7 @@
                 <textarea id="manualSymbols" rows="3" placeholder="TSLA, NVDA"></textarea>
               </label>
 
-              <fieldset>
+              <details class="advanced-settings"><summary>高级设置</summary><fieldset>
                 <legend>分析模块</legend>
                 <label class="check module-check">
                   <input type="checkbox" name="analyst" value="news_sentiment" checked />
@@ -117,34 +118,25 @@
                   <small>启用交易前检索注入与复盘后的 LangMem 提炼</small>
                 </span>
               </label>
+              </details>
             </div>
           </aside>
 
           <section class="panel results-panel">
-            <div id="runHistory" class="run-history"></div>
+            <details><summary>历史记录与可恢复任务</summary><div id="runHistory" class="run-history"></div><div id="checkpoints"></div></details>
             <div id="summaryCards" class="summary-grid"></div>
             <div id="progress" class="progress"></div>
-            <div id="nodeGuide" class="node-guide"></div>
+            <div id="connectionStatus" role="status" aria-live="polite"></div>
             <div id="errors" class="errors"></div>
 
-            <section class="trace-section">
-              <div class="section-heading">
-                <h3>Trace</h3>
-                <span>节点、工具调用与耗时明细</span>
-              </div>
-              <div id="observabilityStatus" class="observability-status"></div>
-              <div class="trace-layout">
-                <div id="traceTimeline" class="trace-timeline"></div>
-                <pre id="traceDetails" class="trace-details">运行完成后选择一个 trace span 查看详情。</pre>
-              </div>
-            </section>
+
 
             <section class="decision-section">
               <div class="section-heading">
-                <h3>标的决策</h3>
+                <h3>结果摘要</h3>
                 <span>风控结论与执行边界</span>
               </div>
-              <div class="table-wrap">
+              <div id="resultSummary" aria-live="polite">完成分析后将在此展示结论。</div><details><summary>组合权重与模拟操作</summary><div class="table-wrap">
                 <table class="decision-table">
                   <thead>
                     <tr>
@@ -167,17 +159,17 @@
                     </tr>
                   </tbody>
                 </table>
-              </div>
+              </div></details>
             </section>
 
-            <section class="report-section">
+            <details class="report-section"><summary>完整报告与分析依据</summary>
               <div class="section-heading">
                 <h3>报告</h3>
                 <span>阶段报告与运行审计</span>
               </div>
               <nav id="reportTabs" class="tabs"></nav>
               <pre id="reportContent" class="report">选择或启动一次分析后，报告会显示在这里。</pre>
-            </section>
+            </details>
           </section>
         </div>
       </section>
@@ -252,12 +244,12 @@
             <div class="panel-title">
               <div>
                 <p class="eyebrow">Status</p>
-                <h3>状态诊断</h3>
+                <h3>资料可用性</h3>
               </div>
               <span id="ragStatus" class="inline-status">未加载</span>
             </div>
             <div id="ragStatusSummary" class="rag-status-summary"></div>
-            <div id="ragDiagnostics" class="diagnostic-grid"></div>
+            <div hidden id="ragDiagnostics" class="diagnostic-grid"></div>
           </section>
 
           <section class="panel">
@@ -394,6 +386,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260907-lifecycle"></script>
+    <script src="/static/app.js"></script>
   </body>
 </html>
