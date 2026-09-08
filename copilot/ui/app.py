@@ -1216,7 +1216,8 @@ def _run_copilot_job(
             memory_agent=memory_agent,
             fundamental_rag_retriever=fundamental_rag_retriever,
             cancellation_checker=control.cancel_event.is_set,
-            snapshot_callback=lambda state, order, index: runtime.capture(control, state, order, index),
+            snapshot_callback=lambda state, order, index, **kwargs: runtime.capture(control, state, order, index, **kwargs),
+            commit_callback=lambda: runtime.commit_boundary(control),
         )
         if control.cancel_event.is_set():
             raise RunCancelled("Run stopped before graph execution.")
@@ -1252,6 +1253,7 @@ def _create_graph(
     fundamental_rag_retriever=None,
     cancellation_checker: Callable[[], bool] | None = None,
     snapshot_callback: Callable | None = None,
+    commit_callback: Callable | None = None,
 ):
     kwargs = {"run_tracker": run_tracker}
     if accepts_keyword(graph_cls, "memory_agent"):
@@ -1263,6 +1265,10 @@ def _create_graph(
         kwargs["fundamental_rag_retriever"] = fundamental_rag_retriever
     if accepts_keyword(graph_cls, "force_sequential"):
         kwargs["force_sequential"] = True
+    if accepts_keyword(graph_cls, "parallel_analysts"):
+        kwargs["parallel_analysts"] = os.getenv("COPILOT_FORCE_SEQUENTIAL", "").strip().lower() not in {"1", "true", "yes", "on"}
+    if commit_callback is not None and accepts_keyword(graph_cls, "commit_callback"):
+        kwargs["commit_callback"] = commit_callback
     if cancellation_checker is not None and accepts_keyword(graph_cls, "cancellation_checker"):
         kwargs["cancellation_checker"] = cancellation_checker
     if snapshot_callback is not None and accepts_keyword(graph_cls, "snapshot_callback"):

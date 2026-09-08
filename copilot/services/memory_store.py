@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Iterable, List
 
@@ -18,6 +17,7 @@ from ai_trading_copilot.copilot.services.memory_repository import (
 )
 from ai_trading_copilot.copilot.services.vector_memory import (
     LocalVectorMemoryIndex,
+    memory_text_tokens,
     retrieval_query_text,
 )
 
@@ -62,10 +62,13 @@ class DistilledMemoryStore:
         *,
         actor: str = "reflector",
         reason: str = "post_run_reflection",
+        target_memory_id: str | None = None,
+        apply_update: bool = True,
     ) -> DistilledMemory:
-        candidate = memory.model_copy(update={"status": MemoryStatus.CANDIDATE})
-        saved = self.repository.upsert(candidate, actor=actor, reason=reason)
-        return saved
+        return self.repository.save_candidate(
+            memory, actor=actor, reason=reason,
+            target_memory_id=target_memory_id, apply_update=apply_update,
+        )
 
     def retrieve(
         self,
@@ -242,8 +245,4 @@ def _memory_terms(memory: DistilledMemory) -> set[str]:
 
 
 def _terms(value: str) -> set[str]:
-    return {
-        token.lower()
-        for token in re.findall(r"[A-Za-z0-9_]+", value)
-        if len(token) >= 2
-    }
+    return {token for token in memory_text_tokens(value) if len(token) >= 2}

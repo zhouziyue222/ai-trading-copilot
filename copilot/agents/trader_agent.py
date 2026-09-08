@@ -89,9 +89,9 @@ class TraderAgent:
             targets=[],
             reward_risk_ratio=reviewed.reward_risk_ratio,
             position_weight=0.0,
-            holding_period="No active holding period until the setup becomes actionable.",
+            holding_period="入场条件未满足，暂不设定持有周期。",
             invalidation_conditions=[],
-            persona_fit_reason="The current evidence does not meet actionable entry requirements.",
+            persona_fit_reason="现有证据尚未满足可执行入场条件。",
         )
 
     def create_plan_from_evidence(
@@ -152,23 +152,23 @@ class TraderAgent:
             market_regime=market_regime,
             direction=TradeDirection.BUY,
             entry_logic=(
-                "Buy only after the stock, sector, and broad market context "
-                "support an actionable pullback or confirmed continuation setup."
+                "仅当个股、行业及大盘共同支持"
+                "可执行的回调或已确认的趋势延续形态时考虑买入。"
             ),
             support_level=support,
             stop_loss=stop_loss,
             targets=[first_target, second_target],
             reward_risk_ratio=technical_position.reward_risk_ratio,
             position_weight=persona.default_position_weight_max,
-            holding_period="1-6 weeks",
+            holding_period="1—6周",
             invalidation_conditions=[
-                "Daily close below support or stop loss.",
-                "Broad market context deteriorates into a downtrend.",
-                "News/fundamental evidence introduces unresolved material risk.",
+                "日线收盘跌破支撑位或止损参考。",
+                "大盘转为下降趋势。",
+                "新闻或基本面出现尚未消除的重大风险。",
             ],
             persona_fit_reason=(
-                "The plan fits a controlled pullback style with explicit stop loss, "
-                "bounded position weight, and no leverage or options."
+                "计划采用受控回调策略，明确止损，"
+                "限制仓位，不使用杠杆或期权。"
             ),
             uses_leverage=False,
             uses_options=False,
@@ -293,6 +293,7 @@ class TraderAgent:
                     "memory_influence": influence,
                 }
             )
+            proposed_plan = plan
             plan = _enforce_trader_safety(
                 plan,
                 fallback=fallback,
@@ -305,8 +306,10 @@ class TraderAgent:
             report = strip_trailing_json_object(content) or _report_from_plan(
                 plan,
                 reviewed,
-                "LLM trader plan",
+                "模型生成的交易计划",
             )
+            if plan != proposed_plan:
+                report = _report_from_plan(plan, reviewed, "计划已按准入规则和仓位上限修正，以本报告为准。")
             return TraderAnalysisResult(plan, report, calls, reviewed)
         except RunCancelled:
             raise
@@ -340,10 +343,10 @@ def _review_opportunity(
     ):
         risk_points.append("price_below_50dma")
         updates["status"] = SubscriptionStatus.RISK_ELEVATED
-        review_reasons.append("Technical evidence shows price below the 50-day average.")
+        review_reasons.append("技术证据显示价格低于50日均线。")
 
     if news_sentiment is not None:
-        review_reasons.append(f"News sentiment score={news_sentiment.sentiment_score:.2f}.")
+        review_reasons.append(f"新闻情绪评分为{news_sentiment.sentiment_score:.2f}.")
         if news_sentiment.material_risk or news_sentiment.sentiment_score <= -0.4:
             updates["status"] = SubscriptionStatus.RISK_ELEVATED
             risk_points.extend(news_sentiment.risk_flags or ["negative_news_sentiment"])
@@ -351,7 +354,7 @@ def _review_opportunity(
     if fundamental_analysis is not None:
         score = fundamental_analysis.fundamental_score
         if score is not None:
-            review_reasons.append(f"Fundamental score={score:.2f}.")
+            review_reasons.append(f"基本面评分为{score:.2f}.")
         if fundamental_analysis.material_risk or not fundamental_analysis.thesis_intact:
             updates["status"] = SubscriptionStatus.RISK_ELEVATED
             risk_points.extend(fundamental_analysis.risk_flags or ["fundamental_thesis_risk"])
@@ -378,20 +381,20 @@ def _opportunity_from_evidence(
 ) -> OpportunityRadarItem:
     trend_state = _stock_trend_state(technical_context, technical_position)
     status = SubscriptionStatus.OBSERVING
-    reason = "Technical evidence is insufficient for an active trade."
+    reason = "【待补充】技术证据不足，暂不主动交易。"
     if trend_state in {SymbolTrendState.UPTREND, SymbolTrendState.UPTREND_PULLBACK}:
         if (
             technical_position.reward_risk_ratio is not None
             and technical_position.reward_risk_ratio >= 2.0
         ):
             status = SubscriptionStatus.ACTIONABLE
-            reason = "Technical setup is actionable with acceptable reward/risk."
+            reason = "技术形态满足入场要求，收益风险比达到门槛。"
         else:
             status = SubscriptionStatus.NEAR_OPPORTUNITY
-            reason = "Trend is constructive but reward/risk or entry quality needs confirmation."
+            reason = "趋势有利，但收益风险比或入场质量仍需确认。"
     if trend_state == SymbolTrendState.DOWNTREND:
         status = SubscriptionStatus.RISK_ELEVATED
-        reason = "Stock technical state is a downtrend."
+        reason = "个股处于下降趋势。"
 
     item = OpportunityRadarItem(
         symbol=symbol.strip().upper(),
@@ -616,7 +619,7 @@ def _enforce_trader_safety(
         return fallback.model_copy(
             update={
                 "direction": TradeDirection.HOLD,
-                "entry_logic": "Current structured evidence failed the deterministic buy gate.",
+                "entry_logic": "现有证据未通过买入准入规则，暂不买入。",
                 "position_weight": 0.0,
                 "targets": [],
                 "memory_citations": [],
@@ -634,28 +637,28 @@ def _enforce_trader_safety(
 
 def _report_from_plan(plan: TradePlan, opportunity: OpportunityRadarItem, note: str) -> str:
     return (
-        f"# Trader Report: {plan.symbol}\n\n"
-        f"- Note: {note}\n"
-        f"- Market state: {zh_label(plan.market_regime)}\n"
-        f"- Opportunity status: {zh_label(opportunity.status)}\n"
-        f"- Direction: {zh_label(plan.direction)}\n"
-        f"- Entry logic: {plan.entry_logic}\n"
-        f"- Stop loss: {plan.stop_loss}\n"
-        f"- Targets: {', '.join(str(target) for target in plan.targets) or '-'}\n"
-        f"- Position weight: {plan.position_weight:.1%}\n"
-        f"- Holding period: {plan.holding_period}\n"
-        f"- Risk points: {', '.join(opportunity.risk_points) or '-'}\n"
+        f"# 交易计划报告： {plan.symbol}\n\n"
+        f"- 说明： {note}\n"
+        f"- 市场状态： {zh_label(plan.market_regime)}\n"
+        f"- 机会状态： {zh_label(opportunity.status)}\n"
+        f"- 结论方向： {zh_label(plan.direction)}\n"
+        f"- 入场依据： {plan.entry_logic}\n"
+        f"- 止损参考： {plan.stop_loss}\n"
+        f"- 目标价格： {', '.join(str(target) for target in plan.targets) or '-'}\n"
+        f"- 目标仓位： {plan.position_weight:.1%}\n"
+        f"- 持有周期： {plan.holding_period}\n"
+        f"- 风险要点： {', '.join(opportunity.risk_points) or '-'}\n"
     )
 
 
 def _suggested_action(status: SubscriptionStatus) -> str:
     if status == SubscriptionStatus.ACTIONABLE:
-        return "Prepare a risk-checked trade plan."
+        return "准备交易计划并提交风控审核。"
     if status == SubscriptionStatus.NEAR_OPPORTUNITY:
-        return "Wait for better entry confirmation."
+        return "等待更充分的入场确认。"
     if status == SubscriptionStatus.RISK_ELEVATED:
-        return "Avoid new entry until risk clears."
-    return "Continue monitoring."
+        return "风险消除前避免新开仓。"
+    return "继续观察。"
 
 
 def _unique_strings(values: list[str]) -> list[str]:

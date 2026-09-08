@@ -848,6 +848,7 @@ const visibleStages = [
   ["风险检查", ["Risk Check", "Portfolio Manager"]],
   ["生成报告", ["Explain Run", "Persist Trace"]],
 ];
+const parallelAnalystNames = ["Technical Position", "News Sentiment", "Fundamental Analysis"];
 
 function renderProgress(runId, runStatus = {}) {
   const nodes = runStatus.nodes || {};
@@ -866,15 +867,20 @@ function renderProgress(runId, runStatus = {}) {
   const completed = stages.filter(item => item.status === "succeeded").length;
   const elapsed = activityDurationLabel(activity);
   let message = runStatus.status === "running" ? `正在${stage?.label || "准备数据"}，已用时 ${runElapsed(runStatus)}` : "选择标的后开始分析";
+  const analysts = parallelAnalystNames.filter(name => nodes[name] && nodes[name].status !== "skipped");
+  const activeAnalysts = analysts.filter(name => nodes[name].status === "running");
+  if (activeAnalysts.length > 1) message = `分析师并行执行，已完成 ${analysts.filter(name => nodes[name].status === "succeeded").length}/${analysts.length}，已用时 ${runElapsed(runStatus)}`;
   if (runStatus.status === "running" && activity.tool_name && activity.status === "running") message += `；等待数据服务响应 ${elapsed}`;
   const activityStart = parseDate(activity.started_at || current.started_at);
   if (runStatus.status === "running" && activityStart && Date.now() - activityStart.getTime() > 60000) message += "；当前步骤耗时较长，尚未确认失败";
   if (runStatus.cancel_requested && runStatus.status === "running") message = "正在取消；等待当前调用结束后保存完整节点。";
+  if (runStatus.status === "running" && Object.values(nodes).some(node => node.status === "failed")) message = "正在停止；分析师执行失败，等待其他调用退出。";
   if (runStatus.status === "succeeded") message = (runStatus.errors || []).length || (runStatus.graph_errors || []).length ? "分析完成，但部分数据不完整，请检查报告中的限制。" : "分析完成，结果摘要已更新。";
   if (runStatus.status === "failed") message = `${stage?.label || "分析"}失败；请复制故障编号排查。`;
   if (runStatus.status === "cancelled") message = runStatus.resumable ? "已取消并保存，可在历史记录中手动恢复。" : "已取消，没有可恢复断点。";
   const tone = runStatus.status === "failed" ? "status-danger" : runStatus.status === "running" || (runStatus.graph_errors || []).length ? "status-warning" : runStatus.status === "succeeded" ? "status-success" : "status-neutral";
   $("progress").innerHTML = `<ol class="stage-list">${stages.map(item => `<li class="stage-${item.status}"><span>${item.status === "succeeded" ? "✓" : item.status === "failed" ? "!" : item.status === "running" ? "●" : "○"}</span>${item.label}</li>`).join("")}</ol><progress max="5" value="${completed}" aria-label="已完成阶段"></progress><p class="run-message ${tone}" role="status">${escapeHtml(message)}</p>`;
+  $("progress").insertAdjacentHTML("beforeend", `<div class="node-grid">${analysts.map(name => nodeCard(name, nodes[name])).join("")}</div>${renderNodeActivityDetails(runStatus)}`);
 }
 
 function nodeCard(name, node = {}, optional = false) {
@@ -886,6 +892,8 @@ function nodeCard(name, node = {}, optional = false) {
       <span>${escapeHtml(nodeStatusLabels[status] || status)}</span>
       <strong>${escapeHtml(name)}</strong>
       <em>${escapeHtml(duration)}</em>
+      ${node.activity?.tool_name ? `<small>${escapeHtml(node.activity.tool_name)}</small>` : ""}
+      ${node.error ? `<small>${escapeHtml(node.error)}</small>` : ""}
     </button>
   `;
 }
@@ -893,7 +901,7 @@ function nodeCard(name, node = {}, optional = false) {
 function renderNodeActivityDetails(runStatus = {}) {
   const nodeName = state.activeNodeName;
   if (!nodeName) return "";
-  if (nodeName !== "Technical Position") {
+  if (!parallelAnalystNames.includes(nodeName)) {
     return `
       <section class="node-activity-panel">
         <div class="section-heading compact">
@@ -915,7 +923,7 @@ function renderNodeActivityDetails(runStatus = {}) {
     <section class="node-activity-panel">
       <div class="section-heading compact">
         <div>
-          <h3>Technical Position 实时详情</h3>
+          <h3>${escapeHtml(nodeName)} 实时详情</h3>
           <span>显示 LLM 阶段、工具调用和脱敏摘要；完整 Trace 在运行结束后查看。</span>
         </div>
         <span class="status-chip ${toneClass(status)}">${escapeHtml(nodeStatusLabels[status] || status)}</span>

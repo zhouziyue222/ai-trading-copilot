@@ -1,0 +1,470 @@
+{
+  "format_version": "memory_effect_cases.v1",
+  "description": "Curated synthetic evaluation cases, not observed market outcomes. Do not tune prompts on evaluation labels.",
+  "cases": [
+    {
+      "case_id": "support-context",
+      "split": "evaluation",
+      "query": "support confirmation before entry",
+      "memories": [
+        {
+          "memory_id": "support",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Confirm support retest before entry.",
+          "confidence": 0.8
+        },
+        {
+          "memory_id": "other-symbol",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "MSFT"
+          ],
+          "lesson": "Confirm support.",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [
+        "support"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    },
+    {
+      "case_id": "lifecycle-isolation",
+      "split": "evaluation",
+      "query": "support retest",
+      "memories": [
+        {
+          "memory_id": "approved",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Wait for support confirmation.",
+          "confidence": 0.8
+        },
+        {
+          "memory_id": "candidate",
+          "memory_type": "strategy_performance",
+          "status": "candidate",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Wait for support confirmation.",
+          "confidence": 0.8
+        },
+        {
+          "memory_id": "shadow",
+          "memory_type": "strategy_performance",
+          "status": "shadow",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Wait for support confirmation.",
+          "confidence": 0.8
+        },
+        {
+          "memory_id": "rejected",
+          "memory_type": "strategy_performance",
+          "status": "rejected",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Wait for support confirmation.",
+          "confidence": 0.8
+        },
+        {
+          "memory_id": "deprecated",
+          "memory_type": "strategy_performance",
+          "status": "deprecated",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Wait for support confirmation.",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [
+        "approved"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    },
+    {
+      "case_id": "expired-excluded",
+      "split": "evaluation",
+      "query": "support",
+      "memories": [
+        {
+          "memory_id": "expired",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Old support guidance.",
+          "confidence": 0.8,
+          "valid_until": "2000-01-01T00:00:00+00:00"
+        },
+        {
+          "memory_id": "valid",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Current support guidance.",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [
+        "valid"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    },
+    {
+      "case_id": "chinese-strategy",
+      "split": "evaluation",
+      "query": "回踩支撑确认",
+      "memories": [
+        {
+          "memory_id": "cn-support",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "strategy",
+          "symbols": [],
+          "lesson": "回踩支撑确认后再入场，避免追高。",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [
+        "cn-support"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    },
+    {
+      "case_id": "irrelevant-global",
+      "split": "evaluation",
+      "query": "support retest entry",
+      "memories": [
+        {
+          "memory_id": "irrelevant",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "global",
+          "symbols": [],
+          "lesson": "Currency hedging for overseas bond allocations.",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    },
+    {
+      "case_id": "same-symbol-noise",
+      "split": "evaluation",
+      "query": "support confirmation",
+      "memories": [
+        {
+          "memory_id": "support-only",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Confirm support before entry.",
+          "confidence": 0.8
+        },
+        {
+          "memory_id": "unrelated-aapl",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Weekly accounting calendar archival schedule.",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [
+        "support-only"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    },
+    {
+      "case_id": "caution-sizing",
+      "split": "evaluation",
+      "query": "earnings gap position sizing",
+      "memories": [
+        {
+          "memory_id": "gap-caution",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Past support setups with earnings gap risk warrant limiting new weight to 0.10 until confirmation.",
+          "confidence": 0.8,
+          "tags": [
+            "position_sizing"
+          ]
+        }
+      ],
+      "relevant_ids": [
+        "gap-caution"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.1,
+      "news": {
+        "symbol": "AAPL",
+        "material_risk": false,
+        "risk_flags": [
+          "earnings_gap"
+        ],
+        "summary": "Support setup after an earnings gap; confirmation remains uncertain."
+      }
+    },
+    {
+      "case_id": "frozen-revision",
+      "split": "evaluation",
+      "query": "support confirmation",
+      "memories": [
+        {
+          "memory_id": "frozen-base",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Confirm support before entry.",
+          "confidence": 0.8
+        },
+        {
+          "memory_id": "new-revision",
+          "memory_type": "strategy_performance",
+          "status": "candidate",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Revised support requires review.",
+          "confidence": 0.8,
+          "supersedes": "frozen-base"
+        }
+      ],
+      "relevant_ids": [
+        "frozen-base"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    },
+    {
+      "case_id": "no-memory-needed",
+      "split": "evaluation",
+      "query": "current downtrend",
+      "memories": [
+        {
+          "memory_id": "msft-only",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "MSFT"
+          ],
+          "lesson": "Support in MSFT.",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": false
+      },
+      "allowed_directions": [
+        "hold",
+        "watch",
+        "reduce",
+        "sell"
+      ],
+      "max_final_weight": 0
+    },
+    {
+      "case_id": "development-basic",
+      "split": "development",
+      "query": "support",
+      "memories": [
+        {
+          "memory_id": "dev-support",
+          "memory_type": "strategy_performance",
+          "status": "approved",
+          "scope": "symbol",
+          "symbols": [
+            "AAPL"
+          ],
+          "lesson": "Wait for support.",
+          "confidence": 0.8
+        }
+      ],
+      "relevant_ids": [
+        "dev-support"
+      ],
+      "technical_position": {
+        "symbol": "AAPL",
+        "current_price": 102,
+        "support_level": 100,
+        "recent_high": 115,
+        "distance_to_support_pct": 0.02,
+        "pullback_from_high_pct": 0.113,
+        "reward_risk_ratio": 3,
+        "uptrend": true
+      },
+      "allowed_directions": [
+        "buy",
+        "hold",
+        "watch"
+      ],
+      "max_final_weight": 0.25
+    }
+  ]
+}

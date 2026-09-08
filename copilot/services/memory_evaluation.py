@@ -58,9 +58,9 @@ class MemoryShadowEvaluator:
         passed_safety = not safety_reasons
         reasons.extend(safety_reasons)
 
-        usage = self.repository.usage_for_memory(memory_id, mode="shadow")
+        usage = self.repository.usage_for_memory(memory_id, mode="shadow", version=memory.version)
         evidence_runs = len({row["run_id"] for row in usage})
-        outcomes = self.repository.outcomes_for_memory(memory_id, mode="shadow")
+        outcomes = self.repository.outcomes_for_memory(memory_id, mode="shadow", version=memory.version)
         realized = [item.realized_return for item in outcomes if item.realized_return is not None]
         raw_excess = [
             item.realized_return - item.benchmark_return
@@ -132,15 +132,17 @@ class MemoryShadowEvaluator:
     ) -> DistilledMemory:
         if automatic and not self.policy.allow_auto_promotion:
             raise PermissionError("automatic memory promotion is disabled by policy")
-        evaluation = self.evaluate(memory_id)
-        if not evaluation.eligible:
-            raise ValueError("memory failed promotion gate: " + "; ".join(evaluation.reasons))
-        return self.repository.transition(
-            memory_id,
-            MemoryStatus.APPROVED,
-            actor=actor,
-            reason=reason,
-        )
+        with self.repository.transaction():
+            evaluation = self.evaluate(memory_id)
+            if evaluation.eligible:
+                return self.repository.transition(
+                    memory_id,
+                    MemoryStatus.APPROVED,
+                    actor=actor,
+                    reason=reason,
+                )
+        # Commit the failed evaluation as audit evidence before reporting failure.
+        raise ValueError("memory failed promotion gate: " + "; ".join(evaluation.reasons))
 
     @staticmethod
     def safety_reasons(memory: DistilledMemory) -> list[str]:

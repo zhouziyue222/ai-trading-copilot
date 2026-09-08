@@ -47,6 +47,7 @@ ai-trading-copilot-ui = "ai_trading_copilot.copilot.ui.server:main"
 ai-trading-copilot-rag = "ai_trading_copilot.copilot.rag:main"
 ai-trading-copilot-eval = "ai_trading_copilot.copilot.evaluation:main"
 ai-trading-copilot-memory = "ai_trading_copilot.copilot.memory:main"
+ai-trading-copilot-memory-eval = "ai_trading_copilot.copilot.memory_eval:main"
 ai-trading-copilot-harness-benchmark = "ai_trading_copilot.copilot.harness_benchmark:main"
 ai-trading-copilot-harness = "ai_trading_copilot.copilot.harness_control:main"
 

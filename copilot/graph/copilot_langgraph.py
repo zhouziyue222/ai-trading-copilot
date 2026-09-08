@@ -4,8 +4,13 @@
 from __future__ import annotations
 
 import os
+import queue
+import tempfile
+import threading
 import time
+import contextvars
 from copy import deepcopy
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -86,6 +91,18 @@ DEFAULT_SELECTED_ANALYSTS = [
 _DEFAULT_LLM = object()
 
 
+class _ParallelBranchFailure(RuntimeError):
+    """Internal stop signal used when one analyst fails."""
+
+
+def _next_index(node_order: list[str], completed_nodes: set[str] | Iterable[str]) -> int:
+    completed = set(completed_nodes)
+    for index, node_name in enumerate(node_order):
+        if node_name not in completed:
+            return index
+    return len(node_order)
+
+
 class CopilotLangGraph:
     """List-batch graph with optional analysts and portfolio decisions."""
 
@@ -143,8 +160,10 @@ class CopilotLangGraph:
         run_tracker: Optional[RunTracker] = None,
         fundamental_rag_retriever=None,
         force_sequential: bool | None = None,
+        parallel_analysts: bool = False,
         cancellation_checker: Optional[Callable[[], bool]] = None,
-        snapshot_callback: Optional[Callable[[dict, list[str], int], None]] = None,
+        snapshot_callback: Optional[Callable[..., None]] = None,
+        commit_callback: Optional[Callable[[], Any]] = None,
     ):
         default_llm = None
         if llm is _DEFAULT_LLM:
@@ -155,6 +174,13 @@ class CopilotLangGraph:
         self.llm_unavailable = (
             llm is _DEFAULT_LLM and enable_default_llm and default_llm is None
         )
+        if parallel_analysts and llm is _DEFAULT_LLM and default_llm is not None:
+            if news_sentiment_agent is None and news_sentiment_llm is None:
+                news_sentiment_llm = create_default_deepseek_llm()
+            if technical_position_agent is None and technical_position_llm is None:
+                technical_position_llm = create_default_deepseek_llm()
+            if fundamental_analyst_agent is None and fundamental_llm is None:
+                fundamental_llm = create_default_deepseek_llm()
         self.opportunity_radar_agent = opportunity_radar_agent or OpportunityRadarAgent(
             llm=opportunity_radar_llm or default_llm
         )
@@ -179,7 +205,7 @@ class CopilotLangGraph:
         self.portfolio_manager = portfolio_manager or PortfolioManager(llm=default_llm)
         self.memory_agent = memory_agent
         if default_llm is not None and hasattr(self.fundamental_analyst_agent, "set_rag_query_llm"):
-            self.fundamental_analyst_agent.set_rag_query_llm(default_llm)
+            self.fundamental_analyst_agent.set_rag_query_llm(resolved_fundamental_llm)
         self.explanation_agent = explanation_agent or RunExplanationAgent(
             llm=default_llm
         )
@@ -199,6 +225,10 @@ class CopilotLangGraph:
         self.run_tracker = run_tracker
         self.cancellation_checker = cancellation_checker
         self.snapshot_callback = snapshot_callback
+        self.commit_callback = commit_callback
+        self.parallel_analysts = bool(parallel_analysts)
+        self._parallel_worker_context = threading.local()
+        self._parallel_failure_event: threading.Event | None = None
         self._resume_snapshot = None
         self.trace_recorder: TraceRecorder | None = None
         self._compiled_graph = self._compile_graph()
@@ -352,12 +382,21 @@ class CopilotLangGraph:
                 self.run_tracker.succeed_node("Fail Closed")
             return state
         if self.force_sequential:
+            if (
+                self.parallel_analysts
+                or self.commit_callback is not None
+                or self.snapshot_callback is not None
+                or bool((self._resume_snapshot or {}).get("completed_nodes"))
+            ):
+                return self._run_controlled(base_state)
             return self._run_sequential(base_state)
         if self._compiled_graph is not None:
             return self._compiled_graph.invoke(base_state)
         return self._run_sequential(base_state)
 
     def _check_cancelled(self) -> None:
+        if self._parallel_failure_event is not None and self._parallel_failure_event.is_set():
+            raise _ParallelBranchFailure("A parallel analyst failed.")
         if self.cancellation_checker is not None and self.cancellation_checker():
             raise RunCancelled("Run cancelled by user.")
 
@@ -446,16 +485,175 @@ class CopilotLangGraph:
         node_map = self._node_map()
         node_order = self._sequential_node_order(current)
         next_index = self._resume_snapshot["next_node_index"] if self._resume_snapshot else 0
-        if self.snapshot_callback is not None:
-            self.snapshot_callback(current, node_order, next_index)
+        completed_nodes = list(node_order[:next_index])
+        self._emit_snapshot(current, node_order, next_index, completed_nodes)
         for index in range(next_index, len(node_order)):
             self._check_cancelled()
             working = deepcopy(current)
             updates = node_map[node_order[index]](working)
             current = self._merge_state(working, updates)
-            if self.snapshot_callback is not None:
-                self.snapshot_callback(current, node_order, index + 1)
+            completed_nodes.append(node_order[index])
+            self._emit_snapshot(current, node_order, index + 1, completed_nodes)
         return current
+
+    def _run_controlled(self, state: CopilotGraphState) -> CopilotGraphState:
+        current = deepcopy(state)
+        node_map = self._node_map()
+        order = self._sequential_node_order(current)
+        snapshot = self._resume_snapshot or {}
+        completed = set(snapshot.get("completed_nodes", order[:snapshot.get("next_node_index", 0)]))
+        analysts = [name for name in (self.NODE_TECHNICAL_POSITION, self.NODE_NEWS_SENTIMENT,
+                                      self.NODE_FUNDAMENTAL_ANALYSIS) if name in order]
+        self._emit_snapshot(current, order, _next_index(order, completed), completed)
+        for name in order:
+            if name in completed:
+                continue
+            pending = [node for node in analysts if node not in completed]
+            if self.parallel_analysts and name in analysts and len(pending) > 1:
+                current = self._run_parallel_analysts(current, node_map, pending, completed, order)
+            else:
+                self._check_cancelled()
+                working = deepcopy(current)
+                try:
+                    updates, reports = self._execute_staged(node_map[name], working)
+                    with self._commit_context():
+                        self._check_cancelled()
+                        candidate = self._merge_state(working, updates)
+                        self._publish_boundary(name, reports, candidate, completed, order)
+                        current = candidate
+                except RunCancelled:
+                    raise
+                except Exception as exc:
+                    if self.run_tracker is not None:
+                        self.run_tracker.fail_node(name, exc)
+                    raise
+        return current
+
+    def _execute_staged(self, node_func, state):
+        local = self._parallel_worker_context
+        local.active = True
+        local.reports = []
+        try:
+            updates = node_func(state)
+            return updates, list(local.reports)
+        finally:
+            local.active = False
+            local.reports = []
+
+    def _publish_boundary(self, name, reports, state, completed, order):
+        analyst_keys = (AnalystType.TECHNICAL_POSITION.value, AnalystType.NEWS_SENTIMENT.value,
+                        AnalystType.FUNDAMENTAL_ANALYSIS.value)
+        for field in ("agent_reports", "analyst_reports"):
+            values = state.get(field, {})
+            state[field] = {**{key: value for key, value in values.items() if key not in analyst_keys},
+                            **{key: values[key] for key in analyst_keys if key in values}}
+        ranks = {node: index for index, node in enumerate(order)}
+        state["trace_events"] = sorted(state.get("trace_events", []),
+                                       key=lambda event: ranks.get(event.node_name if hasattr(event, "node_name")
+                                                                   else event.get("node_name"), len(order)))
+        for key, temporary, destination in reports:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(temporary, destination)
+            if self.run_tracker is not None:
+                self.run_tracker.record_report(key, destination)
+        if self.run_tracker is not None:
+            self.run_tracker.succeed_node(name)
+        completed.add(name)
+        self._emit_snapshot(state, order, _next_index(order, completed), completed)
+
+    def _run_parallel_analysts(self, current, node_map, pending, completed, node_order):
+        base = deepcopy(current)
+        results = queue.Queue()
+        stop = threading.Event()
+        self._parallel_failure_event = stop
+        workers = []
+        first_failure = None
+        cancelled = None
+        successful = {}
+        checker = self.cancellation_checker
+        token = CancellationToken(str(base.get("run_id", "")),
+                                  lambda: stop.is_set() or bool(checker and checker()),
+                                  GLOBAL_CANCELLATION_MANAGER)
+
+        def worker(name):
+            try:
+                with activate_cancellation(token):
+                    updates, reports = self._execute_staged(node_map[name], deepcopy(base))
+                results.put((name, updates, reports, None))
+            except BaseException as exc:
+                if not isinstance(exc, (RunCancelled, _ParallelBranchFailure)):
+                    stop.set()
+                results.put((name, None, [], exc))
+
+        try:
+            for name in pending:
+                context = contextvars.copy_context()
+                thread = threading.Thread(target=context.run, args=(worker, name),
+                                          name=f"copilot-{name}", daemon=True)
+                thread.start()
+                workers.append(thread)
+            for _ in workers:
+                name, updates, reports, error = results.get()
+                if error is not None:
+                    if isinstance(error, (RunCancelled, _ParallelBranchFailure)):
+                        cancelled = error
+                    elif first_failure is None:
+                        first_failure = error
+                        stop.set()
+                        if self.run_tracker is not None:
+                            self.run_tracker.fail_node(name, error)
+                        GLOBAL_CANCELLATION_MANAGER.request_cancel(str(base.get("run_id", "")))
+                    continue
+                if first_failure is not None or stop.is_set():
+                    continue
+                try:
+                    with self._commit_context():
+                        self._check_cancelled()
+                        successful[name] = updates
+                        candidate = deepcopy(base)
+                        for ordered in pending:
+                            if ordered in successful:
+                                candidate = self._merge_state(candidate, successful[ordered])
+                        self._publish_boundary(name, reports, candidate, completed, node_order)
+                        current = candidate
+                except (RunCancelled, _ParallelBranchFailure) as exc:
+                    cancelled = exc
+                except Exception as exc:
+                    first_failure = exc
+                    stop.set()
+                    GLOBAL_CANCELLATION_MANAGER.request_cancel(str(base.get("run_id", "")))
+        except BaseException:
+            stop.set()
+            GLOBAL_CANCELLATION_MANAGER.request_cancel(str(base.get("run_id", "")))
+            raise
+        finally:
+            # The coordinator owns all branch lifetimes. Never finalize a run
+            # while a late worker can still write into its temporary directory.
+            for thread in workers:
+                thread.join()
+            self._parallel_failure_event = None
+        if first_failure is not None:
+            raise first_failure
+        if cancelled is not None:
+            raise cancelled
+        self._check_cancelled()
+        return current
+
+    def _commit_context(self):
+        return self.commit_callback() if self.commit_callback is not None else nullcontext()
+
+    def _emit_snapshot(self, state, node_order, next_index, completed_nodes):
+        if self.snapshot_callback is None:
+            return
+        try:
+            self.snapshot_callback(
+                state, node_order, next_index, completed_nodes=[name for name in node_order if name in completed_nodes]
+            )
+        except TypeError as exc:
+            # Keep test doubles and older graph integrations source-compatible.
+            if "completed_nodes" not in str(exc):
+                raise
+            self.snapshot_callback(state, node_order, next_index)
 
     def _route_analyst_nodes(self, state: CopilotGraphState) -> List[str]:
         selected = state.get("selected_analysts", [])
@@ -520,6 +718,7 @@ class CopilotLangGraph:
     def _tracked_node(self, node_name: str, node_func: Callable):
         def wrapped(state: CopilotGraphState) -> CopilotGraphState:
             self._check_cancelled()
+            parallel_worker = bool(getattr(self._parallel_worker_context, "active", False))
             if self.run_tracker is not None:
                 self.run_tracker.start_node(node_name)
             recorder = get_current_trace_recorder()
@@ -544,10 +743,10 @@ class CopilotLangGraph:
             except RunCancelled:
                 raise
             except Exception as exc:
-                if self.run_tracker is not None:
+                if self.run_tracker is not None and not parallel_worker:
                     self.run_tracker.fail_node(node_name, exc)
                 raise
-            if self.run_tracker is not None:
+            if self.run_tracker is not None and not parallel_worker:
                 self.run_tracker.succeed_node(node_name)
             return updates
 
@@ -575,6 +774,8 @@ class CopilotLangGraph:
         node_name = _span_graph_node_name(span, recorder)
         if node_name not in {
             self.NODE_TECHNICAL_POSITION,
+            self.NODE_NEWS_SENTIMENT,
+            self.NODE_FUNDAMENTAL_ANALYSIS,
             self.NODE_TRADER,
             self.NODE_PORTFOLIO_MANAGER,
         }:
@@ -1149,7 +1350,7 @@ class CopilotLangGraph:
             stage="4_risk_check",
             agent_name="risk_check",
             content=result.report
-            or "# Risk Manager Report\n\nNo risk assessment was generated.\n",
+            or "# 风险管理报告\n\nNo risk assessment was generated.\n",
         )
         return self._with_trace(
             state,
@@ -1350,9 +1551,19 @@ class CopilotLangGraph:
         report_dir = output_dir / stage
         report_dir.mkdir(parents=True, exist_ok=True)
         path = report_dir / f"{agent_name}.md"
-        path.write_text(content, encoding="utf-8")
-        if self.run_tracker is not None:
-            self.run_tracker.record_report(agent_name, path)
+        from ai_trading_copilot.copilot.services.reporting import prepare_report
+
+        if getattr(self._parallel_worker_context, "active", False):
+            temporary_dir = output_dir / ".branches"
+            temporary_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=temporary_dir,
+                                             suffix=".md", delete=False) as handle:
+                handle.write(prepare_report(content))
+            self._parallel_worker_context.reports.append((agent_name, Path(handle.name), path))
+        else:
+            path.write_text(prepare_report(content), encoding="utf-8")
+            if self.run_tracker is not None:
+                self.run_tracker.record_report(agent_name, path)
         return str(path)
 
     def _format_opportunity_radar_report(
@@ -1360,11 +1571,11 @@ class CopilotLangGraph:
         items: List[OpportunityRadarItem],
     ) -> str:
         lines = [
-            "# Opportunity Radar Agent Report",
+            "# 机会雷达报告",
             "",
-            f"Generated at: {datetime.now().isoformat(timespec='seconds')}",
+            f"生成时间： {datetime.now().isoformat(timespec='seconds')}",
             "",
-            "| Symbol | Trend | Opportunity Status | Current Price | Support | Reward/Risk | Reason |",
+            "| 标的 | 趋势 | 机会状态 | 当前价格 | 支撑位 | 收益风险比 | 依据 |",
             "| --- | --- | --- | --- | --- | --- | --- |",
         ]
         for item in items:
@@ -1392,15 +1603,19 @@ class CopilotLangGraph:
     ) -> str:
         contexts = contexts or {}
         lines = [
-            "# Technical Position Agent Report",
+            "# 技术分析报告",
             "",
-            f"Generated at: {datetime.now().isoformat(timespec='seconds')}",
+            f"生成时间： {datetime.now().isoformat(timespec='seconds')}",
             "",
-            "| Symbol | Current Price | Support | Recent High | MA20 | MA50 | Distance to Support | Pullback from High | Reward/Risk |",
+            "| 标的 | 当前价格 | 支撑位 | 近期高点 | 20日均线 | 50日均线 | 距支撑幅度 | 高点回撤 | 收益风险比 |",
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for symbol in sorted(positions):
             position = positions[symbol]
+            context = contexts.get(symbol)
+            if context is not None and not context.stock.data_available:
+                lines.append(f"| {symbol} | 【待补充】缺少行情 | - | - | - | - | - | - | - |")
+                continue
             lines.append(
                 "| "
                 + " | ".join(
@@ -1419,14 +1634,14 @@ class CopilotLangGraph:
                 + " |"
             )
         if not positions:
-            lines.append("| None | No usable price history | - | - | - | - | - | - | - |")
+            lines.append("| 无 | 【待补充】缺少有效历史行情 | - | - | - | - | - | - | - |")
         context_sections = [
             (symbol, context)
             for symbol, context in sorted(contexts.items())
             if context.downstream_summary or context.decision_basis or context.uncertainties
         ]
         if context_sections:
-            lines.extend(["", "## Downstream Context", ""])
+            lines.extend(["", "## 综合判断依据", ""])
             for symbol, context in context_sections:
                 lines.extend(_downstream_context_lines(symbol, context))
         return "\n".join(lines) + "\n"
@@ -1438,17 +1653,17 @@ class CopilotLangGraph:
         reports: Dict[str, FundamentalAnalysisReport],
     ) -> str:
         lines = [
-            "# Fundamental Analysis Agent Report",
+            "# 基本面分析报告",
             "",
-            f"Generated at: {datetime.now().isoformat(timespec='seconds')}",
+            f"生成时间： {datetime.now().isoformat(timespec='seconds')}",
             "",
-            "| Symbol | Thesis Intact | Material Risk | Risk Flags | Summary |",
+            "| 标的 | 投资逻辑完整 | 重大风险 | 风险事项 | 结论 |",
             "| --- | --- | --- | --- | --- |",
         ]
         for symbol in subscription_symbols:
             report = reports.get(symbol)
             if report is None:
-                lines.append(f"| {symbol} | Not provided | Not provided | - | No fundamental input was provided. |")
+                lines.append(f"| {symbol} | 【待补充】未提供 | 【待补充】未提供 | - | 【待补充】未取得基本面资料，无法判断。 |")
                 continue
             lines.append(
                 "| "
@@ -1468,7 +1683,7 @@ class CopilotLangGraph:
     def _format_symbol_reports(self, reports_by_symbol: Dict[str, str]) -> str:
         if not reports_by_symbol:
             return ""
-        lines = ["", "## Per-Symbol Analyst Reports", ""]
+        lines = ["", "## 逐标的分析", ""]
         for symbol in sorted(reports_by_symbol):
             lines.extend([f"### {symbol}", "", reports_by_symbol[symbol].strip(), ""])
         return "\n".join(lines)
@@ -1531,14 +1746,14 @@ def _fmt_number(value: float | None) -> str:
 
 def _format_single_fundamental_analysis_report(report: FundamentalAnalysisReport) -> str:
     return (
-        f"# Fundamental Analysis: {report.symbol}\n\n"
-        f"- Thesis intact: {zh_bool(report.thesis_intact)}\n"
-        f"- Material risk: {zh_bool(report.material_risk)}\n"
-        f"- Risk flags: {zh_join(report.risk_flags)}\n"
-        f"- Decision basis: {zh_join(report.decision_basis)}\n"
-        f"- Uncertainties: {zh_join(report.uncertainties)}\n"
-        f"- Downstream summary: {report.downstream_summary or '-'}\n"
-        f"- Summary: {report.summary or '-'}\n"
+        f"# 基本面分析： {report.symbol}\n\n"
+        f"- 投资逻辑是否完整： {zh_bool(report.thesis_intact)}\n"
+        f"- 是否存在重大风险： {zh_bool(report.material_risk)}\n"
+        f"- 风险事项： {zh_join(report.risk_flags)}\n"
+        f"- 关键依据： {zh_join(report.decision_basis)}\n"
+        f"- 【待补充】不确定性： {zh_join(report.uncertainties)}\n"
+        f"- 综合结论： {report.downstream_summary or '-'}\n"
+        f"- 结论： {report.summary or '-'}\n"
     )
 
 
@@ -1548,17 +1763,17 @@ def _format_news_sentiment_report(
     reports: Dict[str, NewsSentimentReport],
 ) -> str:
     lines = [
-        "# News Sentiment Agent Report",
+        "# 新闻与情绪分析报告",
         "",
-        f"Generated at: {datetime.now().isoformat(timespec='seconds')}",
+        f"生成时间： {datetime.now().isoformat(timespec='seconds')}",
         "",
-        "| Symbol | Sentiment | Company News | Social | Earnings | Material Risk | Key Events | Alerts | Summary |",
+        "| 标的 | 综合情绪 | 公司新闻 | 社交情绪 | 财报事件 | 重大风险 | 关键事件 | 提醒 | 结论 |",
         "| --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
     ]
     for symbol in subscription_symbols:
         report = reports.get(symbol)
         if report is None:
-            lines.append(f"| {symbol} | - | - | - | - | - | - | - | No report. |")
+            lines.append(f"| {symbol} | - | - | - | - | - | - | - | 【待补充】未取得分析报告。 |")
             continue
         lines.append(
             "| "
@@ -1586,9 +1801,9 @@ def _format_news_sentiment_report(
         lines.extend(
             [
                 "",
-                "## News References",
+                "## 新闻来源",
                 "",
-                "| Symbol | Published At | Source | Title | URL | Event Type | Relevance |",
+                "| 标的 | 发布时间 | 来源 | 标题 | 链接 | 事件类型 | 相关性 |",
                 "| --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
@@ -1614,7 +1829,7 @@ def _format_news_sentiment_report(
         if report.downstream_summary or report.decision_basis or report.uncertainties
     ]
     if context_sections:
-        lines.extend(["", "## Downstream Context", ""])
+        lines.extend(["", "## 综合判断依据", ""])
         for symbol, report in context_sections:
             lines.extend(_downstream_context_lines(symbol, report))
     return "\n".join(lines) + "\n"
@@ -1665,12 +1880,12 @@ def _downstream_context_lines(symbol: str, item) -> List[str]:
         return []
     lines = [f"### {symbol}"]
     if downstream_summary:
-        lines.extend(["", f"Downstream summary: {downstream_summary}"])
+        lines.extend(["", f"综合结论： {downstream_summary}"])
     if decision_basis:
-        lines.extend(["", "Decision basis:"])
+        lines.extend(["", "关键依据："])
         lines.extend(f"- {value}" for value in decision_basis if value.strip())
     if uncertainties:
-        lines.extend(["", "Uncertainties:"])
+        lines.extend(["", "【待补充】不确定性："])
         lines.extend(f"- {value}" for value in uncertainties if value.strip())
     return lines + [""]
 
@@ -1681,14 +1896,14 @@ def _format_memory_report(
     shadow_memories: Dict[str, List[DistilledMemory]] | None = None,
     retrievals: Iterable[MemoryRetrievalRecord] = (),
 ) -> str:
-    lines = ["# Trading Memory Retrieval Report", ""]
+    lines = ["# 历史经验检索报告", ""]
     if not memories:
-        lines.append("No relevant trading memories were retrieved.")
+        lines.append("未检索到可用的相关历史经验，本次判断不引用历史经验。")
     else:
         for symbol, items in sorted(memories.items()):
             lines.extend([f"## {symbol}", ""])
             if not items:
-                lines.append("- No relevant trading memories were retrieved.")
+                lines.append("- 未检索到可用的相关历史经验，本次判断不引用历史经验。")
             for item in items:
                 suffix = _memory_source_suffix(item)
                 lines.append(
@@ -1699,9 +1914,9 @@ def _format_memory_report(
     if shadow_memories:
         lines.extend(
             [
-                "# Shadow Memory Observations",
+                "# 历史经验对照记录",
                 "",
-                "These items were measured but were not injected into any agent prompt.",
+                "以下经验仅用于对照评估，未参与本次决策。",
                 "",
             ]
         )
@@ -1710,17 +1925,17 @@ def _format_memory_report(
                 lines.append(f"- {symbol}: `{item.memory_id}@{item.version}`")
     retrieval_list = list(retrievals)
     if retrieval_list:
-        lines.extend(["", "# Retrieval Audit", ""])
+        lines.extend(["", "# 检索核对", ""])
         for record in retrieval_list:
             request = record.request
             lines.extend(
                 [
                     f"## {request.consumer} / {request.symbol} / {request.phase}",
                     "",
-                    f"- Query: {request.query[:800]}",
-                    f"- Approved: {', '.join(record.approved_ids) or '-'}",
-                    f"- Shadow: {', '.join(record.shadow_ids) or '-'}",
-                    f"- Cited: {', '.join(record.cited_ids) or '-'}",
+                    f"- 检索条件： {request.query[:800]}",
+                    f"- 已通过筛选： {', '.join(record.approved_ids) or '-'}",
+                    f"- 对照记录： {', '.join(record.shadow_ids) or '-'}",
+                    f"- 实际引用： {', '.join(record.cited_ids) or '-'}",
                     "",
                 ]
             )
@@ -1778,7 +1993,7 @@ def _subscription_book_from_symbols(symbols: List[str]) -> SubscriptionBook:
 def _span_graph_node_name(span, recorder: TraceRecorder) -> str | None:
     parent_id = span.parent_span_id
     while parent_id:
-        parent = recorder._span_by_id.get(parent_id)  # noqa: SLF001 - local trace tree lookup.
+        parent = recorder.get_span(parent_id)
         if parent is None:
             return None
         node_name = parent.attributes.get("graph.node.name")

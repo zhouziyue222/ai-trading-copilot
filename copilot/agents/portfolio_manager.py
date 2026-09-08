@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ai_trading_copilot.copilot.domain.localization import zh_label, zh_bool
+
 from dataclasses import dataclass
 
 from ai_trading_copilot.copilot.agents.llm_tools import (
@@ -349,13 +351,13 @@ def _direction_from_action(action: str) -> TradeDirection:
 def _reasoning(action: str, risk: RiskAssessment) -> str:
     if action == "hold":
         if not risk.approved:
-            return "Hold because the eligibility gate kept the target flat."
+            return "准入条件未通过，维持当前仓位。"
         if risk.current_price is None:
-            return "Hold because no price is available for share estimation."
-        return "Hold because the risk-adjusted target is unchanged or below one share."
+            return "【待补充】缺少当前价格，无法估算交易股数，暂维持仓位。"
+        return "风控后目标仓位未变化，或调整量不足一股，维持当前仓位。"
     if risk.clamped:
-        return "Use the risk-adjusted final weight after v2 clamp."
-    return "Use the requested target weight because it is within v2 risk limits."
+        return "按照风控限额调整后的最终仓位执行。"
+    return "申请仓位符合风控限额，采用申请目标仓位。"
 
 
 def _message(
@@ -366,17 +368,17 @@ def _message(
 ) -> str:
     if action == "hold" or quantity <= 0:
         return (
-            "Portfolio Manager selected hold. "
-            f"Current {risk.current_position_weight:.2%}, final {risk.final_weight:.2%}. "
-            "No broker order was submitted."
+            "组合经理决定维持仓位。"
+            f"当前仓位 {risk.current_position_weight:.2%}，最终仓位 {risk.final_weight:.2%}。"
+            "尚未向券商提交订单。"
         )
     base = (
-        f"Portfolio Manager selected {action} about {quantity} shares, moving "
-        f"from {risk.current_position_weight:.2%} to {risk.final_weight:.2%}. "
+        f"组合经理计划{zh_label(_direction_from_action(action))}约 {quantity} 股，仓位"
+        f"从 {risk.current_position_weight:.2%} 调整至 {risk.final_weight:.2%}。"
     )
     if status == ExecutionStatus.CONFIRMATION_REQUIRED:
-        return f"{base} Live action requires explicit user confirmation."
-    return f"{base} Simulated broker order is pending result-page confirmation."
+        return f"{base} 实盘操作需要用户明确确认。"
+    return f"{base} 模拟订单等待结果页确认，尚未成交。"
 
 
 def _report_from_decision(
@@ -384,24 +386,24 @@ def _report_from_decision(
     risk: RiskAssessment,
 ) -> str:
     return (
-        f"# Portfolio Manager Report: {decision.symbol}\n\n"
-        f"- Action: {decision.action}\n"
-        f"- Quantity: {decision.quantity}\n"
-        f"- Status: {decision.status.value}\n"
-        f"- Current weight: {decision.current_weight:.2%}\n"
-        f"- Requested target weight: {decision.target_weight:.2%}\n"
-        f"- Risk-adjusted final weight: {decision.final_weight:.2%}\n"
-        f"- Delta weight: {decision.delta_weight:.2%}\n"
-        f"- Estimated trade value: {decision.estimated_trade_value:.2f}\n"
-        f"- Pending broker order: {str(decision.pending_broker_order).lower()}\n"
-        f"- Broker confirmation required: {str(decision.broker_confirmation_required).lower()}\n"
-        f"- Clamped by risk: {str(risk.clamped).lower()}\n"
-        f"- Memory scale: {decision.memory_scale:.2f}\n"
-        f"- Pre-memory final weight: {decision.pre_memory_final_weight}\n"
-        f"- Memory citations: {', '.join(decision.memory_citations) or '-'}\n"
-        f"- Memory influence: {decision.memory_influence or '-'}\n"
-        f"- Reasoning: {decision.reasoning}\n"
-        f"- Message: {decision.message}\n"
+        f"# 组合管理报告： {decision.symbol}\n\n"
+        f"- 操作方向： {zh_label(_direction_from_action(decision.action))}\n"
+        f"- 数量（股）： {decision.quantity}\n"
+        f"- 执行状态： {zh_label(decision.status)}\n"
+        f"- 当前仓位： {decision.current_weight:.2%}\n"
+        f"- 申请目标仓位： {decision.target_weight:.2%}\n"
+        f"- 风控后仓位： {decision.final_weight:.2%}\n"
+        f"- 仓位变化： {decision.delta_weight:.2%}\n"
+        f"- 估算交易金额： {decision.estimated_trade_value:.2f}\n"
+        f"- 是否待提交券商： {zh_bool(decision.pending_broker_order)}\n"
+        f"- 是否需要交易确认： {zh_bool(decision.broker_confirmation_required)}\n"
+        f"- 是否受风控限额约束： {zh_bool(risk.clamped)}\n"
+        f"- 历史经验调整系数： {decision.memory_scale:.2f}\n"
+        f"- 历史经验调整前仓位： {decision.pre_memory_final_weight}\n"
+        f"- 历史经验引用： {', '.join(decision.memory_citations) or '-'}\n"
+        f"- 历史经验影响： {decision.memory_influence or '-'}\n"
+        f"- 决策依据： {decision.reasoning}\n"
+        f"- 执行说明： {decision.message}\n"
     )
 
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Protocol, Sequence
@@ -34,6 +35,11 @@ class MemoryRepository(Protocol):
     ) -> DistilledMemory: ...
 
     def get(self, memory_id: str) -> DistilledMemory | None: ...
+
+    def save_candidate(
+        self, memory: DistilledMemory, *, target_memory_id: str | None = None,
+        apply_update: bool = True, actor: str = "reflector", reason: str = "candidate",
+    ) -> DistilledMemory: ...
 
     def list(
         self,
@@ -90,11 +96,18 @@ class SQLiteMemoryRepository:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
+        self._active_connection: ContextVar[sqlite3.Connection | None] = ContextVar(
+            "memory_transaction", default=None
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        active = self._active_connection.get()
+        if active is not None:
+            yield active
+            return
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -107,6 +120,20 @@ class SQLiteMemoryRepository:
             raise
         finally:
             connection.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize read-modify-write operations, including across processes."""
+        if self._active_connection.get() is not None:
+            yield self._active_connection.get()
+            return
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            token = self._active_connection.set(connection)
+            try:
+                yield connection
+            finally:
+                self._active_connection.reset(token)
 
     def _initialize(self) -> None:
         with self._connection() as connection:
@@ -197,7 +224,7 @@ class SQLiteMemoryRepository:
     ) -> DistilledMemory:
         now = utc_now()
         memory_id = memory.memory_id.strip() or memory_fingerprint(memory)
-        with self._connection() as connection:
+        with self.transaction() as connection:
             existing_row = connection.execute(
                 "SELECT payload_json FROM memories WHERE memory_id = ?",
                 (memory_id,),
@@ -213,8 +240,8 @@ class SQLiteMemoryRepository:
             version = existing.version + 1 if existing else max(memory.version, 1)
             created_at = existing.created_at if existing else (memory.created_at or now)
             evidence = list(memory.evidence_run_ids)
-            if memory.source_run_id and memory.source_run_id.lower() not in evidence:
-                evidence.append(memory.source_run_id.lower())
+            if memory.source_run_id and memory.source_run_id.strip().lower() not in evidence:
+                evidence.append(memory.source_run_id.strip().lower())
             normalized = memory.model_copy(
                 update={
                     "memory_id": memory_id,
@@ -288,6 +315,65 @@ class SQLiteMemoryRepository:
             )
         return normalized
 
+    def save_candidate(
+        self,
+        memory: DistilledMemory,
+        *,
+        target_memory_id: str | None = None,
+        apply_update: bool = True,
+        actor: str = "reflector",
+        reason: str = "candidate",
+    ) -> DistilledMemory:
+        """The only automatic write path: merge candidates or propose revisions.
+
+        Resolve the target again under SQLite's write lock so an approval between
+        similarity search and persistence cannot be overwritten by learning.
+        """
+        candidate = memory.model_copy(update={"status": MemoryStatus.CANDIDATE})
+        proposal_key = _proposal_key(candidate)
+        memory_id = target_memory_id or candidate.memory_id or memory_fingerprint(candidate)
+        with self.transaction():
+            existing = self.get(memory_id)
+            while existing is not None:
+                if proposal_key == _proposal_key(existing) or proposal_key in existing.metadata.get("observed_proposals", []):
+                    return existing
+                if existing.status == MemoryStatus.CANDIDATE:
+                    candidate = _merge_candidate(existing, candidate, apply_update=apply_update)
+                    break
+                memory_id = _revision_id(existing, memory)
+                candidate = memory.model_copy(update={
+                    "memory_id": memory_id, "version": 1,
+                    "created_at": None, "updated_at": None,
+                    "status": MemoryStatus.CANDIDATE,
+                    "supersedes": existing.memory_id,
+                    "approved_by": None, "last_validated_at": None,
+                    "outcome_metrics": {}, "counter_evidence_run_ids": [],
+                    "metadata": {
+                        **memory.metadata,
+                        "observed_proposals": [],
+                        "outcome_verified": False,
+                        "frozen_memory_status": existing.status.value,
+                        "matches_frozen_memory": existing.memory_id,
+                    },
+                })
+                existing = self.get(memory_id)
+            candidate = candidate.model_copy(update={
+                "memory_id": memory_id,
+                "sample_count": len(set(candidate.evidence_run_ids) | (
+                    {candidate.source_run_id.strip().lower()} if candidate.source_run_id else set()
+                )),
+                "metadata": {
+                    **candidate.metadata,
+                    "outcome_verified": False,
+                    # ponytail: compact per-memory receipts; use an indexed table
+                    # if long-lived candidates accumulate large proposal histories.
+                    "observed_proposals": sorted({
+                        *candidate.metadata.get("observed_proposals", []), proposal_key,
+                    }),
+                },
+            })
+            return self.upsert(candidate, actor=actor, reason=reason)
+
     def get(self, memory_id: str) -> DistilledMemory | None:
         with self._connection() as connection:
             row = connection.execute(
@@ -341,25 +427,26 @@ class SQLiteMemoryRepository:
         actor: str,
         reason: str,
     ) -> DistilledMemory:
-        target = MemoryStatus(status)
-        memory = self.get(memory_id)
-        if memory is None:
-            raise KeyError(f"memory not found: {memory_id}")
-        if target == memory.status:
-            return memory
-        if target not in _ALLOWED_TRANSITIONS[memory.status]:
-            raise ValueError(
-                f"invalid memory transition: {memory.status.value} -> {target.value}"
+        with self.transaction():
+            target = MemoryStatus(status)
+            memory = self.get(memory_id)
+            if memory is None:
+                raise KeyError(f"memory not found: {memory_id}")
+            if target == memory.status:
+                return memory
+            if target not in _ALLOWED_TRANSITIONS[memory.status]:
+                raise ValueError(
+                    f"invalid memory transition: {memory.status.value} -> {target.value}"
+                )
+            updates: dict[str, object] = {"status": target}
+            if target == MemoryStatus.APPROVED:
+                updates["approved_by"] = actor
+                updates["last_validated_at"] = utc_now()
+            return self.upsert(
+                memory.model_copy(update=updates),
+                actor=actor,
+                reason=reason,
             )
-        updates: dict[str, object] = {"status": target}
-        if target == MemoryStatus.APPROVED:
-            updates["approved_by"] = actor
-            updates["last_validated_at"] = utc_now()
-        return self.upsert(
-            memory.model_copy(update=updates),
-            actor=actor,
-            reason=reason,
-        )
 
     def versions(self, memory_id: str) -> list[DistilledMemory]:
         with self._connection() as connection:
@@ -429,12 +516,17 @@ class SQLiteMemoryRepository:
                 ],
             )
 
-    def usage_for_memory(self, memory_id: str, *, mode: str | None = None) -> list[dict]:
+    def usage_for_memory(
+        self, memory_id: str, *, mode: str | None = None, version: int | None = None,
+    ) -> list[dict]:
         query = "SELECT * FROM memory_usage WHERE memory_id = ?"
-        parameters: list[str] = [memory_id]
+        parameters: list[str | int] = [memory_id]
         if mode:
             query += " AND mode = ?"
             parameters.append(mode)
+        if version is not None:
+            query += " AND memory_version = ?"
+            parameters.append(version)
         query += " ORDER BY created_at DESC"
         with self._connection() as connection:
             rows = connection.execute(query, parameters).fetchall()
@@ -477,7 +569,9 @@ class SQLiteMemoryRepository:
             )
         return outcome
 
-    def outcomes_for_memory(self, memory_id: str, *, mode: str = "shadow") -> list[RunOutcome]:
+    def outcomes_for_memory(
+        self, memory_id: str, *, mode: str = "shadow", version: int | None = None,
+    ) -> list[RunOutcome]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
@@ -486,9 +580,10 @@ class SQLiteMemoryRepository:
                 JOIN memory_usage u
                   ON u.run_id = o.run_id AND u.symbol = o.symbol
                 WHERE u.memory_id = ? AND u.mode = ?
+                  AND (? IS NULL OR u.memory_version = ?)
                 ORDER BY o.evaluated_at DESC
                 """,
-                (memory_id, mode),
+                (memory_id, mode, version, version),
             ).fetchall()
         return [RunOutcome.model_validate_json(row["payload_json"]) for row in rows]
 
@@ -557,6 +652,61 @@ def _semantic_payload(memory: DistilledMemory) -> dict:
     for key in ("memory_id", "version", "created_at", "updated_at"):
         payload.pop(key, None)
     return payload
+
+
+_CONTENT_FIELDS = (
+    "memory_type", "memory_kind", "scope", "validation_target", "lesson",
+    "trigger", "rationale", "symbols", "tags", "market_regimes", "timeframes",
+    "valid_from", "valid_until",
+)
+
+
+def _proposal_key(memory: DistilledMemory) -> str:
+    payload = memory.model_dump(mode="json")
+    evidence = sorted(set(memory.evidence_run_ids) | (
+        {memory.source_run_id.strip().lower()} if memory.source_run_id else set()
+    ))
+    content = {key: payload[key] for key in (*_CONTENT_FIELDS, "confidence")}
+    return hashlib.sha256(json.dumps([evidence, content], sort_keys=True).encode()).hexdigest()
+
+
+def _revision_id(existing: DistilledMemory, candidate: DistilledMemory) -> str:
+    # Use the existing fingerprint, including symbol and validation direction.
+    identity = f"{existing.memory_id}:{memory_fingerprint(candidate)}"
+    return "mem_revision_" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+
+def _merge_candidate(
+    existing: DistilledMemory, candidate: DistilledMemory, *, apply_update: bool,
+) -> DistilledMemory:
+    evidence = sorted(set(existing.evidence_run_ids) | set(candidate.evidence_run_ids) | (
+        {candidate.source_run_id.strip().lower()} if candidate.source_run_id else set()
+    ))
+    new_evidence = set(evidence) - set(existing.evidence_run_ids)
+    confidence = existing.confidence
+    if new_evidence and candidate.confidence is not None:
+        # Confidence is a model estimate, not measured trading performance.
+        prior_count = len(existing.evidence_run_ids)
+        confidence = (
+            (existing.confidence * prior_count + candidate.confidence * len(new_evidence))
+            / (prior_count + len(new_evidence))
+            if existing.confidence is not None and prior_count else candidate.confidence
+        )
+    updates = {key: getattr(candidate, key) for key in _CONTENT_FIELDS} if apply_update else {}
+    for key in ("symbols", "tags", "market_regimes", "timeframes"):
+        if not apply_update:
+            updates[key] = sorted(set(getattr(existing, key)) | set(getattr(candidate, key)))
+    updates.update({
+        "evidence_run_ids": evidence,
+        "sample_count": len(evidence),
+        "confidence": confidence,
+        "metadata": {
+            **existing.metadata, **candidate.metadata,
+            "observed_proposals": existing.metadata.get("observed_proposals", []),
+            "outcome_verified": False,
+        },
+    })
+    return existing.model_copy(update=updates)
 
 
 __all__ = [

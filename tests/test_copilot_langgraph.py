@@ -109,11 +109,11 @@ def test_news_sentiment_report_includes_news_references():
         },
     )
 
-    assert "## News References" in content
+    assert "## 新闻来源" in content
     assert "2026-08-16T12:00:00" in content
     assert "https://example.com/memory-stocks" in content
     assert "upcoming_earnings_catalyst" in content
-    assert "## Downstream Context" in content
+    assert "## 综合判断依据" in content
     assert "新闻中性偏谨慎，等待财报确认。" in content
 
 
@@ -419,7 +419,7 @@ def test_analyst_context_includes_structured_downstream_fields():
 
     assert "Technical Position Context" in context
     assert "News Sentiment Context" in context
-    assert "Downstream summary: Technical pullback is constructive." in context
+    assert "综合结论： Technical pullback is constructive." in context
     assert "Price is near support." in context
     assert "Upcoming earnings could change sentiment." in context
 

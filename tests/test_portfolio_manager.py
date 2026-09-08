@@ -128,7 +128,7 @@ def test_portfolio_manager_uses_clamped_weight_instead_of_requested_weight():
     assert result.decision.target_weight == 0.30
     assert result.decision.final_weight == 0.10
     assert result.decision.quantity == int(10_000 // 104)
-    assert "Risk-adjusted final weight" in result.report
+    assert "风控后仓位" in result.report
 
 
 def test_portfolio_manager_holds_when_final_weight_is_unchanged():

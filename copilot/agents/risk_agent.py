@@ -7,6 +7,8 @@ allowed final weights for the Portfolio Manager to turn into actions.
 
 from __future__ import annotations
 
+from ai_trading_copilot.copilot.domain.localization import zh_label, zh_bool
+
 from dataclasses import dataclass
 from typing import Dict, Mapping, Sequence
 
@@ -102,7 +104,7 @@ class RiskAgent:
             assessment=assessment,
             report=_report_from_assessments(
                 {assessment.symbol: assessment},
-                note="deterministic v2 risk clamp",
+                note="基于既定限额核定仓位",
             ),
             risk_challenge=challenge,
         )
@@ -205,7 +207,7 @@ class RiskAgent:
             assessments=assessments,
             report=_report_from_assessments(
                 assessments,
-                note="deterministic v2 risk clamp",
+                note="基于既定限额核定仓位",
             ),
             risk_challenges=risk_challenges,
             target_weights={symbol: round(weight, 6) for symbol, weight in full_targets.items()},
@@ -352,15 +354,15 @@ def _eligibility_warnings(
     warnings: list[str] = []
     subscription = subscriptions.get(symbol) if subscriptions is not None else None
     if subscriptions is not None and subscription is None:
-        warnings.append("Symbol is not in the subscription book; target is held flat.")
+        warnings.append("标的不在订阅清单内，维持当前仓位。")
     if subscription is not None and not persona.allows_market(subscription.market_type):
-        warnings.append("Market type is not allowed by the persona; target is held flat.")
+        warnings.append("该市场不符合用户配置，维持当前仓位。")
     if plan.uses_leverage and ForbiddenInstrument.LEVERAGE in persona.forbidden_instruments:
-        warnings.append("Leverage is forbidden by the persona; target is held flat.")
+        warnings.append("用户配置禁止杠杆，维持当前仓位。")
     if plan.uses_options and ForbiddenInstrument.OPTIONS in persona.forbidden_instruments:
-        warnings.append("Options are forbidden by the persona; target is held flat.")
+        warnings.append("用户配置禁止期权，维持当前仓位。")
     if abs(target_weight - current_weight) > EPSILON and current_price is None:
-        warnings.append("No current price is available; target is held flat.")
+        warnings.append("【待补充】缺少当前价格，维持当前仓位。")
     return warnings
 
 
@@ -374,12 +376,12 @@ def _clamps_by_symbol(clamps: Sequence[ClampEvent]) -> dict[str, list[ClampEvent
 def _clamp_warning(event: ClampEvent) -> str:
     if event.reason == "max_position_pct":
         return (
-            f"Target weight clamped from {event.before:.2%} to {event.after:.2%} "
-            f"by single-position limit {event.limit:.2%}."
+            f"目标仓位从 {event.before:.2%} 限制至 {event.after:.2%}，"
+            f"单标的仓位上限为 {event.limit:.2%}。"
         )
     return (
-        f"Target weight scaled from {event.before:.2%} to {event.after:.2%} "
-        f"by gross-exposure limit {event.limit:.2%}."
+        f"目标仓位从 {event.before:.2%} 缩减至 {event.after:.2%}，"
+        f"总敞口上限为 {event.limit:.2%}。"
     )
 
 
@@ -412,18 +414,18 @@ def _reasoning(
 def _risk_challenge(assessment: RiskAssessment) -> str:
     if not assessment.approved:
         return (
-            f"{assessment.symbol}: eligibility gate held the position at "
-            f"{assessment.current_position_weight:.2%}; Portfolio Manager should not trade."
+            f"{assessment.symbol}：准入条件未通过，仓位维持在 "
+            f"{assessment.current_position_weight:.2%}，组合经理不应交易。"
         )
     if assessment.clamped:
         return (
-            f"{assessment.symbol}: target was adjusted from "
-            f"{assessment.target_weight:.2%} to {assessment.final_weight:.2%}; "
-            "the reduced exposure remains cash."
+            f"{assessment.symbol}：目标仓位从 "
+            f"{assessment.target_weight:.2%} 调整至 {assessment.final_weight:.2%}；"
+            "被削减的敞口保留为现金。"
         )
     return (
-        f"{assessment.symbol}: requested target {assessment.target_weight:.2%} "
-        "is within v2 risk limits."
+        f"{assessment.symbol}：申请目标仓位 {assessment.target_weight:.2%} "
+        "符合当前风控限额。"
     )
 
 
@@ -433,11 +435,11 @@ def _report_from_assessments(
     note: str,
 ) -> str:
     lines = [
-        "# Risk Manager Report",
+        "# 风险管理报告",
         "",
-        f"- Note: {note}",
+        f"- 说明： {note}",
         "",
-        "| Symbol | Approved | Current | Target | Final | Delta | Clamped | Trade Value |",
+        "| 标的 | 是否通过 | 当前仓位 | 申请仓位 | 最终仓位 | 仓位变化 | 是否受限 | 估算交易金额 |",
         "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |",
     ]
     for symbol in sorted(assessments):
@@ -447,12 +449,12 @@ def _report_from_assessments(
             + " | ".join(
                 [
                     assessment.symbol,
-                    str(assessment.approved).lower(),
+                    zh_bool(assessment.approved),
                     f"{assessment.current_position_weight:.2%}",
                     f"{assessment.target_weight:.2%}",
                     f"{assessment.final_weight:.2%}",
                     f"{assessment.delta_weight:.2%}",
-                    str(assessment.clamped).lower(),
+                    zh_bool(assessment.clamped),
                     f"{assessment.estimated_trade_value:.2f}",
                 ]
             )
@@ -464,9 +466,9 @@ def _report_from_assessments(
         for warning in assessment.warnings
     ]
     if warnings:
-        lines.extend(["", "## Warnings"])
+        lines.extend(["", "## 风险提示"])
         lines.extend(f"- {warning}" for warning in warnings)
-    lines.extend(["", "## Risk Caveats"])
+    lines.extend(["", "## 风控结论"])
     lines.extend(f"- {_risk_challenge(assessment)}" for assessment in assessments.values())
     return "\n".join(lines) + "\n"
 

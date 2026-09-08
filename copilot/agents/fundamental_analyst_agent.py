@@ -58,7 +58,7 @@ class FundamentalAnalystAgent:
             thesis_intact=True,
             material_risk=False,
             risk_flags=[],
-            summary="LLM fundamental analysis was not generated.",
+            summary="【待补充】未生成基本面分析，默认评分不代表中性判断，无法确认投资逻辑或排除重大风险。",
             fundamental_score=0.0,
             data_availability={"llm": "unavailable"},
         )
@@ -159,16 +159,16 @@ def _string_list(value) -> list[str]:
 
 def _markdown_from_report(report: FundamentalAnalysisReport) -> str:
     return (
-        f"# Fundamental Analysis: {report.symbol}\n\n"
-        f"- Fundamental score: {report.fundamental_score if report.fundamental_score is not None else '-'}\n"
-        f"- Thesis intact: {'yes' if report.thesis_intact else 'no'}\n"
-        f"- Material risk: {'yes' if report.material_risk else 'no'}\n"
-        f"- Risk flags: {', '.join(report.risk_flags) or '-'}\n"
-        f"- Key events: {', '.join(report.key_events) or '-'}\n"
-        f"- Decision basis: {', '.join(report.decision_basis) or '-'}\n"
-        f"- Uncertainties: {', '.join(report.uncertainties) or '-'}\n"
-        f"- Downstream summary: {report.downstream_summary or '-'}\n"
-        f"- Summary: {report.summary or '-'}\n"
+        f"# 基本面分析： {report.symbol}\n\n"
+        f"- 基本面评分： {report.fundamental_score if report.fundamental_score is not None else '-'}\n"
+        f"- 投资逻辑是否完整： {'是' if report.thesis_intact else '否'}\n"
+        f"- 是否存在重大风险： {'是' if report.material_risk else '否'}\n"
+        f"- 风险事项： {', '.join(report.risk_flags) or '-'}\n"
+        f"- 关键事件： {', '.join(report.key_events) or '-'}\n"
+        f"- 关键依据： {', '.join(report.decision_basis) or '-'}\n"
+        f"- 【待补充】不确定性： {', '.join(report.uncertainties) or '-'}\n"
+        f"- 综合结论： {report.downstream_summary or '-'}\n"
+        f"- 结论： {report.summary or '-'}\n"
     )
 
 

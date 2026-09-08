@@ -7,6 +7,9 @@ from string import Template
 from typing import Any
 
 
+from ai_trading_copilot.copilot.services.reporting import REPORT_WRITING_RULES
+
+
 PROMPT_DIR = Path(__file__).resolve().parents[2] / "config" / "prompts"
 
 
@@ -22,4 +25,4 @@ def load_prompt_template(name: str) -> str:
 
 def render_prompt(name: str, **context: Any) -> str:
     values = {key: str(value) for key, value in context.items()}
-    return Template(load_prompt_template(name)).safe_substitute(values)
+    return Template(load_prompt_template(name)).safe_substitute(values) + "\n\n" + REPORT_WRITING_RULES

@@ -61,13 +61,13 @@ def force_kill(pid):
 
 
 @contextmanager
-def offline_server(root):
+def offline_server(root, mode=None):
     root.mkdir(parents=True, exist_ok=True)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     log = (root / f"server-{time.time_ns()}.log").open("w", encoding="utf-8")
-    process = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "tests.lifecycle_server", str(root), str(port)],
+    process = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "tests.lifecycle_server", str(root), str(port), *([mode] if mode else [])],
                                cwd=Path(__file__).resolve().parents[1], stdout=log, stderr=log,
                                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=5)
@@ -200,3 +200,19 @@ def test_occupied_port_does_not_trigger_legacy_cleanup(tmp_path):
                                 capture_output=True, timeout=20)
     assert result.returncode != 0
     assert status.exists()
+
+
+@pytest.mark.parametrize("termination", ["sigint", "kill"])
+def test_parallel_workers_discard_on_process_exit(tmp_path, termination):
+    with offline_server(tmp_path, "parallel") as (client, process, pid):
+        run_id = client.post("/api/runs", json={"symbols": ["AAPL"], "long_term_memory_enabled": False}).json()["run_id"]
+        wait_status(client, run_id, lambda s: len(s["current_nodes"]) == 3)
+        if termination == "kill":
+            force_kill(pid)
+        else:
+            client.post("/test/sigint")
+        process.wait(10)
+    with offline_server(tmp_path, "parallel") as (client, _, __):
+        assert client.get("/api/runtime").json()["status"] == "idle"
+        assert client.get("/api/checkpoints").json()["items"] == []
+        assert not list((tmp_path / "reports/.runtime").glob("*/run_*"))

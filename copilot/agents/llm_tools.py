@@ -289,6 +289,9 @@ def _create_deepseek_completion(
         if headers:
             request["extra_headers"] = headers
         response = client.chat.completions.create(**request)
+    observer = config.get("completion_observer")
+    if observer is not None:
+        observer(response)
     return response.choices[0].message
 
 
@@ -434,6 +437,7 @@ def _deepseek_sdk_config(llm: Any) -> dict[str, Any] | None:
         "api_key": api_key,
         "reasoning_effort": getattr(llm, "reasoning_effort", None),
         "extra_body": extra_body,
+        "completion_observer": getattr(llm, "_copilot_completion_observer", None),
     }
 
 
@@ -630,21 +634,10 @@ def extract_json_object(text: str) -> Dict[str, Any]:
 
 
 def strip_trailing_json_object(text: str) -> str:
-    """Remove a final JSON object from an LLM response before saving Markdown reports."""
-    stripped = text.strip()
-    if not stripped.endswith("}"):
-        return stripped
+    """Remove machine payloads from the human report, including fenced JSON."""
+    from ai_trading_copilot.copilot.services.reporting import strip_report_json
 
-    depth = 0
-    for index in range(len(stripped) - 1, -1, -1):
-        char = stripped[index]
-        if char == "}":
-            depth += 1
-        elif char == "{":
-            depth -= 1
-            if depth == 0:
-                return stripped[:index].rstrip()
-    return stripped
+    return strip_report_json(text)
 
 
 def _tool_call_name(call: Any) -> str:

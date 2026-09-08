@@ -86,7 +86,7 @@ def test_cancel_resume_preserves_boundary_and_consumes_checkpoint(app):
         assert not any("partial" in name for name in snapshot["reports"])
         restored = restore_snapshot(snapshot, app.state.runtime.work_root / "type_check", "test")
         assert isinstance(restored["state"]["persona_config"], UserPersonaConfig)
-        assert client.get(f"/api/reports/{run_id}/first").text == "中文报告：已完成\n"
+        assert client.get(f"/api/reports/{run_id}/first").text == snapshot["reports"]["1_complete/first.md"]
         assert client.post(f"/api/runs/{run_id}/cancel").status_code == 200
         assert len(client.get("/api/checkpoints").json()["items"]) == 1
         BoundaryGraph.finish_second.set()

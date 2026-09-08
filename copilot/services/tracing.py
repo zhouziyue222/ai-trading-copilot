@@ -156,12 +156,11 @@ class TraceSpanScope:
         return False
 
     def set_attribute(self, key: str, value: Any) -> None:
-        self.span.attributes[key] = sanitize_value(
-            value,
-            text_limit=_attribute_text_limit(key),
-        )
-        if self.span._otel_span is not None:
-            self.span._otel_span.set_attribute(key, _otel_value(key, value))
+        sanitized = sanitize_value(value, text_limit=_attribute_text_limit(key))
+        with self.recorder._lock:
+            self.span.attributes[key] = sanitized
+            if self.span._otel_span is not None:
+                self.span._otel_span.set_attribute(key, _otel_value(key, value))
         self.recorder.notify_activity("attribute", self.span)
 
     def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
@@ -170,9 +169,10 @@ class TraceSpanScope:
             "timestamp": _utc_now(),
             "attributes": sanitize_value(attributes or {}),
         }
-        self.span.events.append(event)
-        if self.span._otel_span is not None:
-            self.span._otel_span.add_event(name, _otel_attributes(attributes or {}))
+        with self.recorder._lock:
+            self.span.events.append(event)
+            if self.span._otel_span is not None:
+                self.span._otel_span.add_event(name, _otel_attributes(attributes or {}))
         self.recorder.notify_activity("event", self.span)
 
     def record_exception(self, exc: BaseException) -> None:
@@ -214,6 +214,10 @@ class TraceRecorder:
         self.trace_id = CONTEXT.get().get("trace_id") or secrets.token_hex(16)
         self.spans: list[SpanRecord] = []
         self._span_by_id: dict[str, SpanRecord] = {}
+        # The graph can finish spans from several analyst worker threads.  Keep
+        # registry mutations and snapshots serialized, but never invoke user
+        # callbacks while holding this lock (callbacks may touch RunTracker).
+        self._lock = RLock()
         self._otel_provider = None
         self._otel_tracer = None
         self._otel_enabled = False
@@ -260,13 +264,14 @@ class TraceRecorder:
             attributes=sanitize_value(resolved_attributes),
             _start_perf=time.perf_counter(),
         )
-        span._otel_span = self._start_otel_span(span)
-        if span._otel_span is not None:
-            sdk_context = span._otel_span.get_span_context()
-            span.trace_id = self.trace_id = format(sdk_context.trace_id, "032x")
-            span.span_id = format(sdk_context.span_id, "016x")
-        self.spans.append(span)
-        self._span_by_id[span.span_id] = span
+        with self._lock:
+            span._otel_span = self._start_otel_span(span)
+            if span._otel_span is not None:
+                sdk_context = span._otel_span.get_span_context()
+                span.trace_id = self.trace_id = format(sdk_context.trace_id, "032x")
+                span.span_id = format(sdk_context.span_id, "016x")
+            self.spans.append(span)
+            self._span_by_id[span.span_id] = span
         self.notify_activity("start", span)
         record("span.start", trace_id=span.trace_id, span_id=span.span_id, parent_span_id=parent_id,
                name=name, node=resolved_attributes.get("graph.node.name"), tool=resolved_attributes.get("tool.name"),
@@ -294,35 +299,46 @@ class TraceRecorder:
 
     def end_span(self, span_id: str, *, status: str = "ok", error: str | None = None) -> None:
         error = redact(error)
-        span = self._span_by_id[span_id]
-        span.status = status
-        span.error = redact(error)
-        span.ended_at = _utc_now()
-        span.duration_ms = round((time.perf_counter() - span._start_perf) * 1000, 3)
-        span.attributes["status"] = status
-        span.attributes["duration_ms"] = span.duration_ms
-        if error:
-            span.attributes["error"] = _truncate(error)
-        if span._otel_span is not None:
-            span._otel_span.set_attribute("status", status)
-            span._otel_span.set_attribute("duration_ms", span.duration_ms)
+        with self._lock:
+            span = self._span_by_id[span_id]
+            if span.ended_at is not None:
+                return
+            span.status = status
+            span.error = redact(error)
+            span.ended_at = _utc_now()
+            span.duration_ms = round((time.perf_counter() - span._start_perf) * 1000, 3)
+            span.attributes["status"] = status
+            span.attributes["duration_ms"] = span.duration_ms
             if error:
-                span._otel_span.set_attribute("error", _truncate(error))
-            _set_otel_status(span._otel_span, status, error)
-            span._otel_span.end()
-        self.notify_activity("end", span)
-        record("span.end", trace_id=span.trace_id, span_id=span.span_id, parent_span_id=span.parent_span_id,
-               name=span.name, tool=span.attributes.get("tool.name"), node=span.attributes.get("graph.node.name"),
-               cache_hit=span.attributes.get("tool.cache_hit", False), duration_ms=span.duration_ms,
-               outcome=status, output_summary={key: value for key, value in span.attributes.items()
+                span.attributes["error"] = _truncate(error)
+            if span._otel_span is not None:
+                span._otel_span.set_attribute("status", status)
+                span._otel_span.set_attribute("duration_ms", span.duration_ms)
+                if error:
+                    span._otel_span.set_attribute("error", _truncate(error))
+                _set_otel_status(span._otel_span, status, error)
+                span._otel_span.end()
+            completed = _snapshot_span(span)
+        self.notify_activity("end", completed)
+        record("span.end", trace_id=completed.trace_id, span_id=completed.span_id,
+               parent_span_id=completed.parent_span_id, name=completed.name,
+               tool=completed.attributes.get("tool.name"),
+               node=completed.attributes.get("graph.node.name"),
+               cache_hit=completed.attributes.get("tool.cache_hit", False),
+               duration_ms=completed.duration_ms, outcome=status,
+               output_summary={key: value for key, value in completed.attributes.items()
                    if key.startswith(("tool.output.", "llm.response.")) and key.endswith((".chars", ".bytes", ".sha256"))},
                **{"error.message": redact(error)})
 
     def notify_activity(self, event: str, span: SpanRecord) -> None:
         if self._activity_callback is None:
             return
+        with self._lock:
+            snapshot = _snapshot_span(span)
         try:
-            self._activity_callback(event, span, self)
+            # The callback is deliberately outside ``self._lock``.  A tracker
+            # callback may synchronously request another trace snapshot.
+            self._activity_callback(event, snapshot, self)
         except Exception:
             return
 
@@ -337,6 +353,8 @@ class TraceRecorder:
         return self.trace_json_path, self.trace_markdown_path
 
     def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            spans = [_snapshot_span(span) for span in self.spans]
         return {
             "trace_id": self.trace_id,
             "run_id": self.run_id,
@@ -345,7 +363,7 @@ class TraceRecorder:
             "otel_export_enabled": self._otel_enabled,
             "otel": self.otel_status(),
             "generated_at": _utc_now(),
-            "spans": [_span_to_dict(span) for span in self.spans],
+            "spans": [_span_to_dict(span) for span in spans],
         }
 
     def otel_status(self) -> dict[str, Any]:
@@ -373,7 +391,9 @@ class TraceRecorder:
             "| Span | Parent | Name | Kind | Status | Duration ms | Attributes |",
             "| --- | --- | --- | --- | --- | ---: | --- |",
         ]
-        for span in self.spans:
+        with self._lock:
+            spans = [_snapshot_span(span) for span in self.spans]
+        for span in spans:
             lines.append(
                 "| "
                 + " | ".join(
@@ -404,7 +424,7 @@ class TraceRecorder:
             from opentelemetry.trace import SpanKind
             from opentelemetry.trace import SpanContext, NonRecordingSpan, TraceFlags
 
-            parent_span = self._span_by_id.get(span.parent_span_id or "")
+            parent_span = self.get_span(span.parent_span_id)
             context = (
                 trace.set_span_in_context(parent_span._otel_span)
                 if parent_span is not None and parent_span._otel_span is not None
@@ -422,6 +442,22 @@ class TraceRecorder:
             )
         except Exception:
             return None
+
+    def get_span(self, span_id: str | None) -> SpanRecord | None:
+        """Return a span from the registry under the recorder lock.
+
+        The returned record remains the live internal object for backwards
+        compatibility; callers that need a stable value should use
+        ``snapshot_span`` or ``to_dict``.
+        """
+        if not span_id:
+            return None
+        with self._lock:
+            return self._span_by_id.get(span_id)
+
+    def snapshot_span(self, span_id: str) -> SpanRecord:
+        with self._lock:
+            return _snapshot_span(self._span_by_id[span_id])
 
     def _common_span_attributes(self) -> dict[str, Any]:
         return {
@@ -507,6 +543,32 @@ def _span_to_dict(span: SpanRecord) -> dict[str, Any]:
         "events": span.events,
         "error": span.error,
     }
+
+
+def _snapshot_span(span: SpanRecord) -> SpanRecord:
+    """Make a stable callback/serialization view without copying OTEL handles."""
+    events = []
+    for event in span.events:
+        copied = dict(event)
+        if isinstance(copied.get("attributes"), dict):
+            copied["attributes"] = dict(copied["attributes"])
+        events.append(copied)
+    return SpanRecord(
+        trace_id=span.trace_id,
+        span_id=span.span_id,
+        parent_span_id=span.parent_span_id,
+        name=span.name,
+        kind=span.kind,
+        status=span.status,
+        started_at=span.started_at,
+        ended_at=span.ended_at,
+        duration_ms=span.duration_ms,
+        attributes=dict(span.attributes),
+        events=events,
+        error=span.error,
+        _start_perf=span._start_perf,
+        _otel_span=span._otel_span,
+    )
 
 
 def _utc_now() -> str:

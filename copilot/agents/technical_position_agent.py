@@ -77,7 +77,9 @@ class TechnicalPositionAgent:
             if bars
             else _empty_context(symbol, sector_symbol)
         )
-        fallback = _fallback_report(position)
+        fallback = (_fallback_report(position) if bars else
+                    f"# 技术分析：{symbol}\n\n## 信息概括\n\n【待补充】未取得历史行情。\n\n"
+                    "## 结论\n\n【待补充】无法确认趋势、支撑和收益风险比，暂不据此判断入场机会。")
         if self.llm is None:
             return TechnicalAnalysisResult(
                 position=position,
@@ -239,7 +241,7 @@ def _empty_context(symbol: str, sector_symbol: str) -> TechnicalContext:
             symbol=symbol.strip().upper(),
             label=symbol.strip().upper(),
             trend_state=SymbolTrendState.UNKNOWN,
-            reason="Missing price history.",
+            reason="【待补充】缺少历史行情。",
             data_available=False,
         ),
         sector=TechnicalDimension(
@@ -247,7 +249,7 @@ def _empty_context(symbol: str, sector_symbol: str) -> TechnicalContext:
             symbol=sector_symbol,
             label=f"{sector_symbol} sector proxy",
             trend_state=SymbolTrendState.UNKNOWN,
-            reason="Missing sector benchmark evidence.",
+            reason="【待补充】缺少行业基准数据。",
             data_available=False,
         ),
         market=TechnicalDimension(
@@ -255,10 +257,10 @@ def _empty_context(symbol: str, sector_symbol: str) -> TechnicalContext:
             symbol="SPY",
             label="SPY broad market proxy",
             trend_state=SymbolTrendState.UNKNOWN,
-            reason="Missing broad market benchmark evidence.",
+            reason="【待补充】缺少大盘基准数据。",
             data_available=False,
         ),
-        summary="Insufficient technical evidence.",
+        summary="【待补充】技术证据不足，暂不能形成可靠判断。",
         warnings=["missing_price_history"],
     )
 

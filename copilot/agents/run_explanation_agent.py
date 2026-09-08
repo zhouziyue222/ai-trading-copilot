@@ -17,6 +17,7 @@ from ai_trading_copilot.copilot.domain.models import (
 )
 from ai_trading_copilot.copilot.domain.localization import zh_join, zh_label
 from ai_trading_copilot.copilot.services.cancellation import RunCancelled, check_cancelled
+from ai_trading_copilot.copilot.services.reporting import REPORT_WRITING_RULES, prepare_report, strip_report_json
 
 
 class RunExplanationAgent:
@@ -56,7 +57,7 @@ class RunExplanationAgent:
             risk_notes = []
             if risk is not None:
                 risk_notes.append(
-                    f"Risk target {risk.target_weight:.2%}, final {risk.final_weight:.2%}, delta {risk.delta_weight:.2%}."
+                    f"申请仓位 {risk.target_weight:.2%}，风控后仓位 {risk.final_weight:.2%}，调整幅度 {risk.delta_weight:.2%}。"
                 )
                 risk_notes.extend(risk.warnings)
             if item.symbol in risk_challenges:
@@ -105,7 +106,7 @@ class RunExplanationAgent:
             lines.extend(["## 风险挑战", ""])
             for symbol, challenge in sorted(report.risk_challenges.items()):
                 lines.append(f"- {symbol}: {challenge}")
-        return "\n".join(lines)
+        return prepare_report("\n".join(lines))
 
     def _fallback_summary(
         self,
@@ -115,11 +116,11 @@ class RunExplanationAgent:
         actionable_count = sum(
             1 for item in symbols if item.status == SubscriptionStatus.ACTIONABLE
         )
-        regime_text = zh_label(market_regime.regime) if market_regime else "未知"
+        regime_text = zh_label(market_regime.regime) if market_regime else "【待补充】未提供整体市场评估"
         return (
             f"本次扫描覆盖 {len(symbols)} 个订阅标的；"
             f"市场环境为{regime_text}；"
-            f"发现 {actionable_count} 个可执行机会。"
+            f"发现 {actionable_count} 个可执行候选机会，实际操作仍以风控及执行状态为准。"
         )
 
     def _llm_summary_or_fallback(
@@ -130,6 +131,7 @@ class RunExplanationAgent:
         if self.llm is None:
             return fallback
         prompt = (
+            REPORT_WRITING_RULES + "\n仅输出中文 Markdown 摘要，不输出任何结构化对象。\n" +
             "请用简体中文总结这次 AI 交易助手扫描。保持简洁、面向用户，"
             "不要改变结构化决策、方向、风险结论或执行状态。优先说明可执行机会数量、"
             "主要风险和用户下一步。\n\n"
@@ -142,7 +144,7 @@ class RunExplanationAgent:
             response = self.llm.invoke(prompt)
             check_cancelled()
             content = getattr(response, "content", response)
-            return str(content).strip() or fallback
+            return strip_report_json(str(content)) or fallback
         except RunCancelled:
             raise
         except Exception:

@@ -173,6 +173,8 @@ def test_trader_deterministic_gate_rejects_llm_buy_far_from_support():
 
     assert result.plan.direction == TradeDirection.HOLD
     assert result.plan.position_weight == 0
+    assert "结论方向： 持有" in result.report
+    assert "Chase the move" not in result.report
 
 
 def test_risk_agent_report_explains_v2_weight_clamp():
@@ -188,7 +190,7 @@ def test_risk_agent_report_explains_v2_weight_clamp():
     assert result.assessment.final_weight == 0.2
     assert result.risk_challenge
     assert result.risk_challenge in result.report
-    assert result.report.startswith("# Risk Manager Report")
+    assert result.report.startswith("# 风险管理报告")
     assert llm.prompts == []
 
 
@@ -208,7 +210,7 @@ def test_portfolio_manager_report_keeps_live_confirmation_gate():
 
     assert result.decision.status == ExecutionStatus.CONFIRMATION_REQUIRED
     assert result.decision.requires_user_confirmation is True
-    assert result.report.startswith("# Portfolio Manager Report")
+    assert result.report.startswith("# 组合管理报告")
     assert llm.prompts == []
 
 

@@ -233,3 +233,95 @@ def test_langmem_update_never_mutates_frozen_memory(tmp_path, status):
     assert revision.status == MemoryStatus.CANDIDATE
     assert revision.memory_id != frozen.memory_id
     assert revision.supersedes == frozen.memory_id
+
+
+@pytest.mark.parametrize("status", [s for s in MemoryStatus if s != MemoryStatus.CANDIDATE])
+@pytest.mark.parametrize("operation", ["insert", "update"])
+def test_frozen_revision_chain_and_replay(tmp_path, status, operation):
+    from ai_trading_copilot.copilot.services.memory_learning import ReflectedMemoryProposal
+
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    frozen = store.repository.upsert(DistilledMemory(
+        memory_id="original", memory_type=MemoryType.STRATEGY_PERFORMANCE,
+        status=status, lesson="Wait for support confirmation before entry.", symbols=["AAPL"],
+    ))
+    manager = MemorySkillManager(store)
+
+    def proposal(run):
+        return ReflectedMemoryProposal(
+            operation=operation,
+            target_memory_id=frozen.memory_id if operation == "update" else None,
+            memory=frozen.model_copy(update={
+                "memory_id": "", "source_run_id": run, "evidence_run_ids": [run],
+            }),
+        )
+
+    first = manager.ingest([proposal("run-1")])[0]
+    assert first.supersedes == frozen.memory_id
+    assert first.status == MemoryStatus.CANDIDATE
+    first_frozen = store.repository.upsert(first.model_copy(update={"status": status}))
+    # Explicitly targeting the original exercises traversal through an already
+    # frozen revision, while insert exercises similarity selection.
+    second = manager.ingest([proposal("run-2")])[0]
+    assert second.supersedes == first.memory_id
+    assert second.memory_id not in {frozen.memory_id, first.memory_id}
+    assert second.status == MemoryStatus.CANDIDATE
+    assert second.evidence_run_ids == ["run-2"]
+    assert manager.ingest([proposal("run-2")])[0] == second
+    assert store.repository.get(frozen.memory_id) == frozen
+    assert store.repository.get(first.memory_id) == first_frozen
+
+
+def test_same_run_correction_changes_content_but_replay_does_not_reweight(tmp_path):
+    from ai_trading_copilot.copilot.services.memory_learning import ReflectedMemoryProposal
+
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    first = store.save_candidate(DistilledMemory(
+        memory_type=MemoryType.STRATEGY_PERFORMANCE, lesson="Original support lesson.",
+        symbols=["AAPL"], source_run_id="run-1", confidence=0.6,
+    ))
+    manager = MemorySkillManager(store)
+    correction = ReflectedMemoryProposal(
+        operation="update", target_memory_id=first.memory_id,
+        memory=first.model_copy(update={"lesson": "Corrected support lesson.", "confidence": 0.9}),
+    )
+    corrected = manager.ingest([correction])[0]
+    assert corrected.version == first.version + 1
+    assert corrected.lesson == "Corrected support lesson."
+    assert corrected.sample_count == 1
+    assert corrected.confidence == first.confidence
+    later = correction.model_copy(update={"memory": correction.memory.model_copy(update={
+        "lesson": "Later independent evidence.", "source_run_id": "run-2",
+        "evidence_run_ids": ["run-2"],
+    })})
+    updated = manager.ingest([later])[0]
+    assert updated.confidence == pytest.approx(0.75)
+    assert manager.ingest([correction])[0] == updated
+
+
+def test_approval_between_matching_and_write_creates_revision(tmp_path, monkeypatch):
+    from ai_trading_copilot.copilot.services.memory_learning import ReflectedMemoryProposal
+
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    original = store.save_candidate(DistilledMemory(
+        memory_type=MemoryType.STRATEGY_PERFORMANCE, lesson="Original support lesson.",
+        symbols=["AAPL"], source_run_id="run-1",
+    ))
+    other_connection = SQLiteMemoryRepository(store.database_path)
+    save = store.repository.save_candidate
+    frozen = []
+
+    def approve_then_save(*args, **kwargs):
+        frozen.append(other_connection.transition(
+            original.memory_id, MemoryStatus.SHADOW, actor="reviewer", reason="concurrent review",
+        ))
+        return save(*args, **kwargs)
+
+    monkeypatch.setattr(store.repository, "save_candidate", approve_then_save)
+    result = MemorySkillManager(store).ingest([ReflectedMemoryProposal(
+        operation="update", target_memory_id=original.memory_id,
+        memory=original.model_copy(update={"lesson": "New lesson.", "source_run_id": "run-2"}),
+    )])[0]
+    assert store.repository.get(original.memory_id) == frozen[0]
+    assert result.supersedes == original.memory_id
+    assert result.status == MemoryStatus.CANDIDATE

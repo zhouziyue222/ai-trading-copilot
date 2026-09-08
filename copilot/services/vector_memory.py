@@ -48,7 +48,7 @@ class HashingTextEmbedder:
 
     def embed(self, text: str) -> List[float]:
         vector = [0.0] * self.dimensions
-        tokens = _embedding_tokens(text)
+        tokens = memory_text_tokens(text)
         if not tokens:
             return vector
         for token in tokens:
@@ -209,7 +209,7 @@ def retrieval_query_text(
     )
 
 
-def _embedding_tokens(value: str) -> List[str]:
+def memory_text_tokens(value: str) -> List[str]:
     tokens = [
         match.group(0).lower()
         for match in re.finditer(r"[A-Za-z0-9_]+", value)

@@ -46,7 +46,7 @@ class NewsSentimentAgent:
         fallback = NewsSentimentReport(
             symbol=symbol,
             sentiment_score=0.0,
-            summary="LLM news sentiment analysis was not generated.",
+            summary="【待补充】未生成新闻情绪分析，默认评分不代表已取得中性证据。",
             data_availability={"llm": "unavailable"},
         )
         if self.llm is None:
@@ -162,19 +162,19 @@ def _string_list(value) -> list[str]:
 
 def _markdown_from_report(report: NewsSentimentReport) -> str:
     content = (
-        f"# News Sentiment: {report.symbol}\n\n"
-        f"- Sentiment score: {report.sentiment_score:.2f}\n"
-        f"- Material risk: {'yes' if report.material_risk else 'no'}\n"
-        f"- Risk flags: {', '.join(report.risk_flags) or '-'}\n"
-        f"- Key events: {', '.join(report.key_events) or '-'}\n"
-        f"- Alerts: {', '.join(report.alerts) or '-'}\n"
-        f"- Decision basis: {', '.join(report.decision_basis) or '-'}\n"
-        f"- Uncertainties: {', '.join(report.uncertainties) or '-'}\n"
-        f"- Downstream summary: {report.downstream_summary or '-'}\n"
-        f"- Summary: {report.summary or '-'}\n"
+        f"# 新闻与情绪分析： {report.symbol}\n\n"
+        f"- 情绪评分： {report.sentiment_score:.2f}\n"
+        f"- 是否存在重大风险： {'是' if report.material_risk else '否'}\n"
+        f"- 风险事项： {', '.join(report.risk_flags) or '-'}\n"
+        f"- 关键事件： {', '.join(report.key_events) or '-'}\n"
+        f"- 事件提醒： {', '.join(report.alerts) or '-'}\n"
+        f"- 关键依据： {', '.join(report.decision_basis) or '-'}\n"
+        f"- 【待补充】不确定性： {', '.join(report.uncertainties) or '-'}\n"
+        f"- 综合结论： {report.downstream_summary or '-'}\n"
+        f"- 结论： {report.summary or '-'}\n"
     )
     if report.news_references:
-        lines = [content, "", "## News References", ""]
+        lines = [content, "", "## 新闻来源", ""]
         for item in report.news_references:
             lines.append(
                 "- "
@@ -198,7 +198,7 @@ def _markdown_with_references(markdown: str, report: NewsSentimentReport) -> str
     ]
     if not missing:
         return markdown
-    lines = [markdown.rstrip(), "", "## News References", ""]
+    lines = [markdown.rstrip(), "", "## 新闻来源", ""]
     for item in missing:
         lines.append(
             "- "

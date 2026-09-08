@@ -15,11 +15,13 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import contextmanager
 from threading import Event, RLock, Thread
 
-from ai_trading_copilot.copilot.services.cancellation import GLOBAL_CANCELLATION_MANAGER, StopReason
+from ai_trading_copilot.copilot.services.cancellation import GLOBAL_CANCELLATION_MANAGER, RunCancelled, StopReason
 from ai_trading_copilot.copilot.services.run_checkpoint import (
-    SCHEMA_VERSION, capture_snapshot, json_value, move_paths, restore_snapshot, validate_snapshot,
+    SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, capture_snapshot, json_value, move_paths,
+    normalize_snapshot, restore_snapshot, validate_snapshot,
 )
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker, write_json_atomic
 
@@ -174,18 +176,35 @@ class RunLifecycle:
                 {"run_id": c.run_id, "status": "running", "cancel_requested": c.reason == StopReason.USER_CANCEL,
                  "started_at": c.tracker.status["started_at"]}
                 for c in self.controls.values()
-                if c.thread is not None and c.thread.is_alive()
+                if c.thread is not None and c.thread.is_alive() and c.tracker.status["status"] == "running"
             ]
             active.sort(key=lambda item: item["started_at"], reverse=True)
             return {"session_id": self.session_id, "pid": os.getpid(),
                     "project_root": str(Path(__file__).resolve().parents[2]),
                     "status": "running" if active else "idle", "active_runs": active}
 
-    def capture(self, control: RunControl, state: dict, order: list[str], index: int) -> None:
-        snapshot = capture_snapshot(state, order, index, control.tracker)
+    @contextmanager
+    def commit_boundary(self, control: RunControl):
+        """Serialize a state merge and reject cancellation before its commit."""
         with self.lock:
-            if not self.shutting_down.is_set():
-                control.snapshot = snapshot
+            if (self.shutting_down.is_set() or control.cancel_event.is_set()
+                    or control.reason is not None):
+                raise RunCancelled("Run stopped before committing a node boundary.")
+            yield
+
+    def capture(
+        self,
+        control: RunControl,
+        state: dict,
+        order: list[str],
+        index: int,
+        *,
+        completed_nodes: list[str] | None = None,
+    ) -> None:
+        with self.commit_boundary(control):
+            control.snapshot = capture_snapshot(
+                state, order, index, control.tracker, completed_nodes=completed_nodes
+            )
 
     def request_user_cancel(self, run_id: str) -> bool:
         with self.lock:
@@ -235,7 +254,8 @@ class RunLifecycle:
         items = []
         for path in self.checkpoints_dir.glob("checkpoint_*.json"):
             payload = read_json(checked_path(self.root, path))
-            if payload.get("origin") == "user_cancel" and payload.get("schema_version") == SCHEMA_VERSION:
+            if (payload.get("origin") == "user_cancel"
+                    and payload.get("schema_version") in SUPPORTED_SCHEMA_VERSIONS):
                 items.append({"checkpoint_id": path.stem, "run_id": payload.get("run_id"),
                               "symbols": payload.get("params", {}).get("subscription_symbols", []),
                               "created_at": payload.get("created_at")})
@@ -250,14 +270,20 @@ class RunLifecycle:
                 raise ValueError("Checkpoint has already been consumed.")
             raise FileNotFoundError("Checkpoint not found.")
         payload = read_json(path)
-        if (payload.get("schema_version") != SCHEMA_VERSION or payload.get("origin") != "user_cancel"
+        if (payload.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS
+                or payload.get("origin") != "user_cancel"
                 or payload.get("checkpoint_id") != checkpoint_id or not isinstance(payload.get("params"), dict)):
             raise ValueError("Invalid or incompatible checkpoint.")
-        validate_snapshot(payload.get("snapshot"), allowed_nodes)
+        validate_snapshot(payload.get("snapshot"), allowed_nodes,
+                          schema_version=payload.get("schema_version"))
+        payload["snapshot"] = normalize_snapshot(
+            payload["snapshot"], payload.get("schema_version")
+        )
         return payload
 
     def consume(self, checkpoint_id: str, control: RunControl, payload: dict) -> None:
-        restored = restore_snapshot(payload["snapshot"], control.output_dir, control.run_id)
+        snapshot = normalize_snapshot(payload["snapshot"], payload.get("schema_version"))
+        restored = restore_snapshot(snapshot, control.output_dir, control.run_id)
         source = checked_path(self.root, self.checkpoints_dir / f"{checkpoint_id}.json")
         # A receipt has no progress; it only distinguishes consumed from absent.
         write_json_atomic(self.checkpoints_dir / f"{checkpoint_id}.consumed", {"run_id": control.run_id})
@@ -265,7 +291,7 @@ class RunLifecycle:
         control.resume_snapshot = restored
         # A second cancel during agent initialization must retain the consumed
         # boundary even before graph.resume() has a chance to publish a snapshot.
-        control.snapshot = deepcopy(payload["snapshot"])
+        control.snapshot = deepcopy(snapshot)
         if restored is not None:
             for key in ("nodes", "reports"):
                 control.tracker.status[key] = restored["tracker_status"][key]
@@ -277,7 +303,12 @@ class RunLifecycle:
                 remove_owned(self.root, control.output_dir)
                 return
             tracker = control.tracker
-            cancelled = control.reason == StopReason.USER_CANCEL
+            # A real graph failure wins a racing UI cancel.  Only the
+            # cooperative RunCancelled path is eligible for a checkpoint.
+            cancelled = (
+                control.reason == StopReason.USER_CANCEL
+                and (error is None or isinstance(error, RunCancelled))
+            )
             if cancelled:
                 checkpoint_id = "checkpoint_" + uuid.uuid4().hex
                 payload = {"schema_version": SCHEMA_VERSION, "checkpoint_id": checkpoint_id,

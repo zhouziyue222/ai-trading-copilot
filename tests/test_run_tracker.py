@@ -41,6 +41,21 @@ def test_run_tracker_records_node_and_report_status(tmp_path):
     assert payload["status"] == "failed"
 
 
+def test_tracker_tracks_all_active_nodes_and_cancels_each(tmp_path):
+    tracker = _tracker(tmp_path)
+    tracker.start_node("Technical Position")
+    tracker.start_node("News Sentiment")
+    assert tracker.status["current_nodes"] == ["Technical Position", "News Sentiment"]
+    assert tracker.status["current_node"] is None
+    tracker.succeed_node("News Sentiment")
+    assert tracker.status["current_node"] == "Technical Position"
+    tracker.start_node("Fundamental Analysis")
+    tracker.cancel()
+    assert tracker.status["current_nodes"] == []
+    assert tracker.status["current_node"] is None
+    assert all(node["status"] != "running" for node in tracker.status["nodes"].values())
+
+
 def test_run_tracker_records_sanitized_node_activity(tmp_path):
     tracker = _tracker(tmp_path)
     tracker.start_node("Technical Position")

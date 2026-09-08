@@ -7,7 +7,6 @@ a non-production candidate in SQLite.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from difflib import SequenceMatcher
 from typing import Any, Iterable, Literal, Mapping
@@ -243,61 +242,24 @@ class MemorySkillManager:
                 if proposal.target_memory_id
                 else None
             )
-            if target is not None:
-                if target.status == MemoryStatus.CANDIDATE:
-                    if _already_observed(target, candidate):
-                        saved.append(target)
-                    else:
-                        saved.append(self._merge(target, candidate, apply_update=True))
-                else:
-                    saved.append(self._save_revision(target, candidate))
-                continue
-
-            existing = self._nearest(candidate)
-            if existing and existing.status == MemoryStatus.CANDIDATE:
-                if _already_observed(existing, candidate):
-                    saved.append(existing)
-                else:
-                    saved.append(self._merge(existing, candidate))
-                continue
-            if existing:
-                saved.append(self._save_revision(existing, candidate))
-                continue
-            saved.append(self.store.save_candidate(candidate))
+            existing = target or self._nearest(candidate)
+            saved.append(self.store.save_candidate(
+                candidate,
+                target_memory_id=existing.memory_id if existing else None,
+                apply_update=target is not None,
+                actor="skill_manager",
+                reason="consolidate_candidate",
+            ))
         return saved
-
-    def _save_revision(
-        self,
-        existing: DistilledMemory,
-        candidate: DistilledMemory,
-    ) -> DistilledMemory:
-        revision = candidate.model_copy(
-            update={
-                "memory_id": _revision_memory_id(existing, candidate),
-                "status": MemoryStatus.CANDIDATE,
-                "supersedes": existing.memory_id,
-                "metadata": {
-                    **candidate.metadata,
-                    "frozen_memory_status": existing.status.value,
-                    "matches_frozen_memory": existing.memory_id,
-                },
-            }
-        )
-        current = self.store.repository.get(revision.memory_id)
-        if current is not None:
-            if _already_observed(current, candidate):
-                return current
-            return self._merge(current, candidate)
-        return self.store.save_candidate(
-            revision,
-            actor="skill_manager",
-            reason="propose_revision_of_frozen_memory",
-        )
 
     def _nearest(self, candidate: DistilledMemory) -> DistilledMemory | None:
         best: tuple[float, int, DistilledMemory] | None = None
         for memory in self.store.list_all():
             if memory.memory_type != candidate.memory_type:
+                continue
+            if memory.memory_kind != candidate.memory_kind:
+                continue
+            if memory.validation_target != candidate.validation_target:
                 continue
             if memory.scope != candidate.scope:
                 continue
@@ -315,65 +277,6 @@ class MemorySkillManager:
         if best and best[0] >= self.similarity_threshold:
             return best[2]
         return None
-
-    def _merge(
-        self,
-        existing: DistilledMemory,
-        candidate: DistilledMemory,
-        *,
-        apply_update: bool = False,
-    ) -> DistilledMemory:
-        evidence = sorted(
-            set(existing.evidence_run_ids)
-            | set(candidate.evidence_run_ids)
-            | ({candidate.source_run_id.lower()} if candidate.source_run_id else set())
-        )
-        confidence_values = [
-            value
-            for value in (existing.confidence, candidate.confidence)
-            if value is not None
-        ]
-        confidence = (
-            sum(confidence_values) / len(confidence_values)
-            if confidence_values
-            else None
-        )
-        updates: dict[str, Any] = {
-            "symbols": sorted(set(existing.symbols) | set(candidate.symbols)),
-            "tags": sorted(set(existing.tags) | set(candidate.tags)),
-            "market_regimes": sorted(
-                set(existing.market_regimes) | set(candidate.market_regimes)
-            ),
-            "timeframes": sorted(
-                set(existing.timeframes) | set(candidate.timeframes)
-            ),
-            "evidence_run_ids": evidence,
-            "sample_count": max(existing.sample_count, len(evidence)),
-            "confidence": confidence,
-            "metadata": {
-                **existing.metadata,
-                **candidate.metadata,
-                "last_merge": "reflector",
-            },
-        }
-        if apply_update:
-            updates.update(
-                {
-                    "memory_type": candidate.memory_type,
-                    "memory_kind": candidate.memory_kind,
-                    "scope": candidate.scope,
-                    "validation_target": candidate.validation_target,
-                    "lesson": candidate.lesson,
-                    "trigger": candidate.trigger,
-                    "rationale": candidate.rationale,
-                }
-            )
-        merged = existing.model_copy(update=updates)
-        return self.store.repository.upsert(
-            merged,
-            actor="skill_manager",
-            reason="deduplicate_and_merge_candidate",
-        )
 
 
 class PostRunLearningService:
@@ -429,29 +332,6 @@ def _candidate_from_memory(memory: DistilledMemory) -> LangMemCandidate:
 
 def _candidate_payload(candidate: LangMemCandidate) -> dict[str, Any]:
     return candidate.model_dump(mode="json")
-
-
-def _already_observed(existing: DistilledMemory, candidate: DistilledMemory) -> bool:
-    run_id = (candidate.source_run_id or "").strip().lower()
-    return bool(run_id and run_id in existing.evidence_run_ids)
-
-
-def _revision_memory_id(
-    existing: DistilledMemory,
-    candidate: DistilledMemory,
-) -> str:
-    identity = {
-        "supersedes": existing.memory_id,
-        "memory_type": candidate.memory_type.value,
-        "memory_kind": candidate.memory_kind.value,
-        "scope": candidate.scope.value,
-        "lesson": _normalized_text(candidate.lesson),
-        "trigger": _normalized_text(candidate.trigger),
-    }
-    digest = hashlib.sha256(
-        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    return f"mem_revision_{digest[:24]}"
 
 
 def _relevant_existing_memories(

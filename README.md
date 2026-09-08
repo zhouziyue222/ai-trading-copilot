@@ -355,11 +355,14 @@ ai-trading-copilot-memory versions MEMORY_ID
 ai-trading-copilot-memory transition MEMORY_ID shadow
 ai-trading-copilot-memory evaluate MEMORY_ID
 ai-trading-copilot-memory rollback MEMORY_ID VERSION
+ai-trading-copilot-memory-eval --output reports/memory-effect-offline.json
 ```
 
 `--no-memory-learning` 只跳过本次运行后的 LangMem 反思，不会关闭已批准记忆的检索；`--no-long-term-memory` 会同时关闭该次运行的检索与学习。
 
 完整设计见 [向量记忆方案](docs/vector_memory_plan.md) 与 [Memory Harness 工作流](docs/memory_harness.md)。
+
+效果评测默认离线；`ai-trading-copilot-memory-eval --live` 可显式运行真实模型的有/无记忆对照。可复现基线与尚存的误召回案例见 Memory Harness 文档。
 
 ## 评测、测试与可观测性
 

@@ -29,6 +29,8 @@ autonomy:
     - config/prompts
   protected_surfaces:
     - config/memory_harness_holdout.json
+    - config/memory_effect_cases.json
+    - copilot/memory_eval.py
     - copilot/agents/risk_agent.py
     - copilot/agents/portfolio_manager.py
     - copilot/services/memory_evaluation.py

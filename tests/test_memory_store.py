@@ -174,3 +174,13 @@ def test_vector_memory_retrieval_uses_injected_embedding_similarity(tmp_path):
     retrieved = store.retrieve(query="buy the dip after confirmation")
 
     assert retrieved[0].lesson == "Confirm a support retest before adding size."
+
+
+def test_chinese_strategy_query_uses_lexical_filter_without_vector_dependency(tmp_path):
+    store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
+    _save_approved(store, DistilledMemory(
+        memory_id="cn", memory_type=MemoryType.STRATEGY_PERFORMANCE,
+        scope="strategy", lesson="财报风险尚未消除时暂缓加仓。",
+    ))
+    assert [hit.memory.memory_id for hit in store.retrieve_scored(query="财报风险")] == ["cn"]
+    assert store.retrieve_scored(query="支撑回踩") == []

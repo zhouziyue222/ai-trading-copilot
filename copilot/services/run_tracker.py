@@ -49,6 +49,7 @@ class RunTracker:
             "params": _jsonable(params),
             "defaults": _jsonable(defaults),
             "current_node": None,
+            "current_nodes": [],
             "status": NODE_RUNNING,
             "cancel_requested": False,
             "cancel_requested_at": None,
@@ -185,9 +186,7 @@ class RunTracker:
             self.status["cancel_requested_at"] = self.status.get("cancel_requested_at") or now
             self.status["cancelled_at"] = now
             self.status["finished_at"] = now
-            current_node = self.status.get("current_node")
-            if current_node:
-                node = self._node(current_node)
+            for node in self.status["nodes"].values():
                 if node.get("status") == NODE_RUNNING:
                     node["status"] = NODE_SKIPPED
                     node["finished_at"] = now
@@ -298,6 +297,10 @@ class RunTracker:
             write_json_atomic(self.status_path, self.status)
 
     def _touch(self) -> None:
+        active = [name for name, node in self.status["nodes"].items()
+                  if node["status"] == NODE_RUNNING] if self.status["status"] == NODE_RUNNING else []
+        self.status["current_nodes"] = active
+        self.status["current_node"] = active[0] if len(active) == 1 else None
         self.status["updated_at"] = _utc_now()
         self.flush()
 
