@@ -31,6 +31,27 @@ def normalize_symbol(symbol: str) -> str:
     return symbol.strip().upper()
 
 
+def target_weight_for_plan(plan: "TradePlan", portfolio: "PortfolioSnapshot") -> float:
+    """Map a structured trade plan to a requested signed target weight.
+
+    This is the single source of truth for direction-to-weight translation so
+    Risk Manager and Portfolio Manager cannot drift apart.
+    """
+    current_weight = portfolio.position_weights.get(plan.symbol, 0.0)
+    planned_weight = float(plan.position_weight or 0.0)
+    if plan.direction == TradeDirection.BUY:
+        return planned_weight if planned_weight > 0 else current_weight
+    if plan.direction in {TradeDirection.HOLD, TradeDirection.WATCH}:
+        return current_weight
+    if plan.direction == TradeDirection.REDUCE:
+        return current_weight * 0.5
+    if plan.direction in {TradeDirection.SELL, TradeDirection.COVER}:
+        return 0.0
+    if plan.direction == TradeDirection.SHORT:
+        return -planned_weight
+    return current_weight
+
+
 class UserPersonaConfig(BaseModel):
     """Trading constraints that every downstream agent must respect."""
 
@@ -423,6 +444,9 @@ class ExecutionDecision(BaseModel):
     broker_status: str = ""
     broker_message: str = ""
     broker_idempotency_key: str = ""
+    broker_attempt_count: int = Field(default=0, ge=0)
+    broker_retry_available: bool = False
+    last_broker_attempt_at: Optional[str] = None
     memory_citations: List[str] = Field(default_factory=list)
     memory_influence: str = Field(default="", max_length=500)
     memory_scale: float = Field(default=1.0, ge=0, le=1)
@@ -677,5 +701,5 @@ __all__ = [
     "NewsSentimentReport",
     "ValidationError",
     "normalize_symbol",
+    "target_weight_for_plan",
 ]
-

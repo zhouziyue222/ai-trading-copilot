@@ -25,6 +25,7 @@ class RunExplanationAgent:
 
     def __init__(self, llm=None):
         self.llm = llm
+        self.fallback_reason = ""
 
     def explain(
         self,
@@ -37,6 +38,7 @@ class RunExplanationAgent:
         execution_decisions: Dict[str, ExecutionDecision],
         risk_challenges: Dict[str, str],
     ) -> CopilotRunReport:
+        self.fallback_reason = ""
         symbol_explanations: List[SymbolExplanation] = []
         for item in radar_items:
             technical = technical_positions.get(item.symbol)
@@ -147,5 +149,6 @@ class RunExplanationAgent:
             return strip_report_json(str(content)) or fallback
         except RunCancelled:
             raise
-        except Exception:
+        except Exception as exc:
+            self.fallback_reason = f"run_explanation_llm_failed: {exc}"
             return fallback

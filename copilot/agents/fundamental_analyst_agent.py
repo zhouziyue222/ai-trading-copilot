@@ -16,7 +16,8 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
-from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.config.prompts import render_prompt, untrusted_data_block
+from ai_trading_copilot.copilot.agents.evidence_guards import force_material_risk_from_evidence
 from ai_trading_copilot.copilot.domain.models import FundamentalAnalysisReport
 from ai_trading_copilot.copilot.services.eval_samples import record_eval_sample
 
@@ -26,6 +27,8 @@ class FundamentalAnalysisResult:
     report: FundamentalAnalysisReport
     markdown: str
     tool_calls: List[str]
+    fallback_used: bool = False
+    fallback_reason: str = ""
 
 
 class FundamentalAnalystAgent:
@@ -99,7 +102,10 @@ class FundamentalAnalystAgent:
             symbol=symbol,
             current_date=end_date,
             available_tools=tool_names(tools),
-            fundamental_evidence=evidence.prefetched_evidence or "-",
+            fundamental_evidence=untrusted_data_block(
+                "fundamental",
+                evidence.prefetched_evidence,
+            ),
         )
         result = runner.run(prompt=prompt)
         content = result.content
@@ -123,12 +129,31 @@ class FundamentalAnalystAgent:
                     payload.get("downstream_summary") or payload.get("summary") or ""
                 ).strip(),
             )
-        except Exception:
+            material_risk, risk_flags, guard_notes = force_material_risk_from_evidence(
+                evidence=evidence.prefetched_evidence,
+                material_risk=report.material_risk,
+                risk_flags=report.risk_flags,
+                source="fundamental",
+            )
+            if guard_notes:
+                report = report.model_copy(
+                    update={
+                        "material_risk": material_risk,
+                        "risk_flags": risk_flags,
+                        "uncertainties": [*report.uncertainties, *guard_notes],
+                    }
+                )
+        except Exception as exc:
             report = fallback.model_copy(update={"summary": content.strip() or fallback.summary})
+            fallback_reason = f"fundamental_analysis_json_parse_failed: {exc}"
+        else:
+            fallback_reason = ""
         final_result = FundamentalAnalysisResult(
             report=report,
             markdown=strip_trailing_json_object(content) or _markdown_from_report(report),
             tool_calls=[*evidence.prefetched_calls, *result.tool_calls],
+            fallback_used=bool(fallback_reason),
+            fallback_reason=fallback_reason,
         )
         _record_fundamental_agent_eval_sample(
             symbol=symbol,

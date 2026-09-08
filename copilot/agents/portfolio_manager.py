@@ -11,7 +11,7 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
-from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.config.prompts import render_prompt, untrusted_data_block
 from ai_trading_copilot.copilot.domain.enums import (
     ExecutionMode,
     ExecutionStatus,
@@ -23,6 +23,7 @@ from ai_trading_copilot.copilot.domain.models import (
     RiskAssessment,
     TradePlan,
     normalize_symbol,
+    target_weight_for_plan,
 )
 from ai_trading_copilot.copilot.services.cancellation import RunCancelled
 from ai_trading_copilot.copilot.services.memory_retrieval import MemoryRetrievalSession
@@ -37,6 +38,8 @@ class PortfolioDecisionResult:
     decision: ExecutionDecision
     report: str
     tool_calls: list[str] | None = None
+    fallback_used: bool = False
+    fallback_reason: str = ""
 
 
 class PortfolioManager:
@@ -54,20 +57,7 @@ class PortfolioManager:
         targets: dict[str, float] = {}
         for raw_symbol, plan in trade_plans.items():
             symbol = normalize_symbol(raw_symbol or plan.symbol)
-            current_weight = portfolio.position_weights.get(symbol, 0.0)
-            planned_weight = float(plan.position_weight or 0.0)
-            if plan.direction == TradeDirection.BUY:
-                targets[symbol] = planned_weight if planned_weight > 0 else current_weight
-            elif plan.direction in {TradeDirection.HOLD, TradeDirection.WATCH}:
-                targets[symbol] = current_weight
-            elif plan.direction == TradeDirection.REDUCE:
-                targets[symbol] = current_weight * 0.5
-            elif plan.direction in {TradeDirection.SELL, TradeDirection.COVER}:
-                targets[symbol] = 0.0
-            elif plan.direction == TradeDirection.SHORT:
-                targets[symbol] = -planned_weight
-            else:
-                targets[symbol] = current_weight
+            targets[symbol] = target_weight_for_plan(plan, portfolio)
         return targets
 
     def decide(
@@ -133,8 +123,8 @@ class PortfolioManager:
                 trade_plan=plan.model_dump_json(),
                 risk_assessment=risk_assessment.model_dump_json(),
                 portfolio=portfolio.model_dump_json(),
-                analyst_context=analyst_context or "-",
-                memory_evidence=memory_evidence,
+                analyst_context=untrusted_data_block("analyst_context", analyst_context),
+                memory_evidence=untrusted_data_block("retrieved_memories", memory_evidence),
                 available_memory_tools=", ".join(tool.name for tool in tools),
             )
             react_result = ReActAgentRunner(
@@ -183,7 +173,7 @@ class PortfolioManager:
             )
         except RunCancelled:
             raise
-        except Exception:
+        except Exception as exc:
             decision = baseline.model_copy(
                 update={"pre_memory_final_weight": risk_assessment.final_weight}
             )
@@ -191,6 +181,8 @@ class PortfolioManager:
                 decision=decision,
                 report=_report_from_decision(decision, risk_assessment),
                 tool_calls=[],
+                fallback_used=True,
+                fallback_reason=f"portfolio_manager_model_parse_failed: {exc}",
             )
 
 

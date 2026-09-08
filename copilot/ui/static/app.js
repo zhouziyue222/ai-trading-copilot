@@ -70,6 +70,7 @@ const runStatusLabels = {
   failed: "失败",
   skipped: "跳过",
   cancelled: "已取消",
+  degraded: "降级完成",
 };
 
 const directionLabels = {
@@ -878,7 +879,8 @@ function renderProgress(runId, runStatus = {}) {
   if (runStatus.status === "succeeded") message = (runStatus.errors || []).length || (runStatus.graph_errors || []).length ? "分析完成，但部分数据不完整，请检查报告中的限制。" : "分析完成，结果摘要已更新。";
   if (runStatus.status === "failed") message = `${stage?.label || "分析"}失败；请复制故障编号排查。`;
   if (runStatus.status === "cancelled") message = runStatus.resumable ? "已取消并保存，可在历史记录中手动恢复。" : "已取消，没有可恢复断点。";
-  const tone = runStatus.status === "failed" ? "status-danger" : runStatus.status === "running" || (runStatus.graph_errors || []).length ? "status-warning" : runStatus.status === "succeeded" ? "status-success" : "status-neutral";
+  if (runStatus.status === "degraded") message = "组合快照不可用：本次运行只保留研究与 Hold-only 结论，未产生任何新动作。";
+  const tone = runStatus.status === "failed" ? "status-danger" : runStatus.status === "running" || runStatus.status === "degraded" || (runStatus.graph_errors || []).length ? "status-warning" : runStatus.status === "succeeded" ? "status-success" : "status-neutral";
   $("progress").innerHTML = `<ol class="stage-list">${stages.map(item => `<li class="stage-${item.status}"><span>${item.status === "succeeded" ? "✓" : item.status === "failed" ? "!" : item.status === "running" ? "●" : "○"}</span>${item.label}</li>`).join("")}</ol><progress max="5" value="${completed}" aria-label="已完成阶段"></progress><p class="run-message ${tone}" role="status">${escapeHtml(message)}</p>`;
   $("progress").insertAdjacentHTML("beforeend", `<div class="node-grid">${analysts.map(name => nodeCard(name, nodes[name])).join("")}</div>${renderNodeActivityDetails(runStatus)}`);
 }
@@ -1089,7 +1091,7 @@ function renderNodeGuide(runStatus = {}) {
 }
 
 function renderDecisionRows(runId, runStatus = {}) {
-  const decisions = runStatus.status === "succeeded" ? runStatus.decision_summary?.symbols || [] : [];
+  const decisions = ["succeeded", "degraded"].includes(runStatus.status) ? runStatus.decision_summary?.symbols || [] : [];
   $("resultSummary").innerHTML = decisions.length ? decisions.map(row => `<article class="result-card"><strong>${escapeHtml(row.symbol)} · ${escapeHtml(directionLabels[row.direction] || "待复核")}</strong><p>${escapeHtml(row.suggested_action || row.execution_message || "请查看完整报告")}</p><small>风控：${row.approved_by_risk === true ? "通过" : row.approved_by_risk === false ? "保持不动" : "待复核"}</small></article>`).join("") : "完成分析后将在此展示结论。";
   const rows = runStatus.decision_summary?.symbols || [];
   if (!rows.length) {
@@ -1146,7 +1148,7 @@ function renderBrokerControl(runId, runStatus, row) {
       : `Submitted ${row.submitted_quantity || ""}`.trim();
     return `<span class="status-chip status-success" title="${title}">${escapeHtml(label)}</span>`;
   }
-  if (row.broker_idempotency_key) {
+  if (row.broker_attempt_count && !row.broker_retry_available) {
     return `<span class="status-chip status-danger" title="${title}">${escapeHtml(row.broker_status || "Failed")}</span>`;
   }
   if (row.pending_broker_order && row.broker_confirmation_required) {
@@ -1160,7 +1162,7 @@ function renderBrokerControl(runId, runStatus, row) {
         data-confirm-simulated="${escapeHtml(row.symbol || "")}"
         data-run-id="${escapeHtml(runId || "")}"
       >
-        Confirm SIM
+        ${row.broker_attempt_count ? "Retry SIM" : "Confirm SIM"}
       </button>
     `;
   }
@@ -1382,7 +1384,7 @@ function toneClass(value) {
   if (["actionable", "succeeded", "portfolio_decided", "ok"].includes(value)) {
     return "status-success";
   }
-  if (["near_opportunity", "running", "alert_only", "confirmation_required"].includes(value)) {
+  if (["near_opportunity", "running", "alert_only", "confirmation_required", "degraded"].includes(value)) {
     return "status-warning";
   }
   if (["risk_elevated", "failed", "not_compatible", "error"].includes(value)) {
@@ -1392,7 +1394,7 @@ function toneClass(value) {
 }
 
 function isTerminalRunStatus(status) {
-  return ["succeeded", "failed", "cancelled"].includes(status);
+  return ["succeeded", "failed", "cancelled", "degraded"].includes(status);
 }
 
 function marketLabel(value) {

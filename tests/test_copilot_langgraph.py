@@ -196,6 +196,11 @@ class RecordingPortfolioGetter:
         return self.snapshot
 
 
+class FailingPortfolioGetter:
+    def __call__(self, mode):
+        raise RuntimeError("OpenD unavailable")
+
+
 class FakeTool:
     def __init__(self, name, output):
         self.name = name
@@ -279,6 +284,24 @@ def test_langgraph_can_use_live_portfolio_mode(tmp_path):
 
     assert state["portfolio_mode"] == ExecutionMode.LIVE
     assert portfolio_getter.modes == [ExecutionMode.LIVE]
+
+
+def test_langgraph_portfolio_failure_is_hold_only(tmp_path):
+    state = CopilotLangGraph(
+        llm=None,
+        portfolio_getter=FailingPortfolioGetter(),
+    ).run(
+        subscription_symbols=["AAPL"],
+        price_history_by_symbol={"AAPL": _actionable_bars()},
+        report_output_dir=tmp_path,
+    )
+
+    assert any(str(error).startswith("portfolio_fetch_failed") for error in state["errors"])
+    assessment = next(iter(state["risk_assessments"].values()))
+    decision = next(iter(state["execution_decisions"].values()))
+    assert assessment.approved is False
+    assert decision.approved_by_risk is False
+    assert decision.action == "hold"
 
 
 def test_langgraph_without_llm_does_not_record_unused_memory(tmp_path):

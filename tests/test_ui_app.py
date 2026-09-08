@@ -184,6 +184,25 @@ class RaisingBroker:
         raise RuntimeError("OpenD unavailable")
 
 
+class FailingOnceBroker:
+    def __init__(self):
+        self.requests = []
+        self._failed = False
+
+    def place_order(self, request):
+        self.requests.append(request)
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("OpenD unavailable")
+        return BrokerExecutionResult(
+            idempotency_key=request.idempotency_key,
+            submitted=True,
+            order_id="SIM-2",
+            status="submitted",
+            message="submitted",
+        )
+
+
 @pytest.fixture()
 def client(tmp_path):
     FakeGraph.calls = []
@@ -201,7 +220,7 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def _order_client(tmp_path, graph_cls=PendingOrderGraph, broker=None):
+def _order_client(tmp_path, graph_cls=PendingOrderGraph, broker=None, latest_price=40.0):
     broker = broker or RecordingBroker()
     app = create_app(
         UISettings(
@@ -212,6 +231,7 @@ def _order_client(tmp_path, graph_cls=PendingOrderGraph, broker=None):
             run_in_background=False,
             fundamental_retriever_factory=lambda settings, auto_ingest_seed: FakeFundamentalRetriever(),
             simulated_broker_factory=lambda: broker,
+            latest_price_getter=lambda symbol: latest_price,
         )
     )
     return TestClient(app), broker
@@ -501,6 +521,8 @@ def test_confirm_simulated_order_blocks_when_portfolio_fetch_failed(tmp_path):
     order_client, broker = _order_client(tmp_path, graph_cls=FailingPortfolioOrderGraph)
     created = order_client.post("/api/runs", json={"manual_symbols": "AAPL"}).json()
 
+    assert created["status"]["status"] == "degraded"
+
     response = order_client.post(
         f"/api/runs/{created['run_id']}/orders/AAPL/confirm-simulated"
     )
@@ -525,6 +547,43 @@ def test_confirm_simulated_order_records_broker_failure(tmp_path):
     assert order["submitted_to_broker"] is False
     assert order["broker_status"] == "failed"
     assert "OpenD unavailable" in order["broker_message"]
+    assert order["broker_attempt_count"] == 1
+    assert order["broker_retry_available"] is True
+    updated = response.json()["status"]["decision_summary"]["symbols"][0]
+    assert updated["pending_broker_order"] is True
+    assert updated["broker_confirmation_required"] is True
+
+
+def test_confirm_simulated_order_retries_after_transient_failure(tmp_path):
+    broker = FailingOnceBroker()
+    order_client, _ = _order_client(tmp_path, broker=broker)
+    created = order_client.post("/api/runs", json={"manual_symbols": "AAPL"}).json()
+
+    first = order_client.post(
+        f"/api/runs/{created['run_id']}/orders/AAPL/confirm-simulated"
+    )
+    second = order_client.post(
+        f"/api/runs/{created['run_id']}/orders/AAPL/confirm-simulated"
+    )
+
+    assert first.json()["order"]["submitted_to_broker"] is False
+    assert second.status_code == 200
+    assert second.json()["order"]["submitted_to_broker"] is True
+    assert second.json()["order"]["broker_order_id"] == "SIM-2"
+    assert len(broker.requests) == 2
+
+
+def test_confirm_simulated_order_blocks_on_price_drift(tmp_path):
+    order_client, broker = _order_client(tmp_path, latest_price=50.0)
+    created = order_client.post("/api/runs", json={"manual_symbols": "AAPL"}).json()
+
+    response = order_client.post(
+        f"/api/runs/{created['run_id']}/orders/AAPL/confirm-simulated"
+    )
+
+    assert response.status_code == 400
+    assert "rerun before confirming" in response.json()["detail"]
+    assert broker.requests == []
 
 
 def test_rag_status_endpoint_degrades_when_chroma_is_unavailable(client):

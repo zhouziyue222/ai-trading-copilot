@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from ai_trading_copilot.copilot.adapters.futu_execution import FutuSimulatedExecutionAdapter
 from ai_trading_copilot.copilot.adapters.portfolio import get_futu_portfolio_snapshot
+from ai_trading_copilot.copilot.adapters.stock_info import get_futu_stock_info
 from ai_trading_copilot.copilot.config import DEFAULT_REPORT_OUTPUT_DIR
 from ai_trading_copilot.copilot.config.defaults import DEFAULT_PERSONA_CONFIG
 from ai_trading_copilot.copilot.config.llm import (
@@ -65,6 +66,7 @@ from ai_trading_copilot.copilot.run import (
 )
 from ai_trading_copilot.copilot.services.run_tracker import (
     NODE_CANCELLED,
+    NODE_DEGRADED,
     NODE_FAILED,
     NODE_SUCCEEDED,
     RunTracker,
@@ -97,6 +99,7 @@ class UISettings:
     run_in_background: bool = True
     fundamental_retriever_factory: Optional[Callable[["UISettings", bool], object]] = None
     simulated_broker_factory: Optional[Callable[[], object]] = None
+    latest_price_getter: Optional[Callable[[str], float]] = None
     portfolio_snapshot_getter: Optional[Callable[[ExecutionMode], object]] = None
     portfolio_snapshot_timeout_seconds: float = 5.0
     long_term_memory_enabled: Optional[bool] = None
@@ -733,7 +736,7 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
         status = _read_json(status_path)
         if not status:
             raise HTTPException(status_code=404, detail=f"Run status not found: {run_id}")
-        if status.get("status") != "succeeded":
+        if status.get("status") not in {"succeeded", "degraded"}:
             raise HTTPException(status_code=409, detail="Only completed runs can confirm orders.")
         try:
             order = _confirm_simulated_broker_order(
@@ -783,14 +786,27 @@ def _confirm_simulated_broker_order(
     row = _find_decision_row(status, symbol)
     if row is None:
         raise ValueError(f"Decision not found for symbol: {normalize_symbol(symbol)}")
-    if row.get("broker_idempotency_key"):
+    if row.get("submitted_to_broker") is True and row.get("broker_idempotency_key"):
         return _order_payload(row)
 
     _validate_simulated_order(status, row)
+    attempts = int(row.get("broker_attempt_count") or 0)
+    max_attempts = _max_simulated_order_attempts()
+    if attempts >= max_attempts:
+        raise ValueError("Simulated order retry limit reached; start a new run.")
+    price = _latest_confirm_price(settings, row)
+    if price <= 0:
+        raise ValueError("Unable to fetch a current price; simulated order not submitted.")
+    decision_price = float(row.get("current_price") or 0)
+    max_drift = _simulated_order_max_price_drift()
+    if decision_price > 0 and abs(price - decision_price) / decision_price > max_drift:
+        raise ValueError(
+            f"Price moved more than {max_drift:.1%} since the run "
+            f"({decision_price:.2f} -> {price:.2f}); rerun before confirming."
+        )
     quantity = min(int(row.get("quantity") or 0), _max_simulated_order_quantity())
     if quantity <= 0:
         raise ValueError("Simulated order quantity is zero after max quantity guard.")
-    price = float(row.get("current_price") or 0)
     action = str(row.get("action") or "").lower()
     idempotency_key = _broker_idempotency_key(
         status=status,
@@ -822,7 +838,12 @@ def _confirm_simulated_broker_order(
             status="failed",
             message=f"Futu simulated order failed: {exc}",
         )
-    _apply_broker_result(row, result, submitted_quantity=quantity)
+    _apply_broker_result(
+        row,
+        result,
+        submitted_quantity=quantity,
+        max_attempts=max_attempts,
+    )
     _refresh_broker_metrics(status)
     _record_simulated_order_audit(run_dir, status, row)
     return _order_payload(row)
@@ -838,8 +859,10 @@ def _find_decision_row(status: dict, symbol: str) -> dict | None:
 
 
 def _validate_simulated_order(status: dict, row: dict) -> None:
-    if status.get("status") != "succeeded":
+    if status.get("status") not in {"succeeded", "degraded"}:
         raise ValueError("Run must finish successfully before simulated order confirmation.")
+    if status.get("status") == "degraded":
+        raise ValueError("Portfolio fetch failed; simulated order is blocked.")
     params = status.get("params", {}) or {}
     if _value(params.get("mode", ExecutionMode.SIMULATION.value)) != ExecutionMode.SIMULATION.value:
         raise ValueError("Only simulation runs can submit simulated broker orders.")
@@ -883,6 +906,39 @@ def _max_simulated_order_quantity() -> int:
     return max(value, 0)
 
 
+def _max_simulated_order_attempts() -> int:
+    raw_value = os.getenv("COPILOT_SIMULATED_ORDER_MAX_ATTEMPTS", "3")
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return 3
+    return max(value, 1)
+
+
+def _simulated_order_max_price_drift() -> float:
+    raw_value = os.getenv("COPILOT_SIMULATED_ORDER_MAX_PRICE_DRIFT", "0.10")
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return 0.10
+    return max(value, 0.0)
+
+
+def _latest_confirm_price(settings: UISettings, row: dict) -> float:
+    symbol = str(row.get("symbol") or "")
+    try:
+        if settings.latest_price_getter is not None:
+            return max(float(settings.latest_price_getter(symbol)), 0.0)
+        info = get_futu_stock_info(symbol)
+        for key in ("last_price", "latest_price", "open_price", "open"):
+            raw = info.get(key)
+            if raw not in (None, ""):
+                return max(float(raw), 0.0)
+        return 0.0
+    except Exception as exc:
+        raise ValueError(f"Unable to fetch current price for {symbol}: {exc}") from exc
+
+
 def _broker_idempotency_key(
     *,
     status: dict,
@@ -908,15 +964,27 @@ def _apply_broker_result(
     result: BrokerExecutionResult,
     *,
     submitted_quantity: int,
+    max_attempts: int,
 ) -> None:
-    row["pending_broker_order"] = False
-    row["broker_confirmation_required"] = False
     row["submitted_to_broker"] = result.submitted
     row["submitted_quantity"] = submitted_quantity
     row["broker_order_id"] = result.order_id
     row["broker_status"] = result.status
     row["broker_message"] = result.message
-    row["broker_idempotency_key"] = result.idempotency_key
+    row["last_broker_attempt_at"] = datetime.utcnow().isoformat()
+    row["broker_attempt_count"] = int(row.get("broker_attempt_count") or 0) + 1
+    if result.submitted:
+        row["pending_broker_order"] = False
+        row["broker_confirmation_required"] = False
+        row["broker_idempotency_key"] = result.idempotency_key
+        row["broker_retry_available"] = False
+    else:
+        attempts = int(row.get("broker_attempt_count") or 0)
+        retry_available = attempts < max_attempts
+        row["broker_retry_available"] = retry_available
+        if not retry_available:
+            row["pending_broker_order"] = False
+            row["broker_confirmation_required"] = False
     base_message = row.get("execution_message") or ""
     broker_message = result.message or result.status or ""
     if broker_message:
@@ -954,6 +1022,9 @@ def _append_simulated_order_audit(run_dir: Path, row: dict) -> None:
         "broker_status": row.get("broker_status"),
         "broker_message": row.get("broker_message"),
         "broker_idempotency_key": row.get("broker_idempotency_key"),
+        "broker_attempt_count": int(row.get("broker_attempt_count") or 0),
+        "broker_retry_available": bool(row.get("broker_retry_available")),
+        "last_broker_attempt_at": row.get("last_broker_attempt_at"),
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -1036,6 +1107,9 @@ def _order_payload(row: dict) -> dict:
         "broker_status": row.get("broker_status"),
         "broker_message": row.get("broker_message"),
         "broker_idempotency_key": row.get("broker_idempotency_key"),
+        "broker_attempt_count": int(row.get("broker_attempt_count") or 0),
+        "broker_retry_available": bool(row.get("broker_retry_available")),
+        "last_broker_attempt_at": row.get("last_broker_attempt_at"),
     }
 
 
@@ -1239,10 +1313,24 @@ def _run_copilot_job(
         raise
     finally:
         try:
-            runtime.finalize(control, state=state, error=error)
+            runtime.finalize(
+                control,
+                state=state,
+                error=error,
+                degraded=_portfolio_degraded(state),
+            )
             record("run.end", outcome=tracker.status["status"], stop_reason=control.reason)
         finally:
             runtime.unregister(control)
+
+
+def _portfolio_degraded(state: dict | None) -> bool:
+    if not state:
+        return False
+    return any(
+        str(item).startswith("portfolio_fetch_failed")
+        for item in (state.get("errors") or [])
+    )
 
 
 def _create_graph(
@@ -1293,7 +1381,7 @@ def _run_response(run_id: str, output_dir: Path) -> dict:
 
 
 def _is_terminal_run_status(status: str | None) -> bool:
-    return status in {NODE_SUCCEEDED, NODE_FAILED, NODE_CANCELLED}
+    return status in {NODE_SUCCEEDED, NODE_FAILED, NODE_CANCELLED, NODE_DEGRADED}
 
 
 def _read_json(path: Path) -> dict:

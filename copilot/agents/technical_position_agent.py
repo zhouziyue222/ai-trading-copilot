@@ -17,7 +17,7 @@ from ai_trading_copilot.copilot.adapters.trading_tools import (
 from ai_trading_copilot.copilot.agents.llm_tools import extract_json_object
 from ai_trading_copilot.copilot.agents.llm_tools import strip_trailing_json_object
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
-from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.config.prompts import render_prompt, untrusted_data_block
 from ai_trading_copilot.copilot.domain.enums import SymbolTrendState
 from ai_trading_copilot.copilot.domain.models import (
     PriceBar,
@@ -33,6 +33,8 @@ class TechnicalAnalysisResult:
     report: str
     tool_calls: List[str]
     context: TechnicalContext | None = None
+    fallback_used: bool = False
+    fallback_reason: str = ""
 
 
 class TechnicalPositionAgent:
@@ -150,7 +152,7 @@ class TechnicalPositionAgent:
             reward_risk_ratio=position.reward_risk_ratio,
             sector_symbol=sector_symbol,
             available_tools=tool_names(tools),
-            tool_evidence=tool_evidence or "-",
+            tool_evidence=untrusted_data_block("technical", tool_evidence),
         )
         react_result = runner.run(
             prompt=prompt,
@@ -158,6 +160,7 @@ class TechnicalPositionAgent:
         )
         report = react_result.content
         calls = react_result.tool_calls
+        fallback_reason = ""
         try:
             payload = extract_json_object(report)
             position = TechnicalPosition(
@@ -184,13 +187,15 @@ class TechnicalPositionAgent:
                 payload=payload,
                 fallback=context,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            fallback_reason = f"technical_position_json_parse_failed: {exc}"
         return TechnicalAnalysisResult(
             position=position,
             report=strip_trailing_json_object(report) or fallback,
             tool_calls=[*pre_calls, *calls],
             context=context,
+            fallback_used=bool(fallback_reason),
+            fallback_reason=fallback_reason,
         )
 
 

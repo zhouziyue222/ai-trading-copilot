@@ -12,7 +12,7 @@ from ai_trading_copilot.copilot.domain.localization import zh_label, zh_bool
 from dataclasses import dataclass
 from typing import Dict, Mapping, Sequence
 
-from ai_trading_copilot.copilot.domain.enums import ForbiddenInstrument, TradeDirection
+from ai_trading_copilot.copilot.domain.enums import ForbiddenInstrument
 from ai_trading_copilot.copilot.domain.models import (
     ClampEvent,
     PortfolioSnapshot,
@@ -23,6 +23,7 @@ from ai_trading_copilot.copilot.domain.models import (
     TradePlan,
     UserPersonaConfig,
     normalize_symbol,
+    target_weight_for_plan,
 )
 
 
@@ -273,19 +274,7 @@ def apply_limits(
 
 
 def _target_weight_from_plan(plan: TradePlan, portfolio: PortfolioSnapshot) -> float:
-    current_weight = portfolio.position_weights.get(plan.symbol, 0.0)
-    planned_weight = float(plan.position_weight or 0.0)
-    if plan.direction == TradeDirection.BUY:
-        return planned_weight if planned_weight > 0 else current_weight
-    if plan.direction in {TradeDirection.HOLD, TradeDirection.WATCH}:
-        return current_weight
-    if plan.direction == TradeDirection.REDUCE:
-        return current_weight * 0.5
-    if plan.direction in {TradeDirection.SELL, TradeDirection.COVER}:
-        return 0.0
-    if plan.direction == TradeDirection.SHORT:
-        return -planned_weight
-    return current_weight
+    return target_weight_for_plan(plan, portfolio)
 
 
 def _normalize_weights(weights: Mapping[str, float] | None) -> Dict[str, float]:

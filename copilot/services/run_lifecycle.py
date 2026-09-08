@@ -26,7 +26,7 @@ from ai_trading_copilot.copilot.services.run_checkpoint import (
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker, write_json_atomic
 
 ACTIVE_RUNTIMES: weakref.WeakSet = weakref.WeakSet()
-TERMINAL = {"succeeded", "failed", "cancelled", "interrupted"}
+TERMINAL = {"succeeded", "failed", "cancelled", "interrupted", "degraded"}
 
 
 def read_json(path: Path) -> dict:
@@ -297,7 +297,14 @@ class RunLifecycle:
                 control.tracker.status[key] = restored["tracker_status"][key]
             control.tracker.flush()
 
-    def finalize(self, control: RunControl, *, state: dict | None, error: Exception | None) -> None:
+    def finalize(
+        self,
+        control: RunControl,
+        *,
+        state: dict | None,
+        error: Exception | None,
+        degraded: bool = False,
+    ) -> None:
         with self.lock:
             if self.shutting_down.is_set() or control.reason == StopReason.SERVER_SHUTDOWN:
                 remove_owned(self.root, control.output_dir)
@@ -360,7 +367,7 @@ class RunLifecycle:
                     state = None
                     tracker.add_error(str(error))
                 tracker.status["resumable"] = False
-                tracker.finish(failed=error is not None)
+                tracker.finish(failed=error is not None, degraded=degraded)
             tracker.write_audit(state=state, error=error if not cancelled else None)
             if self.shutting_down.is_set():
                 if control.checkpoint_id:

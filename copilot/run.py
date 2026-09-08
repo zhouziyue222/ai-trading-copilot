@@ -120,7 +120,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         error = exc
         tracker.add_error(str(exc))
     finally:
-        tracker.finish(failed=error is not None)
+        tracker.finish(
+            failed=error is not None,
+            degraded=bool(
+                state
+                and any(
+                    str(item).startswith("portfolio_fetch_failed")
+                    for item in (state.get("errors") or [])
+                )
+            ),
+        )
         audit_path = tracker.write_audit(state=state, error=error)
 
     print(json.dumps({"output_dir": str(output_dir), "audit_path": audit_path}, ensure_ascii=False))

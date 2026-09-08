@@ -11,6 +11,37 @@ from ai_trading_copilot.copilot.services.reporting import REPORT_WRITING_RULES
 
 
 PROMPT_DIR = Path(__file__).resolve().parents[2] / "config" / "prompts"
+DATA_BOUNDARY_BEGIN = "<<<UNTRUSTED_{kind}_DATA_BEGIN>>>"
+DATA_BOUNDARY_END = "<<<UNTRUSTED_{kind}_DATA_END>>>"
+
+
+def untrusted_data_block(kind: str, content: Any) -> str:
+    """Wrap external evidence so models can distinguish data from instructions.
+
+    The marker strings are neutralized inside the content so a hostile article
+    or document cannot forge an earlier closing boundary.
+    """
+    label = "".join(
+        character
+        for character in str(kind).strip().upper()
+        if character.isalnum() or character == "_"
+    )
+    if not label:
+        label = "EVIDENCE"
+    if content is None or not str(content).strip():
+        return "-"
+    text = (
+        str(content)
+        .replace("<<<", "< < <")
+        .replace(">>>", "> > >")
+    )
+    return (
+        DATA_BOUNDARY_BEGIN.format(kind=label)
+        + "\n"
+        + text
+        + "\n"
+        + DATA_BOUNDARY_END.format(kind=label)
+    )
 
 
 def load_prompt_template(name: str) -> str:

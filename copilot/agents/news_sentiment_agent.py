@@ -16,7 +16,8 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
-from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.config.prompts import render_prompt, untrusted_data_block
+from ai_trading_copilot.copilot.agents.evidence_guards import force_material_risk_from_evidence
 from ai_trading_copilot.copilot.domain.models import NewsSentimentReport
 
 
@@ -25,6 +26,8 @@ class NewsSentimentAnalysisResult:
     report: NewsSentimentReport
     markdown: str
     tool_calls: List[str]
+    fallback_used: bool = False
+    fallback_reason: str = ""
 
 
 class NewsSentimentAgent:
@@ -86,7 +89,10 @@ class NewsSentimentAgent:
             earnings_start_date=earnings_start_date,
             earnings_end_date=earnings_end_date,
             available_tools=tool_names(tools),
-            news_evidence=evidence.prefetched_evidence or "-",
+            news_evidence=untrusted_data_block(
+                "news_sentiment",
+                evidence.prefetched_evidence,
+            ),
         )
         result = runner.run(prompt=prompt)
         content = result.content
@@ -114,13 +120,32 @@ class NewsSentimentAgent:
                     payload.get("downstream_summary") or payload.get("summary") or ""
                 ).strip(),
             )
-        except Exception:
+            material_risk, risk_flags, guard_notes = force_material_risk_from_evidence(
+                evidence=evidence.prefetched_evidence,
+                material_risk=report.material_risk,
+                risk_flags=report.risk_flags,
+                source="news",
+            )
+            if guard_notes:
+                report = report.model_copy(
+                    update={
+                        "material_risk": material_risk,
+                        "risk_flags": risk_flags,
+                        "alerts": [*report.alerts, *guard_notes],
+                    }
+                )
+        except Exception as exc:
             report = fallback.model_copy(update={"summary": content.strip() or fallback.summary})
+            fallback_reason = f"news_sentiment_json_parse_failed: {exc}"
+        else:
+            fallback_reason = ""
         markdown = strip_trailing_json_object(content) or _markdown_from_report(report)
         return NewsSentimentAnalysisResult(
             report=report,
             markdown=_markdown_with_references(markdown, report),
             tool_calls=[*evidence.prefetched_calls, *result.tool_calls],
+            fallback_used=bool(fallback_reason),
+            fallback_reason=fallback_reason,
         )
 
 

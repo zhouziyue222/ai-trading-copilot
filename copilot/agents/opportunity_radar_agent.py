@@ -19,7 +19,7 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
-from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.config.prompts import render_prompt, untrusted_data_block
 from ai_trading_copilot.copilot.domain.enums import SubscriptionStatus, SymbolTrendState
 from ai_trading_copilot.copilot.domain.models import (
     OpportunityRadarItem,
@@ -33,6 +33,8 @@ class OpportunityRadarAnalysisResult:
     item: OpportunityRadarItem
     report: str
     tool_calls: List[str]
+    fallback_used: bool = False
+    fallback_reason: str = ""
 
 
 class OpportunityRadarAgent:
@@ -102,10 +104,14 @@ class OpportunityRadarAgent:
             fallback_trend=fallback.trend_state.value if fallback.trend_state else "unknown",
             fallback_reason=fallback.reason,
             available_tools=tool_names(tools),
-            tool_evidence=evidence_result.prefetched_evidence or "-",
+            tool_evidence=untrusted_data_block(
+                "opportunity_radar",
+                evidence_result.prefetched_evidence,
+            ),
         )
         react_result = runner.run(prompt=prompt, tool_result_cache=tool_result_cache)
         content = react_result.content
+        fallback_reason = ""
         try:
             payload = extract_json_object(content)
             item = fallback.model_copy(
@@ -133,12 +139,15 @@ class OpportunityRadarAgent:
                     ),
                 }
             )
-        except Exception:
+        except Exception as exc:
             item = fallback
+            fallback_reason = f"opportunity_radar_json_parse_failed: {exc}"
         return OpportunityRadarAnalysisResult(
             item=item,
             report=strip_trailing_json_object(content) or fallback_report,
             tool_calls=[*evidence_result.prefetched_calls, *react_result.tool_calls],
+            fallback_used=bool(fallback_reason),
+            fallback_reason=fallback_reason,
         )
 
     def scan(

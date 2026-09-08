@@ -9,7 +9,7 @@ from ai_trading_copilot.copilot.agents.llm_tools import (
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
-from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.config.prompts import render_prompt, untrusted_data_block
 from ai_trading_copilot.copilot.services.cancellation import RunCancelled, check_cancelled
 from ai_trading_copilot.copilot.services.tracing import (
     get_current_trace_recorder,
@@ -40,6 +40,9 @@ class TraderAnalysisResult:
     report: str
     tool_calls: list[str]
     opportunity: OpportunityRadarItem | None = None
+    fallback_used: bool = False
+    fallback_reason: str = ""
+    memory_retrieval_error: str = ""
 
 
 class TraderAgent:
@@ -210,6 +213,7 @@ class TraderAgent:
 
         memory_evidence = "-"
         memory_tools = []
+        memory_retrieval_error = ""
         if memory_session is not None:
             try:
                 memory_evidence = memory_session.prefetch(
@@ -227,7 +231,8 @@ class TraderAgent:
                 memory_tools = memory_session.make_tools()
             except RunCancelled:
                 raise
-            except Exception:
+            except Exception as exc:
+                memory_retrieval_error = f"trader_memory_retrieval_failed: {exc}"
                 memory_session = None
                 memory_evidence = "-"
                 memory_tools = []
@@ -310,11 +315,25 @@ class TraderAgent:
             )
             if plan != proposed_plan:
                 report = _report_from_plan(plan, reviewed, "计划已按准入规则和仓位上限修正，以本报告为准。")
-            return TraderAnalysisResult(plan, report, calls, reviewed)
+            return TraderAnalysisResult(
+                plan,
+                report,
+                calls,
+                reviewed,
+                memory_retrieval_error=memory_retrieval_error,
+            )
         except RunCancelled:
             raise
-        except Exception:
-            return TraderAnalysisResult(fallback, fallback_report, [], reviewed)
+        except Exception as exc:
+            return TraderAnalysisResult(
+                fallback,
+                fallback_report,
+                [],
+                reviewed,
+                fallback_used=True,
+                fallback_reason=f"trader_model_parse_failed: {exc}",
+                memory_retrieval_error=memory_retrieval_error,
+            )
 
 
 def _review_opportunity(
@@ -497,8 +516,8 @@ def _trader_prompt(
         news_sentiment=news_sentiment.model_dump_json() if news_sentiment else "-",
         fundamental_analysis=fundamental_analysis.model_dump_json() if fundamental_analysis else "-",
         fallback=fallback.model_dump_json(),
-        analyst_context=analyst_context or "-",
-        memory_evidence=memory_evidence or "-",
+        analyst_context=untrusted_data_block("analyst_context", analyst_context),
+        memory_evidence=untrusted_data_block("retrieved_memories", memory_evidence),
         available_memory_tools=available_memory_tools,
     )
 

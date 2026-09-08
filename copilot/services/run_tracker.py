@@ -21,6 +21,7 @@ NODE_SUCCEEDED = "succeeded"
 NODE_FAILED = "failed"
 NODE_SKIPPED = "skipped"
 NODE_CANCELLED = "cancelled"
+NODE_DEGRADED = "degraded"
 MAX_ACTIVITY_HISTORY = 20
 
 
@@ -166,7 +167,12 @@ class RunTracker:
         the worker, False when it is already in a terminal state.
         """
         with self._lock:
-            if self.status.get("status") in {NODE_SUCCEEDED, NODE_FAILED, NODE_CANCELLED}:
+            if self.status.get("status") in {
+                NODE_SUCCEEDED,
+                NODE_FAILED,
+                NODE_CANCELLED,
+                NODE_DEGRADED,
+            }:
                 return False
             if not self.status.get("cancel_requested"):
                 self.status["cancel_requested"] = True
@@ -194,11 +200,16 @@ class RunTracker:
             self.status["current_node"] = None
             self._touch()
 
-    def finish(self, *, failed: bool = False) -> None:
+    def finish(self, *, failed: bool = False, degraded: bool = False) -> None:
         with self._lock:
             if self.status.get("status") == NODE_CANCELLED:
                 return
-            self.status["status"] = NODE_FAILED if failed else NODE_SUCCEEDED
+            if failed:
+                self.status["status"] = NODE_FAILED
+            elif degraded:
+                self.status["status"] = NODE_DEGRADED
+            else:
+                self.status["status"] = NODE_SUCCEEDED
             self.status["finished_at"] = _utc_now()
             self.status["current_node"] = None
             self._touch()
@@ -501,6 +512,9 @@ def _build_decision_summary(
                 "broker_status": _field(execution, "broker_status", ""),
                 "broker_message": _field(execution, "broker_message", ""),
                 "broker_idempotency_key": _field(execution, "broker_idempotency_key", ""),
+                "broker_attempt_count": _field(execution, "broker_attempt_count", 0),
+                "broker_retry_available": _field(execution, "broker_retry_available", False),
+                "last_broker_attempt_at": _field(execution, "last_broker_attempt_at", None),
                 "risk_clamped": _field(risk, "clamped", False),
                 "suggested_action": _first_present(
                     _field(radar, "suggested_action"),

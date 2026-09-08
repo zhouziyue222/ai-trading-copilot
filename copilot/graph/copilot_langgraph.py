@@ -895,6 +895,7 @@ class CopilotLangGraph:
         items: List[OpportunityRadarItem] = []
         reports_by_symbol: Dict[str, str] = {}
         tool_calls: List[str] = []
+        fallback_warnings: List[str] = []
         for symbol in state["subscription_symbols"]:
             bars = (
                 None
@@ -911,6 +912,8 @@ class CopilotLangGraph:
                 items.append(result.item)
                 reports_by_symbol[symbol] = result.report
                 tool_calls.extend(result.tool_calls)
+                if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
+                    fallback_warnings.append(f"{symbol}: {result.fallback_reason}")
             else:
                 items.append(
                     self.opportunity_radar_agent.analyze_symbol(
@@ -938,6 +941,7 @@ class CopilotLangGraph:
                     "otherwise it uses deterministic fallback rules."
                 ),
                 rule_hits=sorted(set(tool_calls)),
+                warnings=fallback_warnings,
             ),
             radar_items=items,
             analyst_reports={AnalystType.OPPORTUNITY_RADAR.value: report_path},
@@ -993,9 +997,16 @@ class CopilotLangGraph:
                     contexts[symbol] = result.context
                 reports_by_symbol[symbol] = result.report
                 tool_calls = result.tool_calls
+                node_warnings = (
+                    [result.fallback_reason]
+                    if getattr(result, "fallback_used", False)
+                    and getattr(result, "fallback_reason", "")
+                    else []
+                )
             else:
                 position = self.technical_position_agent.analyze(symbol, bars)
                 tool_calls = []
+                node_warnings = []
             positions[symbol] = position
             events.append(
                 TraceEvent(
@@ -1013,6 +1024,7 @@ class CopilotLangGraph:
                         "LLM-backed runs include tool evidence."
                     ),
                     rule_hits=sorted(set(tool_calls)),
+                    warnings=node_warnings,
                 )
             )
         report_path = self._save_agent_report(
@@ -1051,6 +1063,7 @@ class CopilotLangGraph:
         reports: Dict[str, NewsSentimentReport] = {}
         reports_by_symbol: Dict[str, str] = {}
         tool_calls: List[str] = []
+        fallback_warnings: List[str] = []
         for symbol in state["subscription_symbols"]:
             result = self.news_sentiment_agent.analyze_symbol(
                 symbol=symbol,
@@ -1060,6 +1073,8 @@ class CopilotLangGraph:
             reports[symbol] = result.report
             reports_by_symbol[symbol] = result.markdown
             tool_calls.extend(result.tool_calls)
+            if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
+                fallback_warnings.append(f"{symbol}: {result.fallback_reason}")
 
         report_path = self._save_agent_report(
             state=state,
@@ -1081,6 +1096,7 @@ class CopilotLangGraph:
                 output_summary=f"news_sentiment_reports={len(reports)}",
                 route_reason="Finnhub news, social sentiment, and earnings-event evidence was reviewed.",
                 rule_hits=sorted(set(tool_calls)),
+                warnings=fallback_warnings,
             ),
             news_sentiment_by_symbol=reports,
             news_sentiment_reports_by_symbol=reports_by_symbol,
@@ -1105,6 +1121,7 @@ class CopilotLangGraph:
         reports: Dict[str, FundamentalAnalysisReport] = {}
         reports_by_symbol: Dict[str, str] = {}
         tool_calls: List[str] = []
+        fallback_warnings: List[str] = []
         provided_reports = {
             symbol.strip().upper(): report
             for symbol, report in _fundamental_analysis_reports_from_state(state).items()
@@ -1128,6 +1145,8 @@ class CopilotLangGraph:
             reports[symbol] = result.report
             reports_by_symbol[symbol] = result.markdown
             tool_calls.extend(result.tool_calls)
+            if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
+                fallback_warnings.append(f"{symbol}: {result.fallback_reason}")
 
         report_path = self._save_agent_report(
             state=state,
@@ -1147,6 +1166,7 @@ class CopilotLangGraph:
                 output_summary=f"fundamental_reports={len(reports)}",
                 route_reason="Fundamental analyst used financial tools and its own fundamental RAG tool.",
                 rule_hits=sorted(set(tool_calls)),
+                warnings=fallback_warnings,
             ),
             fundamental_analysis_by_symbol=reports,
             fundamental_analysis_reports_by_symbol=reports_by_symbol,
@@ -1179,6 +1199,7 @@ class CopilotLangGraph:
                 agent=self.trader_agent,
             )
             tool_calls: list[str] = []
+            symbol_warnings: list[str] = []
 
             if item is None and hasattr(self.trader_agent, "create_plan_from_evidence"):
                 result = self.trader_agent.create_plan_from_evidence(
@@ -1195,6 +1216,10 @@ class CopilotLangGraph:
                 item = result.opportunity or _opportunity_from_plan(plan)
                 reports_by_symbol[symbol] = result.report
                 tool_calls = result.tool_calls
+                if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
+                    symbol_warnings.append(result.fallback_reason)
+                if getattr(result, "memory_retrieval_error", ""):
+                    symbol_warnings.append(result.memory_retrieval_error)
             elif item is not None:
                 if position is None:
                     position = _technical_position_from_radar(item)
@@ -1213,6 +1238,10 @@ class CopilotLangGraph:
                     item = result.opportunity or item
                     reports_by_symbol[symbol] = result.report
                     tool_calls = result.tool_calls
+                    if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
+                        symbol_warnings.append(result.fallback_reason)
+                    if getattr(result, "memory_retrieval_error", ""):
+                        symbol_warnings.append(result.memory_retrieval_error)
                 else:
                     plan = self.trader_agent.create_plan(
                         opportunity=item,
@@ -1249,6 +1278,7 @@ class CopilotLangGraph:
                         "then combines technical context, news sentiment, and fundamentals."
                     ),
                     rule_hits=rule_hits,
+                    warnings=symbol_warnings,
                 )
             )
         report_path = self._save_agent_report(
@@ -1298,6 +1328,16 @@ class CopilotLangGraph:
 
     def _risk_check(self, state: CopilotGraphState) -> CopilotGraphState:
         events: List[TraceEvent] = []
+        portfolio_error = next(
+            (
+                str(item)
+                for item in (state.get("errors") or [])
+                if str(item).startswith("portfolio_fetch_failed")
+            ),
+            None,
+        )
+        if portfolio_error is not None:
+            return self._degraded_risk_check(state, portfolio_error)
         subscriptions = _subscription_book_from_symbols(state["subscription_symbols"])
         trade_plans = state.get("trade_plans", {})
         target_weights = self.portfolio_manager.build_target_weights(
@@ -1364,6 +1404,67 @@ class CopilotLangGraph:
             agent_reports={"risk_check": report_path},
         )
 
+    def _degraded_risk_check(
+        self,
+        state: CopilotGraphState,
+        portfolio_error: str,
+    ) -> CopilotGraphState:
+        """Portfolio is unknown: keep every planned symbol flat and mark degraded."""
+        events: List[TraceEvent] = []
+        assessments: Dict[str, RiskAssessment] = {}
+        risk_challenges: Dict[str, str] = {}
+        for symbol, plan in state.get("trade_plans", {}).items():
+            assessments[symbol] = RiskAssessment(
+                symbol=symbol,
+                approved=False,
+                current_position_weight=0.0,
+                target_weight=0.0,
+                final_weight=0.0,
+                portfolio_value=0.0,
+                warnings=[portfolio_error],
+                reasoning={
+                    "eligibility": "Portfolio snapshot unavailable; every new action is held flat.",
+                },
+            )
+            risk_challenges[symbol] = (
+                f"{symbol}: 组合快照获取失败，本次不产生新动作。"
+            )
+            events.append(
+                TraceEvent(
+                    node_name=self.NODE_RISK_CHECK,
+                    symbol=symbol,
+                    input_summary=f"direction={zh_label(plan.direction)}",
+                    output_summary="target=0.00%, final=0.00%, delta=0.00%",
+                    route_reason="Portfolio fetch failed; degraded run keeps every symbol flat.",
+                    rule_hits=["portfolio_unavailable_hold_flat"],
+                    warnings=[portfolio_error],
+                )
+            )
+        report_content = (
+            "# 风险管理报告\n\n"
+            "- 说明：组合快照获取失败，本次运行为降级 Hold-only，所有标的不产生新动作。\n\n"
+            f"- 组合错误：{portfolio_error}\n"
+        )
+        report_path = self._save_agent_report(
+            state=state,
+            stage="4_risk_check",
+            agent_name="risk_check",
+            content=report_content,
+        )
+        explanations = dict(state.get("explanations", {}))
+        explanations["risk_challenges"] = risk_challenges
+        return self._with_trace(
+            state,
+            events,
+            risk_assessments=assessments,
+            explanations={
+                **explanations,
+                "target_weights": {},
+                "final_weights": {},
+            },
+            agent_reports={"risk_check": report_path},
+        )
+
     def _portfolio_manager(self, state: CopilotGraphState) -> CopilotGraphState:
         decisions: Dict[str, ExecutionDecision] = {}
         reports_by_symbol: Dict[str, str] = {}
@@ -1385,6 +1486,7 @@ class CopilotLangGraph:
                 agent=self.portfolio_manager,
             )
             tool_calls: list[str] = []
+            symbol_warnings: list[str] = []
             if hasattr(self.portfolio_manager, "decide_with_report"):
                 result = self.portfolio_manager.decide_with_report(
                     plan=plan,
@@ -1399,6 +1501,8 @@ class CopilotLangGraph:
                 decision = result.decision
                 reports_by_symbol[symbol] = result.report
                 tool_calls = result.tool_calls or []
+                if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
+                    symbol_warnings.append(result.fallback_reason)
             else:
                 decision = self.portfolio_manager.decide(
                     plan=plan,
@@ -1436,6 +1540,7 @@ class CopilotLangGraph:
                         f"delta_weight={decision.delta_weight:.2%}",
                         *tool_calls,
                     ],
+                    warnings=symbol_warnings,
                 )
             )
         report_path = self._save_agent_report(
@@ -1486,6 +1591,11 @@ class CopilotLangGraph:
                 input_summary=f"symbols={len(report.symbols)}",
                 output_summary="report=generated",
                 route_reason="User explanation is generated from the same structured state used by trace.",
+                warnings=(
+                    [self.explanation_agent.fallback_reason]
+                    if getattr(self.explanation_agent, "fallback_reason", "")
+                    else []
+                ),
             ),
             explanations=explanations,
             report=report,

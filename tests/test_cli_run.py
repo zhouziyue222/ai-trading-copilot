@@ -121,7 +121,7 @@ def test_main_passes_multiple_symbols_and_selected_analysts(monkeypatch, tmp_pat
         def add_error(self, error):
             calls["error"] = error
 
-        def finish(self, *, failed):
+        def finish(self, *, failed, degraded=False):
             calls["failed"] = failed
 
         def write_audit(self, *, state, error):
@@ -184,7 +184,7 @@ def test_main_passes_technical_debug_to_graph(monkeypatch, tmp_path):
         def add_error(self, error):
             calls["error"] = error
 
-        def finish(self, *, failed):
+        def finish(self, *, failed, degraded=False):
             calls["failed"] = failed
 
         def write_audit(self, *, state, error):

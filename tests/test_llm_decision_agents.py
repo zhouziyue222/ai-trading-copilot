@@ -316,6 +316,20 @@ def test_trader_memory_failure_falls_back_to_normal_llm_path():
 
     assert result.plan.direction == TradeDirection.HOLD
     assert llm.prompts
+    assert result.memory_retrieval_error
+
+
+def test_trader_invalid_json_records_visible_fallback():
+    llm = StaticLLM("this is not a trade plan json")
+
+    result = TraderAgent(llm=llm).create_plan_with_report(
+        opportunity=_opportunity(),
+        technical_position=_position(),
+        persona=UserPersonaConfig(),
+    )
+
+    assert result.fallback_used is True
+    assert result.fallback_reason.startswith("trader_model_parse_failed")
 
 
 def test_portfolio_memory_advisor_can_only_scale_risk_increasing_action(tmp_path):
