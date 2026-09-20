@@ -69,6 +69,7 @@ class FakeFundamentalRetriever:
 class PendingOrderGraph:
     NODE_ORDER = ["Load", "Portfolio Manager"]
     portfolio_error = False
+    state_errors: list[str] = []
 
     def __init__(self, *, run_tracker, memory_agent=None, **kwargs):
         self.run_tracker = run_tracker
@@ -133,12 +134,17 @@ class PendingOrderGraph:
                 }
             },
             "explanations": {},
-            "errors": ["portfolio_fetch_failed: boom"] if self.portfolio_error else [],
+            "errors": self.state_errors
+            or (["portfolio_fetch_failed: boom"] if self.portfolio_error else []),
         }
 
 
 class FailingPortfolioOrderGraph(PendingOrderGraph):
     portfolio_error = True
+
+
+class LlmUnavailableGraph(PendingOrderGraph):
+    state_errors = ["llm_unavailable"]
 
 
 class CancellableGraph:
@@ -530,6 +536,14 @@ def test_confirm_simulated_order_blocks_when_portfolio_fetch_failed(tmp_path):
     assert response.status_code == 400
     assert "Portfolio fetch failed" in response.json()["detail"]
     assert broker.requests == []
+
+
+def test_llm_unavailable_run_is_marked_degraded(tmp_path):
+    order_client, _ = _order_client(tmp_path, graph_cls=LlmUnavailableGraph)
+
+    created = order_client.post("/api/runs", json={"manual_symbols": "AAPL"}).json()
+
+    assert created["status"]["status"] == "degraded"
 
 
 def test_confirm_simulated_order_records_broker_failure(tmp_path):

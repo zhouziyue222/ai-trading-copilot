@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import json
+from math import isfinite
 from statistics import mean
 
 from ai_trading_copilot.copilot.domain import (
@@ -60,7 +63,12 @@ class MemoryShadowEvaluator:
 
         usage = self.repository.usage_for_memory(memory_id, mode="shadow", version=memory.version)
         evidence_runs = len({row["run_id"] for row in usage})
-        outcomes = self.repository.outcomes_for_memory(memory_id, mode="shadow", version=memory.version)
+        if memory.metadata.get("delayed_review"):
+            outcomes, delayed_reasons = self._delayed_outcomes(memory)
+            evidence_runs = len(outcomes)
+            reasons.extend(delayed_reasons)
+        else:
+            outcomes = self.repository.outcomes_for_memory(memory_id, mode="shadow", version=memory.version)
         realized = [item.realized_return for item in outcomes if item.realized_return is not None]
         raw_excess = [
             item.realized_return - item.benchmark_return
@@ -70,6 +78,7 @@ class MemoryShadowEvaluator:
         excess = (
             [-value for value in raw_excess]
             if memory.validation_target == MemoryValidationTarget.UNDERPERFORM
+            and not (memory.metadata.get("delayed_review") and memory.metadata.get("validation_category") in {"REAL", "SIMULATE"})
             else raw_excess
         )
         drawdowns = [item.max_drawdown for item in outcomes if item.max_drawdown is not None]
@@ -108,6 +117,11 @@ class MemoryShadowEvaluator:
             )
 
         eligible = passed_safety and not reasons
+        if memory.metadata.get("delayed_review"):
+            reasons.append(
+                f"validation group: category={memory.metadata.get('validation_category', 'hypothetical')}, "
+                f"account={memory.metadata.get('validation_account_id', memory.metadata.get('account_id', 'all'))}, horizon=20"
+            )
         evaluation = MemoryEvaluation(
             memory_id=memory.memory_id,
             memory_version=memory.version,
@@ -122,6 +136,79 @@ class MemoryShadowEvaluator:
         )
         return self.repository.save_evaluation(evaluation)
 
+    def _delayed_outcomes(self, memory: DistilledMemory) -> tuple[list[RunOutcome], list[str]]:
+        """Use mature, classified evidence; one conservative sample per source run."""
+        category = memory.metadata.get("validation_category", "hypothetical")
+        account = memory.metadata.get("validation_account_id", memory.metadata.get("account_id"))
+        group = f"delayed category={category}, account={account or 'all'}, horizon=20"
+        if category not in {"hypothetical", "SIMULATE", "REAL"} or memory.metadata.get("validation_horizon_days", 20) != 20:
+            return [], [f"{group}: unsupported validation group"]
+        with self.repository._connection() as connection:
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"review_results", "review_tasks", "review_snapshots"} <= tables:
+                return [], [f"{group}: classified reviews are unavailable"]
+            rows = connection.execute(
+                """SELECT t.run_id, t.symbol, r.payload_json, s.generated_at,
+                          u.created_at AS usage_at, v.created_at AS version_at
+                   FROM review_results r JOIN review_tasks t ON t.id = r.review_id
+                   JOIN review_snapshots s ON s.run_id=t.run_id AND s.symbol=t.symbol
+                   JOIN memory_usage u ON u.run_id=t.run_id AND u.symbol=t.symbol
+                   JOIN memory_versions v ON v.memory_id=u.memory_id AND v.version=u.memory_version
+                   WHERE t.status='completed' AND t.horizon_days=20
+                     AND u.memory_id=? AND u.memory_version=? AND u.mode='shadow'""",
+                (memory.memory_id, memory.version),
+            ).fetchall()
+        excluded = {run.lower() for run in memory.evidence_run_ids}
+        if memory.source_run_id:
+            excluded.add(memory.source_run_id.lower())
+        grouped: dict[str, list[dict]] = {}
+        invalid: set[str] = set()
+        needs_return = memory.validation_target != MemoryValidationTarget.RISK_REDUCTION
+
+        def finite(value):
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
+
+        for row in rows:
+            run = row["run_id"]
+            if run.lower() in excluded:
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+                generated = datetime.fromisoformat(row["generated_at"])
+                if not (datetime.fromisoformat(row["usage_at"]) <= generated
+                        and datetime.fromisoformat(row["version_at"]) < generated
+                        and datetime.fromisoformat(payload["cutoff_at"]) > generated):
+                    continue
+                if (payload["run_id"], payload["symbol"], payload["horizon_days"]) != (run, row["symbol"], 20):
+                    invalid.add(run)
+                    continue
+                observations = [o for o in payload["observations"]
+                                if o.get("category") == category
+                                and (account is None or str(o.get("account_id")) == str(account))]
+                for observation in observations:
+                    required = ["max_drawdown"] + (["realized_return", "benchmark_return"] if needs_return else [])
+                    if observation.get("eligible") is not True or not all(finite(observation.get(key)) for key in required):
+                        invalid.add(run)
+                    else:
+                        grouped.setdefault(run, []).append(observation)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                invalid.add(run)
+        outcomes = []
+        for run, observations in grouped.items():
+            if run in invalid:
+                continue
+            def average(key):
+                values = [o.get(key) for o in observations]
+                return mean(values) if all(finite(v) for v in values) else None
+            outcomes.append(RunOutcome(
+                run_id=run, symbol="GROUP", horizon_days=20,
+                realized_return=average("realized_return"),
+                benchmark_return=average("benchmark_return"),
+                max_drawdown=min(o["max_drawdown"] for o in observations),
+                source=group,
+            ))
+        return outcomes, ([f"{group}: incomplete or ineligible evidence in {len(invalid)} runs"] if invalid else [])
+
     def promote(
         self,
         memory_id: str,
@@ -133,6 +220,9 @@ class MemoryShadowEvaluator:
         if automatic and not self.policy.allow_auto_promotion:
             raise PermissionError("automatic memory promotion is disabled by policy")
         with self.repository.transaction():
+            memory = self.repository.get(memory_id)
+            if automatic and memory is not None and memory.metadata.get("delayed_review"):
+                raise PermissionError("delayed review memories require manual promotion")
             evaluation = self.evaluate(memory_id)
             if evaluation.eligible:
                 return self.repository.transition(

@@ -55,7 +55,6 @@ class MemoryValidationTarget(str, Enum):
 
 
 class AnalystType(str, Enum):
-    OPPORTUNITY_RADAR = "opportunity_radar"
     TECHNICAL_POSITION = "technical_position"
     NEWS_SENTIMENT = "news_sentiment"
     FUNDAMENTAL_ANALYSIS = "fundamental_analysis"

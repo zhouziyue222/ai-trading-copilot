@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ai_trading_copilot.copilot.agents.llm_tools import (
     extract_json_object,
+    record_response_usage,
     strip_trailing_json_object,
 )
 from ai_trading_copilot.copilot.agents.react_runner import ReActAgentRunner
@@ -13,6 +14,7 @@ from ai_trading_copilot.copilot.config.prompts import render_prompt, untrusted_d
 from ai_trading_copilot.copilot.services.cancellation import RunCancelled, check_cancelled
 from ai_trading_copilot.copilot.services.tracing import (
     get_current_trace_recorder,
+    llm_usage_attributes,
     summarize_text,
 )
 from ai_trading_copilot.copilot.domain.enums import (
@@ -32,6 +34,14 @@ from ai_trading_copilot.copilot.domain.models import (
 )
 from ai_trading_copilot.copilot.domain.localization import zh_label
 from ai_trading_copilot.copilot.services.memory_retrieval import MemoryRetrievalSession
+
+TRADER_ALLOWED_DIRECTIONS = {
+    TradeDirection.BUY,
+    TradeDirection.HOLD,
+    TradeDirection.REDUCE,
+    TradeDirection.SELL,
+    TradeDirection.WATCH,
+}
 
 
 @dataclass
@@ -116,6 +126,7 @@ class TraderAgent:
             technical_context=technical_context,
             news_sentiment=news_sentiment,
             fundamental_analysis=fundamental_analysis,
+            minimum_reward_risk=persona.minimum_reward_risk,
         )
         return self.create_plan_with_report(
             opportunity=opportunity,
@@ -278,11 +289,23 @@ class TraderAgent:
                         content = str(getattr(response, "content", response) or "").strip()
                         for key, value in summarize_text(content, "llm.response").items():
                             span.set_attribute(key, value)
+                        for key, value in llm_usage_attributes(response).items():
+                            span.set_attribute(key, value)
+                        record_response_usage(
+                            response,
+                            kind="llm",
+                            model=_llm_model_name(self.llm),
+                        )
                 else:
                     check_cancelled()
                     response = self.llm.invoke(prompt)
                     check_cancelled()
                     content = str(getattr(response, "content", response) or "").strip()
+                    record_response_usage(
+                        response,
+                        kind="llm",
+                        model=_llm_model_name(self.llm),
+                    )
             payload = extract_json_object(content)
             plan = _plan_from_payload(payload, fallback)
             raw_citations = payload.get("memory_citations", [])
@@ -397,6 +420,7 @@ def _opportunity_from_evidence(
     technical_context: TechnicalContext | None,
     news_sentiment: NewsSentimentReport | None,
     fundamental_analysis: FundamentalAnalysisReport | None,
+    minimum_reward_risk: float = 2.0,
 ) -> OpportunityRadarItem:
     trend_state = _stock_trend_state(technical_context, technical_position)
     status = SubscriptionStatus.OBSERVING
@@ -404,7 +428,7 @@ def _opportunity_from_evidence(
     if trend_state in {SymbolTrendState.UPTREND, SymbolTrendState.UPTREND_PULLBACK}:
         if (
             technical_position.reward_risk_ratio is not None
-            and technical_position.reward_risk_ratio >= 2.0
+            and technical_position.reward_risk_ratio >= minimum_reward_risk
         ):
             status = SubscriptionStatus.ACTIONABLE
             reason = "技术形态满足入场要求，收益风险比达到门槛。"
@@ -460,7 +484,11 @@ def _stock_trend_state(
     technical_context: TechnicalContext | None,
     technical_position: TechnicalPosition,
 ) -> SymbolTrendState:
-    if technical_context is not None and technical_context.stock.trend_state is not None:
+    if (
+        technical_context is not None
+        and technical_context.stock.trend_state is not None
+        and technical_context.stock.trend_state != SymbolTrendState.UNKNOWN
+    ):
         return technical_context.stock.trend_state
     if technical_position.uptrend:
         return SymbolTrendState.UPTREND_PULLBACK
@@ -510,6 +538,8 @@ def _trader_prompt(
     return render_prompt(
         "trader.v1",
         persona=persona.model_dump_json(),
+        minimum_reward_risk=persona.minimum_reward_risk,
+        max_distance_to_support_pct=persona.max_distance_to_support_pct,
         opportunity=opportunity.model_dump_json(),
         technical_position=technical_position.model_dump_json(),
         technical_context=technical_context.model_dump_json() if technical_context else "-",
@@ -549,7 +579,10 @@ def _plan_from_payload(payload: dict, fallback: TradePlan) -> TradePlan:
         if key in payload:
             data[key] = payload[key]
     if payload.get("direction"):
-        data["direction"] = TradeDirection(str(payload["direction"]).lower())
+        direction = TradeDirection(str(payload["direction"]).lower())
+        if direction not in TRADER_ALLOWED_DIRECTIONS:
+            raise ValueError(f"trader_direction_out_of_policy: {direction.value}")
+        data["direction"] = direction
     if payload.get("market_regime"):
         data["market_regime"] = MarketRegime(str(payload["market_regime"]).lower())
     return TradePlan(**data)
@@ -623,10 +656,10 @@ def _enforce_trader_safety(
     buy_is_safe = (
         opportunity.status == SubscriptionStatus.ACTIONABLE
         and technical_position.reward_risk_ratio is not None
-        and technical_position.reward_risk_ratio >= 2.0
+        and technical_position.reward_risk_ratio >= persona.minimum_reward_risk
         and not bool(news_sentiment and news_sentiment.material_risk)
         and not bool(fundamental_analysis and fundamental_analysis.material_risk)
-        and technical_position.distance_to_support_pct <= 0.03
+        and technical_position.distance_to_support_pct <= persona.max_distance_to_support_pct
         and not plan.is_chasing
         and plan.stop_loss is not None
         and bool(plan.targets)

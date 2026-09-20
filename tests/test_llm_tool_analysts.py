@@ -6,7 +6,6 @@ from ai_trading_copilot.copilot.adapters import trading_tools
 from ai_trading_copilot.copilot.agents import (
     FundamentalAnalystAgent,
     NewsSentimentAgent,
-    OpportunityRadarAgent,
     TechnicalPositionAgent,
 )
 from ai_trading_copilot.copilot.domain import (
@@ -490,33 +489,4 @@ def test_yfinance_global_news_rate_limit_uses_finnhub_fallback(monkeypatch):
     result = yfinance_news_adapter.get_global_news_yfinance("2026-05-10", 7, 5)
 
     assert result == "# Finnhub global news"
-
-
-def test_opportunity_radar_agent_uses_llm_tool_result_for_opportunity_status():
-    tool = RecordingTool("get_stock_info", "CRCL snapshot")
-    llm = ToolCallingFakeLLM(
-        tool_name="get_stock_info",
-        args={"symbol": "CRCL"},
-        final_content=(
-            "# Opportunity report\n\n"
-            '{"status": "near_opportunity", "trend_state": "uptrend_pullback", '
-            '"reason": "LLM sees a pullback near support.", "current_price": 113.67, '
-            '"support_level": 110.0, "reward_risk_ratio": 2.3, '
-            '"trend_reason": "Price remains in an uptrend pullback."}'
-        ),
-    )
-    agent = OpportunityRadarAgent(llm=llm, tools=[tool])
-
-    result = agent.analyze_symbol_with_report(
-        symbol="CRCL",
-        bars=_bars_from_closes([100 + i for i in range(60)]),
-        trade_date="2026-05-08",
-    )
-
-    assert result.item.symbol == "CRCL"
-    assert result.item.status == SubscriptionStatus.NEAR_OPPORTUNITY
-    assert result.item.trend_state == SymbolTrendState.UPTREND_PULLBACK
-    assert result.item.current_price == 113.67
-    assert result.tool_calls.count("get_stock_info") >= 1
-    assert tool.calls[0] == {"symbol": "CRCL"}
 

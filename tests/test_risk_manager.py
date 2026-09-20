@@ -129,3 +129,38 @@ def test_risk_manager_holds_flat_when_symbol_is_not_eligible():
     assert risk.final_weight == 0.05
     assert risk.delta_weight == 0
     assert risk.warnings
+
+
+def test_user_subscription_status_does_not_change_risk_decision():
+    portfolio = PortfolioSnapshot(
+        total_value=100_000,
+        cash=90_000,
+        position_weights={"AAPL": 0.10},
+    )
+    bars = {"AAPL": _bars([100, 101, 102])}
+    for status in (
+        SubscriptionStatus.OBSERVING,
+        SubscriptionStatus.NEAR_OPPORTUNITY,
+        SubscriptionStatus.ACTIONABLE,
+    ):
+        subscriptions = SubscriptionBook(
+            items=[
+                Subscription(
+                    symbol="AAPL",
+                    market_type=MarketType.US_STOCK,
+                    status=status,
+                )
+            ]
+        )
+
+        buy = RiskAgent().review(
+            persona=UserPersonaConfig(),
+            subscriptions=subscriptions,
+            portfolio=portfolio,
+            plan=_plan(position_weight=0.20),
+            price_history_by_symbol=bars,
+        )
+
+        assert buy.approved is True
+        assert buy.final_weight == 0.20
+        assert not any("用户" in warning for warning in buy.warnings)

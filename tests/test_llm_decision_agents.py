@@ -332,6 +332,52 @@ def test_trader_invalid_json_records_visible_fallback():
     assert result.fallback_reason.startswith("trader_model_parse_failed")
 
 
+def test_trader_gate_uses_persona_minimum_reward_risk():
+    llm = StaticLLM(
+        "# Trader report\n\n"
+        '{"direction": "buy", "entry_logic": "Buy near support.", '
+        '"market_regime": "uptrend", "support_level": 100, "stop_loss": 97, '
+        '"targets": [110], "reward_risk_ratio": 2.1, "position_weight": 0.2, '
+        '"holding_period": "1-6 weeks", "invalidation_conditions": ["Close below support"], '
+        '"persona_fit_reason": "Fits pullback persona.", "uses_leverage": false, '
+        '"uses_options": false, "is_chasing": false, "breakout_confirmed": false, '
+        '"pullback_confirmed": true}'
+    )
+
+    result = TraderAgent(llm=llm).create_plan_with_report(
+        opportunity=_opportunity(),
+        technical_position=_position().model_copy(
+            update={"reward_risk_ratio": 2.1}
+        ),
+        persona=UserPersonaConfig(minimum_reward_risk=2.5),
+    )
+
+    assert result.plan.direction == TradeDirection.HOLD
+
+
+def test_trader_rejects_direction_outside_model_whitelist():
+    llm = StaticLLM(
+        "# Trader report\n\n"
+        '{"direction": "short", "entry_logic": "Short the rally.", '
+        '"market_regime": "downtrend", "support_level": 100, "stop_loss": 103, '
+        '"targets": [90], "reward_risk_ratio": 2.5, "position_weight": 0.2, '
+        '"holding_period": "1-4 weeks", "invalidation_conditions": ["Stop hit"], '
+        '"persona_fit_reason": "Short momentum.", "uses_leverage": false, '
+        '"uses_options": false, "is_chasing": false, "breakout_confirmed": false, '
+        '"pullback_confirmed": false}'
+    )
+
+    result = TraderAgent(llm=llm).create_plan_with_report(
+        opportunity=_opportunity(),
+        technical_position=_position(),
+        persona=UserPersonaConfig(),
+    )
+
+    assert result.plan.direction != TradeDirection.SHORT
+    assert result.fallback_used is True
+    assert "trader_direction_out_of_policy" in result.fallback_reason
+
+
 def test_portfolio_memory_advisor_can_only_scale_risk_increasing_action(tmp_path):
     session, memory = _memory_session(tmp_path, consumer="portfolio_manager")
     reference = f"{memory.memory_id}@{memory.version}"

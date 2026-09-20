@@ -1,6 +1,5 @@
 ﻿from ai_trading_copilot.copilot.agents import (
     FundamentalAnalystAgent,
-    OpportunityRadarAgent,
     PortfolioManager,
     RiskAgent,
     TechnicalPositionAgent,
@@ -76,7 +75,6 @@ def _workflow(risk_agent=None):
         graph=CopilotLangGraph(
             enable_default_llm=False,
             default_persona_config=UserPersonaConfig(),
-            opportunity_radar_agent=OpportunityRadarAgent(),
             fundamental_analyst_agent=FundamentalAnalystAgent(),
             technical_position_agent=TechnicalPositionAgent(),
             trader_agent=TraderAgent(),

@@ -19,7 +19,6 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ai_trading_copilot.copilot.agents import (
     FundamentalAnalystAgent,
-    OpportunityRadarAgent,
     TechnicalPositionAgent,
 )
 from ai_trading_copilot.copilot.config import DEFAULT_REPORT_OUTPUT_DIR
@@ -248,12 +247,10 @@ class AnalystEvaluator:
     def __init__(
         self,
         *,
-        opportunity_radar_agent: OpportunityRadarAgent | None = None,
         technical_position_agent: TechnicalPositionAgent | None = None,
         fundamental_analyst_agent: FundamentalAnalystAgent | None = None,
         min_overall_score: float = 0.80,
     ):
-        self.opportunity_radar_agent = opportunity_radar_agent or OpportunityRadarAgent()
         self.technical_position_agent = technical_position_agent or TechnicalPositionAgent()
         self.fundamental_analyst_agent = fundamental_analyst_agent or FundamentalAnalystAgent()
         self.min_overall_score = min_overall_score
@@ -353,20 +350,6 @@ class AnalystEvaluator:
     def _run_analyst(self, expectation: AnalystEvalExpectation) -> dict[str, Any]:
         analyst = AnalystType(str(_enum_value(expectation.analyst)))
         symbol = normalize_symbol(expectation.symbol)
-        if analyst == AnalystType.OPPORTUNITY_RADAR:
-            item = self.opportunity_radar_agent.analyze_symbol(
-                symbol=symbol,
-                bars=_demo_actionable_bars(),
-            )
-            return {
-                "symbol": item.symbol,
-                "status": item.status,
-                "trend_state": item.trend_state,
-                "current_price": item.current_price,
-                "support_level": item.support_level,
-                "reward_risk_ratio": item.reward_risk_ratio,
-                "reason": item.reason,
-            }
         if analyst == AnalystType.TECHNICAL_POSITION:
             position = self.technical_position_agent.analyze(
                 symbol,
@@ -980,8 +963,6 @@ def _default_required_nodes(state: Mapping[str, Any]) -> tuple[str, ...]:
         CopilotLangGraph.NODE_LOAD_PERSONA_MARKDOWN,
         CopilotLangGraph.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
     ]
-    if AnalystType.OPPORTUNITY_RADAR.value in selected:
-        nodes.append(CopilotLangGraph.NODE_OPPORTUNITY_RADAR)
     if AnalystType.TECHNICAL_POSITION.value in selected:
         nodes.append(CopilotLangGraph.NODE_TECHNICAL_POSITION)
     if AnalystType.NEWS_SENTIMENT.value in selected:
@@ -1167,17 +1148,7 @@ def _default_analyst_expectations(
 ) -> tuple[AnalystEvalExpectation, ...]:
     expectations = []
     for analyst in analysts:
-        if analyst == AnalystType.OPPORTUNITY_RADAR:
-            expectations.append(
-                AnalystEvalExpectation(
-                    analyst=analyst,
-                    symbol=symbol,
-                    expected_status=SubscriptionStatus.ACTIONABLE,
-                    expected_trend_state=SymbolTrendState.UPTREND_PULLBACK,
-                    min_reward_risk_ratio=2.0,
-                )
-            )
-        elif analyst == AnalystType.TECHNICAL_POSITION:
+        if analyst == AnalystType.TECHNICAL_POSITION:
             expectations.append(
                 AnalystEvalExpectation(
                     analyst=analyst,
@@ -1256,16 +1227,6 @@ def _score_analyst_case(
 
 
 def _analyst_required_fields(analyst: AnalystType) -> tuple[str, ...]:
-    if analyst == AnalystType.OPPORTUNITY_RADAR:
-        return (
-            "symbol",
-            "status",
-            "trend_state",
-            "current_price",
-            "support_level",
-            "reward_risk_ratio",
-            "reason",
-        )
     if analyst == AnalystType.TECHNICAL_POSITION:
         return (
             "symbol",
@@ -2006,4 +1967,3 @@ __all__ = [
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-

@@ -18,6 +18,7 @@ from ai_trading_copilot.copilot.domain.models import (
     PortfolioSnapshot,
     PriceBar,
     RiskAssessment,
+    SubscriptionBook,
     TechnicalContext,
     TechnicalPosition,
     TraceEvent,
@@ -36,10 +37,12 @@ class CopilotGraphState(TypedDict, total=False):
     persona_markdown: str
     persona_config: UserPersonaConfig
     subscription_symbols: List[str]
+    subscription_book: Optional[SubscriptionBook]
     selected_analysts: List[AnalystType]
     portfolio: PortfolioSnapshot
     portfolio_mode: ExecutionMode
     price_history_by_symbol: Dict[str, List[PriceBar]]
+    target_weight_overrides: Dict[str, float]
     fundamental_analysis_by_symbol: Dict[str, FundamentalAnalysisReport]
     trade_date: Optional[str]
     look_back_days: int
@@ -70,4 +73,3 @@ class CopilotGraphState(TypedDict, total=False):
     user_confirmed: bool
     run_id: str
     trace_persisted: bool
-

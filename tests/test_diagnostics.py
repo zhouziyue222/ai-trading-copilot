@@ -2,7 +2,13 @@
 import json
 from pathlib import Path
 
-from ai_trading_copilot.copilot.services.diagnostics import CONTEXT, DiagnosticStore, exception_data, redact
+from ai_trading_copilot.copilot.services.diagnostics import (
+    CONTEXT,
+    DiagnosticStore,
+    exception_data,
+    record_usage,
+    redact,
+)
 from ai_trading_copilot.copilot.services.tracing import TraceRecorder
 import ai_trading_copilot.copilot.services.tracing as tracing
 
@@ -81,3 +87,46 @@ def test_export_failure_is_observable_and_does_not_raise(monkeypatch):
     exporter = tracing.ObservedExporter(Broken())
     exporter.export([])
     assert tracing.get_observability_status()["export_health"]["failed_batches"] == 1
+
+
+def test_usage_records_are_aggregated_by_model(tmp_path):
+    store = DiagnosticStore(tmp_path / "diagnostics")
+    token = CONTEXT.set({"store": store, "request_id": "usage"})
+    try:
+        record_usage(
+            kind="llm",
+            model="deepseek-v4-pro",
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+        )
+        record_usage(
+            kind="embedding",
+            model="text-embedding-v4",
+            prompt_tokens=7,
+        )
+        results = store.query("")
+
+        assert results["usage"] == [
+            {
+                "name": "llm:deepseek-v4-pro",
+                "count": 1,
+                "missing_count": 0,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "avg_total_tokens": 15.0,
+            },
+            {
+                "name": "embedding:text-embedding-v4",
+                "count": 1,
+                "missing_count": 0,
+                "prompt_tokens": 7,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "avg_total_tokens": 0.0,
+            },
+        ]
+    finally:
+        CONTEXT.reset(token)
+        store.close()

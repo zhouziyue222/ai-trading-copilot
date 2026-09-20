@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>延迟复盘</title><link rel="stylesheet" href="/static/styles.css"><style>
+.review-page{max-width:1200px;margin:24px auto;padding:0 20px}.review-page .panel{margin:16px 0;padding:20px}.review-page table{width:100%;text-align:left}.review-page td,.review-page th{padding:10px;vertical-align:top}.review-page form{display:flex;flex-wrap:wrap;gap:12px}.review-page label{display:grid;gap:4px}.review-page pre{white-space:pre-wrap;overflow-wrap:anywhere}.review-page .table-wrap{overflow-x:auto}.review-page h3{margin-top:20px}.review-page p{line-height:1.6}
+</style></head>
+<body class="review-page"><header><h1>交易计划延迟复盘</h1><a href="/">工作台</a> · <a href="/#memory">记忆审批</a></header>
+<main>
+<section class="panel"><p>第 5、10、20 个交易日观察。假设观察、模拟成交与实盘成交分别评价；经验通过影子验证后仍需人工批准。</p><button id="refresh" type="button">刷新</button> <button id="run" type="button">检查到期任务</button><p id="feedback" role="status"></p></section>
+<section class="panel"><h2>复盘任务</h2><div class="table-wrap"><table class="decision-table"><thead><tr><th>运行 / 标的</th><th>周期</th><th>状态</th><th>下次检查</th><th>等待原因</th><th>操作</th></tr></thead><tbody id="reviews"></tbody></table></div></section>
+<section class="panel"><h2>原始计划、结果与反思证据</h2><div id="review-summary">选择一个复盘任务。</div><details><summary>查看原始证据记录</summary><pre id="review-detail"></pre></details></section>
+<section class="panel"><h2>成交及关联</h2><p>仅将确认属于该计划的成交关联到运行；账户环境和账户 ID 必须与成交记录一致。</p><div id="fills"></div>
+<form id="associate"><label>账户环境<select name="environment"><option value="SIMULATE">模拟账户</option><option value="REAL">实盘账户</option></select></label><label>账户 ID<input name="account_id" required maxlength="128"></label><label>成交 ID<input name="deal_id" required maxlength="128"></label><label>运行 ID<input name="run_id" required maxlength="128"></label><label>标的<input name="symbol" required maxlength="32"></label><button type="submit">确认关联</button></form></section>
+</main><script src="/static/reviews.js"></script></body></html>

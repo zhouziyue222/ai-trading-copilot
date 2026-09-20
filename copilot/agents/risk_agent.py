@@ -10,6 +10,7 @@ from __future__ import annotations
 from ai_trading_copilot.copilot.domain.localization import zh_label, zh_bool
 
 from dataclasses import dataclass
+from statistics import stdev
 from typing import Dict, Mapping, Sequence
 
 from ai_trading_copilot.copilot.domain.enums import ForbiddenInstrument
@@ -29,6 +30,9 @@ from ai_trading_copilot.copilot.domain.models import (
 
 DEFAULT_PORTFOLIO_VALUE = 100_000.0
 EPSILON = 1e-9
+TRADING_DAYS_PER_YEAR = 252
+VOLATILITY_LOW = 0.25
+VOLATILITY_HIGH = 0.45
 
 
 @dataclass
@@ -46,6 +50,17 @@ class RiskBookReviewResult:
     target_weights: Dict[str, float]
     final_weights: Dict[str, float]
     clamps: list[ClampEvent]
+
+
+@dataclass(frozen=True)
+class PositionSizingPolicy:
+    risk_profile: str
+    target_annual_volatility: float
+    account_risk_per_trade: float
+    atr_stop_multiple: float
+    minimum_reward_risk: float
+    volatility_lookback_days: int
+    atr_window: int
 
 
 class RiskAgent:
@@ -106,6 +121,9 @@ class RiskAgent:
             report=_report_from_assessments(
                 {assessment.symbol: assessment},
                 note="基于既定限额核定仓位",
+                price_history_by_symbol=price_history_by_symbol,
+                persona=persona,
+                trade_plans={assessment.symbol: plan},
             ),
             risk_challenge=challenge,
         )
@@ -209,6 +227,9 @@ class RiskAgent:
             report=_report_from_assessments(
                 assessments,
                 note="基于既定限额核定仓位",
+                price_history_by_symbol=price_history_by_symbol,
+                persona=persona,
+                trade_plans=plans,
             ),
             risk_challenges=risk_challenges,
             target_weights={symbol: round(weight, 6) for symbol, weight in full_targets.items()},
@@ -422,7 +443,11 @@ def _report_from_assessments(
     assessments: Mapping[str, RiskAssessment],
     *,
     note: str,
+    price_history_by_symbol: Mapping[str, Sequence[PriceBar]] | None = None,
+    persona: UserPersonaConfig,
+    trade_plans: Mapping[str, TradePlan] | None = None,
 ) -> str:
+    policy = _position_sizing_policy(persona)
     lines = [
         "# 风险管理报告",
         "",
@@ -459,7 +484,313 @@ def _report_from_assessments(
         lines.extend(f"- {warning}" for warning in warnings)
     lines.extend(["", "## 风控结论"])
     lines.extend(f"- {_risk_challenge(assessment)}" for assessment in assessments.values())
+    lines.extend(["", "## 仓位管理指标配置"])
+    lines.extend(_position_policy_lines(policy, persona))
+    lines.extend(["", "## 仓位管理建议（基于金融指标）"])
+    lines.extend(
+        [
+            f"- 计算口径：年化波动率基于近 {policy.volatility_lookback_days} 个交易日收盘收益率；",
+            f"  ATR% 为 {policy.atr_window} 日平均真实波幅除以最新收盘价；",
+            f"  区间最大回撤基于近 {policy.volatility_lookback_days} 个交易日。",
+        ]
+    )
+    advice_rows = _position_advice_rows(
+        assessments,
+        price_history_by_symbol or {},
+        persona,
+        trade_plans or {},
+        policy,
+    )
+    if advice_rows:
+        lines.extend(
+            [
+                "",
+                "| 标的 | 年化波动率 | 波动率等级 | ATR% | 止损距离 | 收益风险比 | 区间最大回撤 | 建议单票上限 | 主要约束 | 仓位建议 |",
+                "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+            ]
+        )
+        for row in advice_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        row["symbol"],
+                        _format_optional_percent(row["annual_volatility"]),
+                        row["volatility_rank"],
+                        _format_optional_percent(row["atr_pct"]),
+                        _format_optional_percent(row["stop_distance_pct"]),
+                        _format_optional_ratio(row["reward_risk_ratio"]),
+                        _format_optional_percent(row["max_drawdown"]),
+                        _format_optional_percent(row["suggested_cap"]),
+                        row["binding_factor"],
+                        row["advice"],
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("")
+        lines.append("- 未取得足够历史行情，无法计算波动率、ATR 和回撤建议。")
     return "\n".join(lines) + "\n"
+
+
+def _position_sizing_policy(persona: UserPersonaConfig) -> PositionSizingPolicy:
+    return PositionSizingPolicy(
+        risk_profile=persona.risk_profile,
+        target_annual_volatility=persona.target_annual_volatility,
+        account_risk_per_trade=persona.account_risk_per_trade,
+        atr_stop_multiple=persona.atr_stop_multiple,
+        minimum_reward_risk=persona.minimum_reward_risk,
+        volatility_lookback_days=persona.volatility_lookback_days,
+        atr_window=persona.atr_window,
+    )
+
+
+def _position_policy_lines(
+    policy: PositionSizingPolicy,
+    persona: UserPersonaConfig,
+) -> list[str]:
+    return [
+        f"- 风险画像： {policy.risk_profile}",
+        f"- 目标年化波动率： {policy.target_annual_volatility:.1%}",
+        f"- 单笔风险预算： {policy.account_risk_per_trade:.2%}",
+        f"- ATR 止损倍数： {policy.atr_stop_multiple:.1f}x",
+        f"- 最低收益风险比： {policy.minimum_reward_risk:.1f}",
+        f"- 波动率回看窗口： {policy.volatility_lookback_days} 个交易日",
+        f"- ATR 窗口： {policy.atr_window} 个交易日",
+        f"- 单标的上限： {persona.max_single_position_weight:.1%}",
+        f"- 总敞口上限： {persona.max_gross_exposure:.1%}",
+    ]
+
+
+def _position_advice_rows(
+    assessments: Mapping[str, RiskAssessment],
+    price_history_by_symbol: Mapping[str, Sequence[PriceBar]],
+    persona: UserPersonaConfig,
+    trade_plans: Mapping[str, TradePlan],
+    policy: PositionSizingPolicy,
+) -> list[dict[str, str | float | None]]:
+    rows: list[dict[str, str | float | None]] = []
+    plans = {
+        normalize_symbol(symbol or plan.symbol): plan
+        for symbol, plan in trade_plans.items()
+    }
+    for symbol in sorted(assessments):
+        assessment = assessments[symbol]
+        bars = _bars_for_symbol(symbol, price_history_by_symbol)
+        metrics = _financial_position_metrics(bars, policy)
+        rows.append(
+            _position_sizing_advice(
+                symbol=symbol,
+                assessment=assessment,
+                plan=plans.get(symbol),
+                metrics=metrics,
+                persona=persona,
+                policy=policy,
+            )
+        )
+    return rows
+
+
+def _financial_position_metrics(
+    bars: Sequence[PriceBar],
+    policy: PositionSizingPolicy,
+) -> dict[str, float | None]:
+    if not bars:
+        return {
+            "annual_volatility": None,
+            "atr_pct": None,
+            "max_drawdown": None,
+        }
+    window = list(bars)[-policy.volatility_lookback_days :]
+    returns = _daily_returns(window)
+    annual_volatility = None
+    if len(returns) >= 2:
+        daily_volatility = stdev(returns)
+        annual_volatility = daily_volatility * (TRADING_DAYS_PER_YEAR**0.5)
+    return {
+        "annual_volatility": annual_volatility,
+        "atr_pct": _atr_percent(bars, policy.atr_window),
+        "max_drawdown": _max_drawdown(window),
+    }
+
+
+def _daily_returns(bars: Sequence[PriceBar]) -> list[float]:
+    closes = [float(bar.close) for bar in bars if float(bar.close) > 0]
+    return [
+        closes[index] / closes[index - 1] - 1
+        for index in range(1, len(closes))
+        if closes[index - 1] != 0
+    ]
+
+
+def _atr_percent(bars: Sequence[PriceBar], window: int) -> float | None:
+    bars = list(bars)
+    if len(bars) < 2:
+        return None
+    previous_close = float(bars[0].close)
+    true_ranges: list[float] = []
+    for bar in bars[1 : window + 1]:
+        true_range = max(
+            float(bar.high) - float(bar.low),
+            abs(float(bar.high) - previous_close),
+            abs(float(bar.low) - previous_close),
+        )
+        true_ranges.append(true_range)
+        previous_close = float(bar.close)
+    if not true_ranges:
+        return None
+    current = float(bars[-1].close)
+    if current <= 0:
+        return None
+    return sum(true_ranges) / len(true_ranges) / current
+
+
+def _max_drawdown(bars: Sequence[PriceBar]) -> float | None:
+    closes = [float(bar.close) for bar in bars if float(bar.close) > 0]
+    if len(closes) < 2:
+        return None
+    peak = closes[0]
+    max_drawdown = 0.0
+    for close in closes:
+        peak = max(peak, close)
+        drawdown = (peak - close) / peak
+        max_drawdown = max(max_drawdown, drawdown)
+    return max_drawdown
+
+
+def _position_sizing_advice(
+    *,
+    symbol: str,
+    assessment: RiskAssessment,
+    plan: TradePlan | None,
+    metrics: dict[str, float | None],
+    persona: UserPersonaConfig,
+    policy: PositionSizingPolicy,
+) -> dict[str, str | float | None]:
+    annual_volatility = metrics.get("annual_volatility")
+    atr_pct = metrics.get("atr_pct")
+    max_drawdown = metrics.get("max_drawdown")
+    stop_distance_pct = _stop_distance_pct(assessment, plan)
+    reward_risk_ratio = getattr(plan, "reward_risk_ratio", None) if plan is not None else None
+
+    volatility_cap = (
+        persona.max_single_position_weight
+        * min(1.0, policy.target_annual_volatility / annual_volatility)
+        if annual_volatility is not None and annual_volatility > 0
+        else persona.max_single_position_weight
+    )
+    drawdown_cap = (
+        persona.max_single_position_weight
+        * min(1.0, persona.max_portfolio_drawdown / max_drawdown)
+        if max_drawdown is not None and max_drawdown > 0
+        else persona.max_single_position_weight
+    )
+
+    stop_risk_caps: list[float] = []
+    if stop_distance_pct is not None and stop_distance_pct > 0:
+        stop_risk_caps.append(policy.account_risk_per_trade / stop_distance_pct)
+    if atr_pct is not None and atr_pct > 0:
+        stop_risk_caps.append(
+            policy.account_risk_per_trade
+            / (atr_pct * policy.atr_stop_multiple)
+        )
+    stop_risk_cap = min(stop_risk_caps) if stop_risk_caps else None
+
+    labeled_caps = [
+        ("波动率上限", volatility_cap),
+        ("回撤上限", drawdown_cap),
+    ]
+    if stop_risk_cap is not None:
+        labeled_caps.append(("止损风险上限", stop_risk_cap))
+    binding_factor, pre_rr_cap = min(labeled_caps, key=lambda item: item[1])
+    reward_risk_multiplier = _reward_risk_multiplier(
+        reward_risk_ratio,
+        policy.minimum_reward_risk,
+    )
+    suggested_cap = max(
+        0.01,
+        min(
+            persona.max_single_position_weight,
+            pre_rr_cap * reward_risk_multiplier,
+        ),
+    )
+
+    final_abs = abs(assessment.final_weight)
+    has_indicators = any(
+        value is not None
+        for value in (annual_volatility, atr_pct, max_drawdown, stop_distance_pct)
+    )
+    if not has_indicators:
+        advice = "历史数据不足，建议沿用风控限额并采用更保守的分批建仓。"
+    elif final_abs > suggested_cap + EPSILON:
+        advice = (
+            f"最终仓位 {assessment.final_weight:.2%} 高于建议上限 "
+            f"{suggested_cap:.2%}，建议分批降低至该上限以内。"
+        )
+    else:
+        advice = (
+            f"最终仓位 {assessment.final_weight:.2%} 在建议上限 "
+            f"{suggested_cap:.2%} 以内，可维持现有仓位计划。"
+        )
+
+    return {
+        "symbol": symbol,
+        "annual_volatility": annual_volatility,
+        "volatility_rank": _volatility_rank(annual_volatility),
+        "atr_pct": atr_pct,
+        "stop_distance_pct": stop_distance_pct,
+        "reward_risk_ratio": reward_risk_ratio,
+        "max_drawdown": max_drawdown,
+        "suggested_cap": suggested_cap,
+        "binding_factor": binding_factor if has_indicators else "-",
+        "advice": advice,
+    }
+
+
+def _stop_distance_pct(
+    assessment: RiskAssessment,
+    plan: TradePlan | None,
+) -> float | None:
+    if plan is None or plan.stop_loss is None:
+        return None
+    current_price = assessment.current_price
+    if current_price is None or current_price <= 0 or plan.stop_loss <= 0:
+        return None
+    return abs(current_price - plan.stop_loss) / current_price
+
+
+def _reward_risk_multiplier(
+    reward_risk_ratio: float | None,
+    minimum_reward_risk: float,
+) -> float:
+    if reward_risk_ratio is None:
+        return 0.8
+    if reward_risk_ratio >= 3.0:
+        return 1.0
+    if reward_risk_ratio >= minimum_reward_risk:
+        return 0.9
+    if reward_risk_ratio >= 1.5:
+        return 0.75
+    return 0.5
+
+
+def _volatility_rank(annual_volatility: float | None) -> str:
+    if annual_volatility is None:
+        return "未知"
+    if annual_volatility < VOLATILITY_LOW:
+        return "低"
+    if annual_volatility <= VOLATILITY_HIGH:
+        return "中"
+    return "高"
+
+
+def _format_optional_percent(value: float | None) -> str:
+    return "-" if value is None else f"{float(value):.2%}"
+
+
+def _format_optional_ratio(value: float | None) -> str:
+    return "-" if value is None else f"{float(value):.2f}"
 
 
 __all__ = [

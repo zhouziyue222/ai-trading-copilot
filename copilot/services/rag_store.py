@@ -24,6 +24,8 @@ from ai_trading_copilot.copilot.config.llm import (
     load_copilot_env,
 )
 from ai_trading_copilot.copilot.services.cancellation import check_cancelled
+from ai_trading_copilot.copilot.services.diagnostics import record_usage
+from ai_trading_copilot.copilot.services.tracing import llm_usage_attributes
 from ai_trading_copilot.copilot.domain.models import (
     RagDocument,
     normalize_symbol,
@@ -213,6 +215,20 @@ class RagQueryPlanner:
         check_cancelled()
         response = self.llm.invoke(prompt)
         check_cancelled()
+        usage_attrs = llm_usage_attributes(response)
+        if usage_attrs:
+            record_usage(
+                kind="llm",
+                model=str(
+                    getattr(self.llm, "model_name", None)
+                    or getattr(self.llm, "model", "")
+                    or ""
+                ),
+                prompt_tokens=usage_attrs.get("usage.prompt_tokens"),
+                completion_tokens=usage_attrs.get("usage.completion_tokens"),
+                total_tokens=usage_attrs.get("usage.total_tokens"),
+                reasoning_tokens=usage_attrs.get("usage.reasoning_tokens"),
+            )
         payload = _extract_json_object(_llm_text(response))
         required = {
             "rewritten_query",
@@ -241,22 +257,18 @@ class OpenAITextEmbedder:
         self.model = model or os.getenv("OPENAI_EMBEDDING_MODEL", DEFAULT_OPENAI_EMBEDDING_MODEL)
         self.name = f"openai:{self.model}"
         try:
-            from langchain_openai import OpenAIEmbeddings
+            from openai import OpenAI
         except Exception as exc:  # pragma: no cover - dependency is declared
-            raise RagUnavailableError(f"langchain-openai is unavailable: {exc}") from exc
+            raise RagUnavailableError(f"openai is unavailable: {exc}") from exc
         base_url = (
             os.getenv("OPENAI_BASE_URL", "").strip()
             or os.getenv("OPENAI_API_BASE", "").strip()
             or os.getenv("DASHSCOPE_BASE_URL", "").strip()
         )
-        kwargs = {
-            "model": self.model,
-            "api_key": api_key,
-            "check_embedding_ctx_length": False,
-        }
+        client_kwargs = {"model": self.model, "api_key": api_key}
         if base_url:
-            kwargs["base_url"] = base_url
-        self._embeddings = OpenAIEmbeddings(**kwargs)
+            client_kwargs["base_url"] = base_url
+        self._client = OpenAI(**client_kwargs)
         self.batch_size = _int_env(
             "AI_TRADING_EMBEDDING_BATCH_SIZE",
             DEFAULT_EMBEDDING_BATCH_SIZE,
@@ -268,11 +280,54 @@ class OpenAITextEmbedder:
         output: List[List[float]] = []
         items = list(texts)
         for start in range(0, len(items), self.batch_size):
-            output.extend(self._embeddings.embed_documents(items[start : start + self.batch_size]))
+            output.extend(self._embed_batch(items[start : start + self.batch_size]))
         return output
 
     def embed_query(self, text: str) -> List[float]:
-        return self._embeddings.embed_query(text)
+        vectors = self._embed_batch([text])
+        return vectors[0]
+
+    def _embed_batch(self, texts: list[str]) -> List[List[float]]:
+        from ai_trading_copilot.copilot.services.tracing import (
+            get_current_trace_recorder,
+            llm_usage_attributes,
+        )
+
+        recorder = get_current_trace_recorder()
+        attrs = {
+            "embedding.model": self.model,
+            "embedding.batch_size": len(texts),
+        }
+        if recorder is not None:
+            with recorder.start_span(
+                "embedding.invoke",
+                kind="client",
+                attributes=attrs,
+            ) as span:
+                response = self._client.embeddings.create(
+                    model=self.model,
+                    input=texts,
+                )
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    prompt_tokens = getattr(usage, "prompt_tokens", None)
+                    for key, value in llm_usage_attributes(response).items():
+                        span.set_attribute(key, value)
+                    record_usage(
+                        kind="embedding",
+                        model=self.model,
+                        prompt_tokens=prompt_tokens,
+                    )
+                return [item.embedding for item in response.data]
+        response = self._client.embeddings.create(model=self.model, input=texts)
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            record_usage(
+                kind="embedding",
+                model=self.model,
+                prompt_tokens=getattr(usage, "prompt_tokens", None),
+            )
+        return [item.embedding for item in response.data]
 
 
 class ChromaRagStore:

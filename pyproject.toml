@@ -42,6 +42,7 @@ eval = [
 ]
 
 [project.scripts]
+ai-trading-copilot-review = "ai_trading_copilot.copilot.review:main"
 ai-trading-copilot = "ai_trading_copilot.copilot.run:main"
 ai-trading-copilot-ui = "ai_trading_copilot.copilot.ui.server:main"
 ai-trading-copilot-rag = "ai_trading_copilot.copilot.rag:main"

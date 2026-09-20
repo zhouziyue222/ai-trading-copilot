@@ -16,8 +16,8 @@ from ai_trading_copilot.copilot.config import (
     DEFAULT_PRODUCT_CONFIG,
     create_default_deepseek_llm,
 )
-from ai_trading_copilot.copilot.config.defaults import DEFAULT_PERSONA_CONFIG
 from ai_trading_copilot.copilot.domain.enums import AnalystType, ExecutionMode
+from ai_trading_copilot.copilot.domain.models import UserPersonaConfig
 from ai_trading_copilot.copilot.graph import CopilotLangGraph
 from ai_trading_copilot.copilot.services.fundamental_research import (
     FundamentalResearchRetriever,
@@ -34,6 +34,7 @@ from ai_trading_copilot.copilot.services.memory_evaluation import (
     MemoryShadowEvaluator,
 )
 from ai_trading_copilot.copilot.services.rag_store import FundamentalRagStore
+from ai_trading_copilot.copilot.services.risk_position_store import RiskPositionStore
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
 from ai_trading_copilot.copilot.services.subscription_service import SubscriptionStore
 from ai_trading_copilot.copilot.services.vector_memory import (
@@ -44,6 +45,7 @@ from ai_trading_copilot.copilot.services.vector_memory import (
 
 DEFAULT_SUBSCRIPTIONS_FILE = Path(__file__).resolve().parents[1] / "config" / "subscriptions.json"
 DEFAULT_MEMORY_DATABASE = Path(__file__).resolve().parents[1] / "config" / "memory.sqlite3"
+DEFAULT_RISK_POSITION_FILE = Path(__file__).resolve().parents[1] / "config" / "risk_position.user.json"
 DEFAULT_ANALYSTS = [
     AnalystType.NEWS_SENTIMENT,
     AnalystType.TECHNICAL_POSITION,
@@ -74,8 +76,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         "user_confirmed": False,
         "run_id": run_id,
     }
+    params["subscription_book"] = SubscriptionStore(args.subscriptions_file).load()
+    risk_position = RiskPositionStore(DEFAULT_RISK_POSITION_FILE).load()
+    persona_config = UserPersonaConfig(**risk_position["persona"])
+    params["persona_config"] = persona_config
+    params["target_weight_overrides"] = risk_position["target_weights"]
     defaults = {
-        "persona": DEFAULT_PERSONA_CONFIG,
+        "persona": persona_config.model_dump(mode="json"),
         "selected_analysts": [analyst.value for analyst in selected_analysts],
         "execution_mode_default": ExecutionMode.SIMULATION.value,
         "portfolio_mode_default": ExecutionMode.SIMULATION.value,
@@ -109,7 +116,16 @@ def main(argv: Iterable[str] | None = None) -> int:
     error = None
     try:
         state = graph.run(**params)
-        if memory_agent is not None and not args.no_memory_learning:
+        review_registered = False
+        try:
+            from ai_trading_copilot.copilot.services.delayed_review import create_review_service
+            create_review_service(DEFAULT_MEMORY_DATABASE).register_run({
+                **state, "memory_learning_enabled": memory_agent is not None and not args.no_memory_learning,
+            })
+            review_registered = True
+        except Exception as persistence_error:
+            tracker.add_error(f"delayed review registration failed: {persistence_error}")
+        if review_registered and memory_agent is not None and not args.no_memory_learning:
             try:
                 candidates = memory_agent.learn_from_run(state)
                 if candidates:
@@ -123,11 +139,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         tracker.finish(
             failed=error is not None,
             degraded=bool(
-                state
-                and any(
-                    str(item).startswith("portfolio_fetch_failed")
-                    for item in (state.get("errors") or [])
-                )
+                    state
+                    and any(
+                        str(item).startswith("portfolio_fetch_failed")
+                        or str(item) == "llm_unavailable"
+                        for item in (state.get("errors") or [])
+                    )
             ),
         )
         audit_path = tracker.write_audit(state=state, error=error)

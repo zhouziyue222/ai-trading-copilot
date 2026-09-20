@@ -11,14 +11,13 @@ import time
 import contextvars
 from copy import deepcopy
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ai_trading_copilot.copilot.agents import (
     FundamentalAnalystAgent,
     NewsSentimentAgent,
-    OpportunityRadarAgent,
     PortfolioManager,
     PostTradeReviewLearningAgent,
     RiskAgent,
@@ -31,6 +30,7 @@ from ai_trading_copilot.copilot.adapters.portfolio import (
     get_futu_portfolio_snapshot,
 )
 from ai_trading_copilot.copilot.config import (
+    DEFAULT_PERSONA_CONFIG,
     DEFAULT_PERSONA_MARKDOWN,
     DEFAULT_REPORT_OUTPUT_DIR,
     create_default_deepseek_llm,
@@ -108,7 +108,6 @@ class CopilotLangGraph:
 
     NODE_LOAD_PERSONA_MARKDOWN = "Load Persona Markdown"
     NODE_LOAD_SUBSCRIPTION_SYMBOLS = "Load Subscription Symbols"
-    NODE_OPPORTUNITY_RADAR = "Opportunity Radar"
     NODE_TECHNICAL_POSITION = "Technical Position"
     NODE_NEWS_SENTIMENT = "News Sentiment"
     NODE_FUNDAMENTAL_ANALYSIS = "Fundamental Analysis"
@@ -134,7 +133,6 @@ class CopilotLangGraph:
     def __init__(
         self,
         *,
-        opportunity_radar_agent: Optional[OpportunityRadarAgent] = None,
         news_sentiment_agent: Optional[NewsSentimentAgent] = None,
         fundamental_analyst_agent: Optional[FundamentalAnalystAgent] = None,
         technical_position_agent: Optional[TechnicalPositionAgent] = None,
@@ -151,7 +149,6 @@ class CopilotLangGraph:
         report_output_dir: Optional[str | Path] = None,
         llm=_DEFAULT_LLM,
         enable_default_llm: bool = True,
-        opportunity_radar_llm=None,
         technical_position_llm=None,
         technical_position_debug: bool = False,
         technical_position_prompt_name: str | None = None,
@@ -181,9 +178,6 @@ class CopilotLangGraph:
                 technical_position_llm = create_default_deepseek_llm()
             if fundamental_analyst_agent is None and fundamental_llm is None:
                 fundamental_llm = create_default_deepseek_llm()
-        self.opportunity_radar_agent = opportunity_radar_agent or OpportunityRadarAgent(
-            llm=opportunity_radar_llm or default_llm
-        )
         self.news_sentiment_agent = news_sentiment_agent or NewsSentimentAgent(
             llm=news_sentiment_llm or default_llm
         )
@@ -217,7 +211,9 @@ class CopilotLangGraph:
             else force_sequential
         )
         self.default_persona_markdown = default_persona_markdown
-        self.default_persona_config = default_persona_config or UserPersonaConfig()
+        self.default_persona_config = (
+            default_persona_config or UserPersonaConfig(**DEFAULT_PERSONA_CONFIG)
+        )
         self.default_selected_analysts = _normalize_analysts(
             default_selected_analysts or DEFAULT_SELECTED_ANALYSTS
         )
@@ -238,12 +234,14 @@ class CopilotLangGraph:
         self,
         *,
         subscription_symbols: List[str],
+        subscription_book: SubscriptionBook | None = None,
         price_history_by_symbol: Optional[Dict[str, List[PriceBar]]] = None,
         portfolio: Optional[PortfolioSnapshot] = None,
         persona_markdown: Optional[str] = None,
         persona_config: Optional[UserPersonaConfig] = None,
         fundamental_analysis_by_symbol: Optional[Dict[str, FundamentalAnalysisReport]] = None,
         selected_analysts: Optional[Iterable[AnalystType | str]] = None,
+        target_weight_overrides: Optional[Dict[str, float]] = None,
         report_output_dir: Optional[str | Path] = None,
         trade_date: Optional[str] = None,
         look_back_days: int = 90,
@@ -269,6 +267,7 @@ class CopilotLangGraph:
             "persona_markdown": persona_markdown or self.default_persona_markdown,
             "persona_config": persona_config or self.default_persona_config,
             "subscription_symbols": subscription_symbols,
+            "subscription_book": subscription_book,
             "selected_analysts": list(
                 self.default_selected_analysts
                 if selected_analysts is None
@@ -277,6 +276,7 @@ class CopilotLangGraph:
             "portfolio": resolved_portfolio,
             "portfolio_mode": portfolio_mode,
             "price_history_by_symbol": price_history_by_symbol or {},
+            "target_weight_overrides": target_weight_overrides or {},
             "fundamental_analysis_by_symbol": fundamental_analysis_by_symbol or {},
             "trade_date": trade_date,
             "look_back_days": look_back_days,
@@ -295,6 +295,7 @@ class CopilotLangGraph:
             "persona_markdown": self.default_persona_markdown,
             "persona_config": self.default_persona_config,
             "subscription_symbols": [],
+            "subscription_book": None,
             "selected_analysts": self.default_selected_analysts,
             "trace_events": [],
             "errors": [],
@@ -306,13 +307,13 @@ class CopilotLangGraph:
             "news_sentiment_reports_by_symbol": {},
             "news_sentiment_by_symbol": {},
             "technical_contexts": {},
-            "opportunity_reports_by_symbol": {},
             "memories": {},
             "shadow_memories": {},
             "memory_retrievals": [],
             "report_output_dir": self.report_output_dir,
             "portfolio_mode": ExecutionMode.SIMULATION,
             "fundamental_analysis_by_symbol": {},
+            "target_weight_overrides": {},
             "trade_date": None,
             "look_back_days": 90,
             "execution_mode": ExecutionMode.SIMULATION,
@@ -408,12 +409,7 @@ class CopilotLangGraph:
 
         workflow = StateGraph(CopilotGraphState)
         node_map = self._node_map()
-        for node_name in _unique_list(
-            [
-                *self.NODE_ORDER,
-                self.NODE_OPPORTUNITY_RADAR,
-            ]
-        ):
+        for node_name in _unique_list(self.NODE_ORDER):
             workflow.add_node(node_name, node_map[node_name])
 
         workflow.add_edge(START, self.NODE_LOAD_PERSONA_MARKDOWN)
@@ -425,14 +421,12 @@ class CopilotLangGraph:
             self.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
             self._route_analyst_nodes,
             [
-                self.NODE_OPPORTUNITY_RADAR,
                 self.NODE_TECHNICAL_POSITION,
                 self.NODE_NEWS_SENTIMENT,
                 self.NODE_FUNDAMENTAL_ANALYSIS,
                 self.NODE_TRADER,
             ],
         )
-        workflow.add_edge(self.NODE_OPPORTUNITY_RADAR, self.NODE_TRADER)
         workflow.add_edge(self.NODE_TECHNICAL_POSITION, self.NODE_TRADER)
         workflow.add_edge(self.NODE_NEWS_SENTIMENT, self.NODE_TRADER)
         workflow.add_edge(self.NODE_FUNDAMENTAL_ANALYSIS, self.NODE_TRADER)
@@ -463,8 +457,7 @@ class CopilotLangGraph:
     def checkpoint_node_order(cls, selected_analysts: Iterable) -> list[str]:
         """Validate compatibility without constructing agents or querying tools."""
         selected = _normalize_analysts(selected_analysts)
-        routes = [(AnalystType.OPPORTUNITY_RADAR, cls.NODE_OPPORTUNITY_RADAR),
-                  (AnalystType.TECHNICAL_POSITION, cls.NODE_TECHNICAL_POSITION),
+        routes = [(AnalystType.TECHNICAL_POSITION, cls.NODE_TECHNICAL_POSITION),
                   (AnalystType.NEWS_SENTIMENT, cls.NODE_NEWS_SENTIMENT),
                   (AnalystType.FUNDAMENTAL_ANALYSIS, cls.NODE_FUNDAMENTAL_ANALYSIS)]
         return [cls.NODE_LOAD_PERSONA_MARKDOWN, cls.NODE_LOAD_SUBSCRIPTION_SYMBOLS,
@@ -658,8 +651,6 @@ class CopilotLangGraph:
     def _route_analyst_nodes(self, state: CopilotGraphState) -> List[str]:
         selected = state.get("selected_analysts", [])
         routes: List[str] = []
-        if AnalystType.OPPORTUNITY_RADAR in selected:
-            routes.append(self.NODE_OPPORTUNITY_RADAR)
         if AnalystType.TECHNICAL_POSITION in selected:
             routes.append(self.NODE_TECHNICAL_POSITION)
         else:
@@ -689,7 +680,6 @@ class CopilotLangGraph:
                 "market_reports_by_symbol",
                 "fundamental_analysis_reports_by_symbol",
                 "news_sentiment_reports_by_symbol",
-                "opportunity_reports_by_symbol",
             }:
                 merged[key] = {**merged.get(key, {}), **value}
             else:
@@ -700,7 +690,6 @@ class CopilotLangGraph:
         node_map = {
             self.NODE_LOAD_PERSONA_MARKDOWN: self._load_persona_markdown,
             self.NODE_LOAD_SUBSCRIPTION_SYMBOLS: self._load_subscription_symbols,
-            self.NODE_OPPORTUNITY_RADAR: self._opportunity_radar,
             self.NODE_TECHNICAL_POSITION: self._technical_position,
             self.NODE_NEWS_SENTIMENT: self._news_sentiment,
             self.NODE_FUNDAMENTAL_ANALYSIS: self._fundamental_analysis,
@@ -877,77 +866,6 @@ class CopilotLangGraph:
                 )
             ],
         }
-
-    def _opportunity_radar(self, state: CopilotGraphState) -> CopilotGraphState:
-        if AnalystType.OPPORTUNITY_RADAR not in state["selected_analysts"]:
-            return self._with_trace(
-                state,
-                TraceEvent(
-                    node_name=self.NODE_OPPORTUNITY_RADAR,
-                    input_summary="analyst not selected",
-                    output_summary="radar_items=0",
-                    route_reason="Opportunity Radar analyst was not selected.",
-                    warnings=["analyst_skipped"],
-                ),
-                radar_items=[],
-            )
-
-        items: List[OpportunityRadarItem] = []
-        reports_by_symbol: Dict[str, str] = {}
-        tool_calls: List[str] = []
-        fallback_warnings: List[str] = []
-        for symbol in state["subscription_symbols"]:
-            bars = (
-                None
-                if getattr(self.opportunity_radar_agent, "llm", None) is not None
-                else state["price_history_by_symbol"].get(symbol)
-            )
-            if hasattr(self.opportunity_radar_agent, "analyze_symbol_with_report"):
-                result = self.opportunity_radar_agent.analyze_symbol_with_report(
-                    symbol=symbol,
-                    bars=bars,
-                    trade_date=state.get("trade_date"),
-                    look_back_days=state.get("look_back_days", 90),
-                )
-                items.append(result.item)
-                reports_by_symbol[symbol] = result.report
-                tool_calls.extend(result.tool_calls)
-                if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
-                    fallback_warnings.append(f"{symbol}: {result.fallback_reason}")
-            else:
-                items.append(
-                    self.opportunity_radar_agent.analyze_symbol(
-                        symbol=symbol,
-                        bars=bars,
-                    )
-                )
-        report_path = self._save_agent_report(
-            state=state,
-            stage="1_analysts",
-            agent_name=AnalystType.OPPORTUNITY_RADAR.value,
-            content=(
-                self._format_opportunity_radar_report(items)
-                + self._format_symbol_reports(reports_by_symbol)
-            ),
-        )
-        return self._with_trace(
-            state,
-            TraceEvent(
-                node_name=self.NODE_OPPORTUNITY_RADAR,
-                input_summary=f"subscription_symbols={state['subscription_symbols']}",
-                output_summary=f"radar_items={len(items)}",
-                route_reason=(
-                    "Opportunity Radar classifies each subscribed symbol with tools when an LLM is configured; "
-                    "otherwise it uses deterministic fallback rules."
-                ),
-                rule_hits=sorted(set(tool_calls)),
-                warnings=fallback_warnings,
-            ),
-            radar_items=items,
-            analyst_reports={AnalystType.OPPORTUNITY_RADAR.value: report_path},
-            agent_reports={AnalystType.OPPORTUNITY_RADAR.value: report_path},
-            opportunity_reports_by_symbol=reports_by_symbol,
-        )
 
     def _technical_position(self, state: CopilotGraphState) -> CopilotGraphState:
         if AnalystType.TECHNICAL_POSITION not in state["selected_analysts"]:
@@ -1184,9 +1102,7 @@ class CopilotLangGraph:
             key: list(value) for key, value in state.get("shadow_memories", {}).items()
         }
         memory_retrievals = list(state.get("memory_retrievals", []))
-        radar_by_symbol = {item.symbol: item for item in state.get("radar_items", [])}
         for symbol in state.get("subscription_symbols", []):
-            item = radar_by_symbol.get(symbol)
             position = state.get("technical_positions", {}).get(symbol)
             technical_context = state.get("technical_contexts", {}).get(symbol)
             news_sentiment = state.get("news_sentiment_by_symbol", {}).get(symbol)
@@ -1195,61 +1111,29 @@ class CopilotLangGraph:
                 state,
                 symbol=symbol,
                 consumer="trader",
-                market_regime=_retrieval_market_regime(item, technical_context),
+                market_regime=_retrieval_market_regime(None, technical_context),
                 agent=self.trader_agent,
             )
             tool_calls: list[str] = []
             symbol_warnings: list[str] = []
-
-            if item is None and hasattr(self.trader_agent, "create_plan_from_evidence"):
-                result = self.trader_agent.create_plan_from_evidence(
-                    symbol=symbol,
-                    technical_position=position,
-                    technical_context=technical_context,
-                    news_sentiment=news_sentiment,
-                    fundamental_analysis=fundamental_report,
-                    persona=state["persona_config"],
-                    analyst_context=_analyst_context_for_symbol(state, symbol),
-                    memory_session=memory_session,
-                )
-                plan = result.plan
-                item = result.opportunity or _opportunity_from_plan(plan)
-                reports_by_symbol[symbol] = result.report
-                tool_calls = result.tool_calls
-                if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
-                    symbol_warnings.append(result.fallback_reason)
-                if getattr(result, "memory_retrieval_error", ""):
-                    symbol_warnings.append(result.memory_retrieval_error)
-            elif item is not None:
-                if position is None:
-                    position = _technical_position_from_radar(item)
-                if hasattr(self.trader_agent, "create_plan_with_report"):
-                    result = self.trader_agent.create_plan_with_report(
-                        opportunity=item,
-                        technical_position=position,
-                        persona=state["persona_config"],
-                        analyst_context=_analyst_context_for_symbol(state, symbol),
-                        technical_context=technical_context,
-                        news_sentiment=news_sentiment,
-                        fundamental_analysis=fundamental_report,
-                        memory_session=memory_session,
-                    )
-                    plan = result.plan
-                    item = result.opportunity or item
-                    reports_by_symbol[symbol] = result.report
-                    tool_calls = result.tool_calls
-                    if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
-                        symbol_warnings.append(result.fallback_reason)
-                    if getattr(result, "memory_retrieval_error", ""):
-                        symbol_warnings.append(result.memory_retrieval_error)
-                else:
-                    plan = self.trader_agent.create_plan(
-                        opportunity=item,
-                        technical_position=position,
-                        persona=state["persona_config"],
-                    )
-            else:
-                continue
+            result = self.trader_agent.create_plan_from_evidence(
+                symbol=symbol,
+                technical_position=position,
+                technical_context=technical_context,
+                news_sentiment=news_sentiment,
+                fundamental_analysis=fundamental_report,
+                persona=state["persona_config"],
+                analyst_context=_analyst_context_for_symbol(state, symbol),
+                memory_session=memory_session,
+            )
+            plan = result.plan
+            item = result.opportunity or _opportunity_from_plan(plan)
+            reports_by_symbol[symbol] = result.report
+            tool_calls = result.tool_calls
+            if getattr(result, "fallback_used", False) and getattr(result, "fallback_reason", ""):
+                symbol_warnings.append(result.fallback_reason)
+            if getattr(result, "memory_retrieval_error", ""):
+                symbol_warnings.append(result.memory_retrieval_error)
 
             plans[symbol] = plan
             reviewed_items.append(item)
@@ -1338,11 +1222,15 @@ class CopilotLangGraph:
         )
         if portfolio_error is not None:
             return self._degraded_risk_check(state, portfolio_error)
-        subscriptions = _subscription_book_from_symbols(state["subscription_symbols"])
+        subscriptions = _resolved_subscription_book(state)
         trade_plans = state.get("trade_plans", {})
         target_weights = self.portfolio_manager.build_target_weights(
             trade_plans=trade_plans,
             portfolio=state["portfolio"],
+        )
+        target_weights = _merge_target_weight_overrides(
+            target_weights,
+            state.get("target_weight_overrides", {}),
         )
         result = self.risk_agent.review_book(
             persona=state["persona_config"],
@@ -1569,6 +1457,7 @@ class CopilotLangGraph:
             risk_assessments=state.get("risk_assessments", {}),
             execution_decisions=state.get("execution_decisions", {}),
             risk_challenges=state.get("explanations", {}).get("risk_challenges", {}),
+            subscriptions=_resolved_subscription_book(state),
         )
         explanations = dict(state.get("explanations", {}))
         explanations["user_summary"] = report.summary
@@ -1675,36 +1564,6 @@ class CopilotLangGraph:
             if self.run_tracker is not None:
                 self.run_tracker.record_report(agent_name, path)
         return str(path)
-
-    def _format_opportunity_radar_report(
-        self,
-        items: List[OpportunityRadarItem],
-    ) -> str:
-        lines = [
-            "# 机会雷达报告",
-            "",
-            f"生成时间： {datetime.now().isoformat(timespec='seconds')}",
-            "",
-            "| 标的 | 趋势 | 机会状态 | 当前价格 | 支撑位 | 收益风险比 | 依据 |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
-        ]
-        for item in items:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        item.symbol,
-                        item.trend_label or "",
-                        item.status_label,
-                        _fmt_number(item.current_price),
-                        _fmt_number(item.support_level),
-                        _fmt_number(item.reward_risk_ratio),
-                        item.reason,
-                    ]
-                )
-                + " |"
-            )
-        return "\n".join(lines) + "\n"
 
     def _format_technical_position_report(
         self,
@@ -1829,6 +1688,18 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _merge_target_weight_overrides(
+    target_weights: Dict[str, float],
+    overrides: Dict[str, float],
+) -> Dict[str, float]:
+    merged = {symbol.strip().upper(): float(weight) for symbol, weight in target_weights.items()}
+    for raw_symbol, raw_weight in overrides.items():
+        symbol = raw_symbol.strip().upper()
+        if symbol in merged:
+            merged[symbol] = float(raw_weight)
+    return merged
+
+
 def _normalize_price_history(
     price_history_by_symbol: Dict[str, List[PriceBar]]
 ) -> Dict[str, List[PriceBar]]:
@@ -1948,7 +1819,6 @@ def _format_news_sentiment_report(
 def _analyst_context_for_symbol(state: CopilotGraphState, symbol: str) -> str:
     sections = []
     for title, key in [
-        ("Opportunity Radar", "opportunity_reports_by_symbol"),
         ("Technical Position", "market_reports_by_symbol"),
     ]:
         report = state.get(key, {}).get(symbol)
@@ -2089,15 +1959,27 @@ def _memory_source_suffix(item: DistilledMemory) -> str:
     return "" if not details else " (" + "; ".join(details) + ")"
 
 
-def _subscription_book_from_symbols(symbols: List[str]) -> SubscriptionBook:
+def _resolved_subscription_book(state: dict) -> SubscriptionBook:
     from ai_trading_copilot.copilot.domain.enums import MarketType
 
+    symbols = _normalize_symbols(state.get("subscription_symbols", []))
+    supplied = state.get("subscription_book")
+    items = list(supplied.items) if supplied is not None else []
+    existing = {item.symbol for item in items}
     return SubscriptionBook(
         items=[
-            Subscription(symbol=symbol, market_type=MarketType.US_STOCK)
-            for symbol in symbols
+            *items,
+            *[
+                Subscription(symbol=symbol, market_type=MarketType.US_STOCK)
+                for symbol in symbols
+                if symbol not in existing
+            ],
         ]
     )
+
+
+def _subscription_book_from_symbols(symbols: List[str]) -> SubscriptionBook:
+    return _resolved_subscription_book({"subscription_symbols": symbols})
 
 
 def _span_graph_node_name(span, recorder: TraceRecorder) -> str | None:
@@ -2126,7 +2008,7 @@ def _activity_from_span(event: str, span) -> dict[str, Any]:
         "title": _activity_title(span.name, status, attrs),
         "started_at": span.started_at,
         "ended_at": span.ended_at,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
         "duration_ms": duration_ms,
         "summary": _activity_summary(attrs),
     }
@@ -2189,29 +2071,6 @@ def _activity_details(attrs: dict[str, Any]) -> dict[str, Any]:
             "tool_calls": attrs.get("llm.response.tool_calls", []),
         }
     return details
-
-
-def _technical_position_from_radar(item: OpportunityRadarItem) -> TechnicalPosition:
-    current = item.current_price or item.support_level or 1.0
-    support = item.support_level or current
-    downside = max(current - support, 0.01)
-    recent_high = current + downside * (item.reward_risk_ratio or 1.0)
-    trend_state = item.trend_state or SymbolTrendState.UNKNOWN
-    return TechnicalPosition(
-        symbol=item.symbol,
-        current_price=current,
-        support_level=support,
-        recent_high=recent_high,
-        moving_average_20=current if trend_state != SymbolTrendState.DOWNTREND else None,
-        moving_average_50=support if trend_state != SymbolTrendState.UNKNOWN else None,
-        distance_to_support_pct=max((current - support) / support, 0),
-        pullback_from_high_pct=max((recent_high - current) / recent_high, 0),
-        reward_risk_ratio=item.reward_risk_ratio,
-        uptrend=trend_state in {
-            SymbolTrendState.UPTREND,
-            SymbolTrendState.UPTREND_PULLBACK,
-        },
-    )
 
 
 def _opportunity_from_plan(plan: TradePlan) -> OpportunityRadarItem:

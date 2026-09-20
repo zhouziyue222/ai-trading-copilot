@@ -28,9 +28,11 @@
     <nav class="page-nav" aria-label="主页面">
       <button class="nav-button active" type="button" data-view="analysis">股票分析</button>
       <button class="nav-button" type="button" data-view="watchlist">我的自选股</button>
+      <a class="nav-button" href="/reviews">延迟复盘</a>
       <details class="settings-menu"><summary>资料与设置</summary><button class="nav-button" type="button" data-view="rag">研究资料</button>
       <button class="nav-button" type="button" data-view="memory">记忆审批</button></details>
       <button class="nav-button" type="button" data-view="portfolio">模拟账户概况</button>
+      <button class="nav-button" type="button" data-view="risk">风控与仓位</button>
     </nav>
 
     <main class="workspace">
@@ -363,6 +365,154 @@
             <button type="submit">保存结果</button>
           </form>
         </section>
+      </section>
+
+      <section class="view" id="view-risk" aria-labelledby="riskTitle">
+        <div class="view-header">
+          <div>
+            <p class="eyebrow">Risk & Position</p>
+            <h2 id="riskTitle">风控与仓位</h2>
+          </div>
+          <div class="view-actions">
+            <button id="refreshRiskPosition" class="ghost-button" type="button">刷新</button>
+            <button id="resetRiskPosition" class="ghost-button" type="button">恢复默认</button>
+            <button id="saveRiskPosition" type="button" disabled>保存设置</button>
+          </div>
+        </div>
+
+        <div id="riskFeedback" class="risk-banner status-neutral">
+          <strong>尚未加载</strong>
+          <span>进入页面后加载当前风控与仓位配置。</span>
+        </div>
+
+        <div class="risk-layout">
+          <section class="panel risk-panel">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">Risk Limits</p>
+                <h3>风控限额</h3>
+              </div>
+            </div>
+            <form id="riskPositionForm" class="risk-form">
+              <div class="risk-field">
+                <label for="riskMaxDrawdown">组合最大回撤</label>
+                <div class="range-row">
+                  <input id="riskMaxDrawdown" type="number" min="1" max="100" step="1" />
+                  <span>%</span>
+                  <input id="riskMaxDrawdownRange" type="range" min="1" max="100" step="1" />
+                </div>
+              </div>
+              <div class="risk-field">
+                <label for="riskMaxPosition">单标的上限</label>
+                <div class="range-row">
+                  <input id="riskMaxPosition" type="number" min="1" max="100" step="1" />
+                  <span>%</span>
+                  <input id="riskMaxPositionRange" type="range" min="1" max="100" step="1" />
+                </div>
+              </div>
+              <div class="risk-field">
+                <label for="riskGrossExposure">总敞口</label>
+                <div class="range-row">
+                  <input id="riskGrossExposure" type="number" min="1" max="200" step="1" />
+                  <span>%</span>
+                  <input id="riskGrossExposureRange" type="range" min="1" max="200" step="1" />
+                </div>
+              </div>
+              <div class="risk-field">
+                <label>默认建议仓位区间</label>
+                <div class="range-row two-range">
+                  <input id="riskMinWeight" type="number" min="0" max="100" step="1" />
+                  <span>%</span>
+                  <input id="riskMinWeightRange" type="range" min="0" max="100" step="1" />
+                  <input id="riskMaxWeight" type="number" min="0" max="100" step="1" />
+                  <span>%</span>
+                  <input id="riskMaxWeightRange" type="range" min="0" max="100" step="1" />
+                </div>
+              </div>
+
+              <div class="section-heading compact">
+                <h3>仓位管理指标配置</h3>
+              </div>
+              <div class="risk-field">
+                <label for="riskTargetVolatility">目标年化波动率</label>
+                <div class="range-row">
+                  <input id="riskTargetVolatility" type="number" min="1" max="100" step="1" />
+                  <span>%</span>
+                  <input id="riskTargetVolatilityRange" type="range" min="1" max="100" step="1" />
+                </div>
+              </div>
+              <div class="risk-field">
+                <label for="riskAccountRisk">单笔风险预算</label>
+                <div class="range-row">
+                  <input id="riskAccountRisk" type="number" min="0.1" max="10" step="0.1" />
+                  <span>%</span>
+                  <input id="riskAccountRiskRange" type="range" min="0.1" max="10" step="0.1" />
+                </div>
+              </div>
+              <div class="risk-field">
+                <label for="riskAtrStopMultiple">ATR 止损倍数</label>
+                <div class="range-row">
+                  <input id="riskAtrStopMultiple" type="number" min="0.5" max="10" step="0.1" />
+                  <span>x</span>
+                  <input id="riskAtrStopMultipleRange" type="range" min="0.5" max="10" step="0.1" />
+                </div>
+              </div>
+              <div class="risk-field">
+                <label for="riskMinRewardRisk">最低收益风险比 <small class="risk-hint">推荐 2.0</small></label>
+                <div class="range-row">
+                  <input id="riskMinRewardRisk" type="number" min="1" max="5" step="0.1" value="2" />
+                  <span>x</span>
+                  <input id="riskMinRewardRiskRange" type="range" min="1" max="5" step="0.1" value="2" />
+                </div>
+              </div>
+              <div class="risk-field">
+                <label for="riskMaxDistance">距支撑上限 <small class="risk-hint">推荐 3%</small>（过高视为追高）</label>
+                <div class="range-row">
+                  <input id="riskMaxDistance" type="number" min="0" max="10" step="0.5" value="3" />
+                  <span>%</span>
+                  <input id="riskMaxDistanceRange" type="range" min="0" max="10" step="0.5" value="3" />
+                </div>
+              </div>
+              <div class="field-row">
+                <label>
+                  波动率回看窗口
+                  <input id="riskVolLookback" type="number" min="5" max="252" step="1" />
+                </label>
+                <label>
+                  ATR 窗口
+                  <input id="riskAtrWindow" type="number" min="2" max="100" step="1" />
+                </label>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel risk-panel">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">Target Weights</p>
+                <h3>目标仓位</h3>
+              </div>
+              <span id="riskTargetGross" class="inline-status">目标总敞口 0%</span>
+            </div>
+            <div class="safety-note">
+              <strong>只影响下一次分析</strong>
+              <span>当前 Futu 持仓只读；目标仓位仅覆盖已生成交易计划的标的，不会直接下单。</span>
+            </div>
+            <div class="section-heading compact">
+              <h3>当前持仓（只读）</h3>
+              <button id="refreshRiskPortfolio" class="ghost-button" type="button">刷新账户</button>
+            </div>
+            <div id="riskCurrentPositions" class="position-list"></div>
+            <div class="section-heading compact">
+              <h3>目标仓位编辑</h3>
+            </div>
+            <div class="risk-target-add">
+              <select id="riskTargetAddSelect"></select>
+              <button id="riskTargetAdd" type="button">添加标的</button>
+            </div>
+            <div id="riskTargetRows" class="risk-target-list"></div>
+          </section>
+        </div>
       </section>
 
       <section class="view" id="view-portfolio" aria-labelledby="portfolioTitle">

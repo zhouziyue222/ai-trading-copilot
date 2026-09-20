@@ -101,6 +101,69 @@ SENSITIVE_KEY_PARTS = (
     "authorization",
 )
 
+
+def llm_usage_attributes(value: Any) -> dict[str, int]:
+    """Extract real token usage from LangChain/OpenAI-compatible responses."""
+    metadata = getattr(value, "usage_metadata", None)
+    if isinstance(metadata, dict):
+        details = metadata.get("input_token_details") or {}
+        completion_details = metadata.get("output_token_details") or {}
+        return {
+            key: int(item)
+            for key, item in {
+                "usage.prompt_tokens": (
+                    metadata.get("input_tokens")
+                    or metadata.get("prompt_tokens")
+                ),
+                "usage.completion_tokens": (
+                    metadata.get("output_tokens")
+                    or metadata.get("completion_tokens")
+                ),
+                "usage.total_tokens": (
+                    metadata.get("total_tokens")
+                    or metadata.get("input_tokens", 0)
+                    + metadata.get("output_tokens", 0)
+                    or None
+                ),
+                "usage.reasoning_tokens": (
+                    details.get("reasoning_tokens")
+                    or completion_details.get("reasoning_tokens")
+                ),
+            }.items()
+            if item is not None
+        }
+    usage = getattr(value, "usage", None)
+    if usage is not None:
+        completion_details = getattr(usage, "completion_tokens_details", None)
+        return {
+            key: int(item)
+            for key, item in {
+                "usage.prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "usage.completion_tokens": getattr(usage, "completion_tokens", None),
+                "usage.total_tokens": getattr(usage, "total_tokens", None),
+                "usage.reasoning_tokens": getattr(
+                    completion_details, "reasoning_tokens", None
+                ),
+            }.items()
+            if item is not None
+        }
+    if isinstance(value, dict):
+        return {
+            key: int(item)
+            for key, item in {
+                "usage.prompt_tokens": value.get("prompt_tokens"),
+                "usage.completion_tokens": value.get("completion_tokens"),
+                "usage.total_tokens": value.get("total_tokens"),
+                "usage.reasoning_tokens": (
+                    (value.get("completion_tokens_details") or {}).get(
+                        "reasoning_tokens"
+                    )
+                ),
+            }.items()
+            if item is not None
+        }
+    return {}
+
 _current_recorder: ContextVar["TraceRecorder | None"] = ContextVar(
     "copilot_trace_recorder",
     default=None,
@@ -577,6 +640,8 @@ def _utc_now() -> str:
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
+    if lowered.startswith("usage."):
+        return False
     return any(part in lowered for part in SENSITIVE_KEY_PARTS)
 
 

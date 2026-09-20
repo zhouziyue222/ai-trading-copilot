@@ -1,5 +1,7 @@
 # 记忆系统与 Harness 闭环
 
+新增的自动第 5/10/20 交易日复盘、只读成交归因和 Shadow 学习流程见 [延迟复盘说明](delayed_review.md)。下文手工登记 `RunOutcome` 的入口继续兼容；新延迟经验只使用分类后的成熟结果，并始终人工批准。
+
 ## 设计结论
 
 本项目采用“SQLite 事实源 + LangMem 提炼 + ACE 式候选管理 + Shadow 延迟评测 + Autoharness 离线优化”的组合。记忆系统可以持续积累证据，但生产决策只读取人工/门禁批准的记忆；LLM 不能修改确定性风控规则。
@@ -168,13 +170,13 @@ ai-trading-copilot-memory-eval --live --output reports/memory-effect-live.json
 - **非法引用率**：最终接受引用中的非法比例。离线是人工构造错误引用的过滤契约；真实模型还分别报告原始非法引用数，避免过滤后的 0 掩盖模型幻觉。
 - **真实模型对照**：每案保存计划、风控、最终决策、约束检查、耗时、调用数和可获得的 token 用量。决策约束分数单独衡量标注方向及仓位上限，安全检查单列；完整配对才进入差值均值。
 
-模型异常、缺少结构化回答或 Agent 回退不计为有效模型结果。没有凭据时 `--live` 明确失败；SDK 未暴露的 token 用量为 `null`，不写成零。退出码 0 表示评测完成且契约通过，1 表示契约/安全失败或真实模型配对不完整，2 表示配置/案例错误；低检索质量会如实报告，不靠退出码伪装为安全问题。
+模型异常、缺少结构化回答、Agent 明确回退或记忆检索失败不计为有效模型结果。完整回答通过轻量观测钩子捕获，不用可能截断的日志判断模型是否成功；LangChain 和原生 DeepSeek 路径均覆盖。没有凭据时 `--live` 明确失败；SDK 未暴露的 token 用量为 `null`，不写成零。退出码 0 表示评测完成且契约通过，1 表示契约/安全失败或真实模型配对不完整，2 表示配置/案例错误；低检索质量会如实报告，不靠退出码伪装为安全问题。
 
 这套案例是人工构造的回归集，已用于定位中文检索遗漏，不能声称是未见过的独立市场样本。离线闭环中的收益全部标记为合成数据。真实模型的约束分数也不等于投资收益；本轮未执行付费模型对照。
 
-## 2026-09-08 可复现基线
+## 2026-09-09 可复现基线
 
-机器可读结果见 [memory_baseline_20260908.json](memory_baseline_20260908.json)，包含案例哈希、代码树哈希、依赖版本、harness 逐项结果和离线逐案结果。基于 Git `a954fc78c1d22f525a60fbb3c5b8bceac802b247` 的工作区运行；其中同时存在用户未提交的并行图与 UI 改动，因此单独 checkout 该提交不能代表本次实测代码。
+机器可读结果见 [memory_baseline_20260909.json](memory_baseline_20260909.json)，包含案例哈希、代码树哈希、依赖版本、harness 逐项结果和离线逐案结果。基于 Git `944578de63c576eb6a13127ec1d2ab2d5ca9f724` 的工作区运行；其中同时存在用户未提交的风控、Agent 与 UI 改动，因此单独 checkout 该提交不能代表本次实测代码。报告保留 2026-09-08 的 143 项历史通过记录，并以本次 152 项重新验证结果为准。
 
 环境为 Windows、Python 3.11.14，解释器明确使用仓库 `.venv311/Scripts/python.exe`。最初专项测试为 **33 passed / 1 failed**，原因是缺少已声明的 `langmem`；系统 `python` 没有 pytest，系统 Anaconda 还会导入另一份旧仓库，不能混用。补齐 LangMem 0.0.30、构建依赖并重新安装本项目后，`uv pip check` 通过。
 
@@ -186,7 +188,7 @@ uv --cache-dir tmp/uv-memory-cache pip check --python .venv311/Scripts/python.ex
 
 # 独立临时目录避免 Windows 旧 pytest-current 链接清理错误
 $memoryTestTemp = "tmp/memory-check-" + [guid]::NewGuid().ToString("N")
-& ./.venv311/Scripts/python.exe -m pytest tests/test_memory_learning.py tests/test_memory_repository.py tests/test_memory_store.py tests/test_memory_retrieval.py tests/test_memory_cli.py tests/test_memory_ui_api.py tests/test_memory_eval.py tests/test_copilot_langgraph.py tests/test_llm_decision_agents.py tests/test_portfolio_manager.py tests/test_ui_app.py tests/test_cli_run.py tests/test_config_files.py -q --basetemp $memoryTestTemp
+& ./.venv311/Scripts/python.exe -m pytest tests/test_memory_learning.py tests/test_memory_repository.py tests/test_memory_store.py tests/test_memory_retrieval.py tests/test_memory_cli.py tests/test_memory_ui_api.py tests/test_memory_eval.py tests/test_copilot_langgraph.py tests/test_llm_decision_agents.py tests/test_portfolio_manager.py tests/test_ui_app.py tests/test_cli_run.py tests/test_config_files.py tests/test_react_tracing.py -q --basetemp $memoryTestTemp
 
 & ./.venv311/Scripts/python.exe -m ai_trading_copilot.copilot.harness_benchmark
 & ./.venv311/Scripts/python.exe -m ai_trading_copilot.copilot.memory_eval --output reports/memory-effect-offline.json
@@ -195,7 +197,7 @@ $memoryTestTemp = "tmp/memory-check-" + [guid]::NewGuid().ToString("N")
 | 检查 | 本次结果 |
 | --- | --- |
 | 原有 harness | 11/11，通过率及全部硬门禁为 1.0 |
-| 记忆与调用链整合 pytest | 129 passed |
+| 记忆与调用链整合 pytest | 152 passed |
 | 离线学习闭环 | 9/9 契约通过 |
 | Recall@3 | 中文过滤修复前 6/7；修复后 7/7 |
 | Precision@3 | 修复前 6/27；修复后 7/27 |

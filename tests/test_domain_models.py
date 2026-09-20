@@ -29,6 +29,15 @@ def test_default_persona_matches_prd_constraints():
     assert persona.stock_source == "user_subscription_list"
 
 
+def test_persona_entry_threshold_defaults_and_hard_ranges():
+    persona = UserPersonaConfig(**DEFAULT_PERSONA_CONFIG)
+
+    assert persona.minimum_reward_risk == 2.0
+    assert persona.max_distance_to_support_pct == 0.03
+    with pytest.raises(ValidationError):
+        UserPersonaConfig(max_distance_to_support_pct=0.6)
+
+
 def test_product_config_uses_distilled_retrieval_memory_limit():
     learning_loop = DEFAULT_PRODUCT_CONFIG["learning_loop"]
 

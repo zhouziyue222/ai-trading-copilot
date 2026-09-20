@@ -164,7 +164,6 @@ def test_agent_evaluator_scores_expected_workflow_state(tmp_path):
 def test_analyst_evaluator_scores_multiple_single_analysts():
     report = AnalystEvaluator().evaluate_smoke(
         analysts=[
-            AnalystType.OPPORTUNITY_RADAR,
             AnalystType.TECHNICAL_POSITION,
             AnalystType.FUNDAMENTAL_ANALYSIS,
         ],
@@ -173,7 +172,7 @@ def test_analyst_evaluator_scores_multiple_single_analysts():
     metrics = {metric.name: metric for metric in report.metrics}
 
     assert report.passed is True
-    assert report.details["summary"]["cases"] == 3.0
+    assert report.details["summary"]["cases"] == 2.0
     assert metrics["output_valid_rate"].value == 1.0
     assert metrics["field_completeness_rate"].value >= 0.9
     assert metrics["expectation_match_rate"].value == 1.0
@@ -183,10 +182,9 @@ def test_analyst_evaluator_reports_expectation_mismatch():
     report = AnalystEvaluator().evaluate_expectations(
         [
             AnalystEvalExpectation(
-                analyst=AnalystType.OPPORTUNITY_RADAR,
+                analyst=AnalystType.TECHNICAL_POSITION,
                 symbol="AAPL",
-                expected_status=SubscriptionStatus.RISK_ELEVATED,
-                expected_trend_state=SymbolTrendState.DOWNTREND,
+                expected_uptrend=False,
             )
         ]
     )
@@ -200,7 +198,7 @@ def test_analyst_smoke_cli_outputs_json(capsys):
         [
             "analyst-smoke",
             "--analysts",
-            "opportunity_radar,technical_position",
+            "technical_position",
             "--symbols",
             "AAPL",
             "--format",
@@ -211,7 +209,7 @@ def test_analyst_smoke_cli_outputs_json(capsys):
 
     assert result == 0
     assert payload["suite"] == "single_analyst_evaluation"
-    assert payload["details"]["summary"]["cases"] == 2.0
+    assert payload["details"]["summary"]["cases"] == 1.0
 
 
 def test_analyst_smoke_cli_default_analysts_outputs_json(capsys):

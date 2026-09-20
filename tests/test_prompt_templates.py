@@ -43,13 +43,6 @@ PROMPT_CASES = {
         "uncertainties",
         "downstream_summary",
     ],
-    "opportunity_radar.v1": [
-        "status",
-        "trend_state",
-        "reason",
-        "current_price",
-        "reward_risk_ratio",
-    ],
     "fundamental_analyst.v1": [
         "thesis_intact",
         "material_risk",

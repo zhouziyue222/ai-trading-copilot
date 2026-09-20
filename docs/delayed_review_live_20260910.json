@@ -1,0 +1,94 @@
+{
+  "account_queries": [
+    {
+      "environment": "REAL",
+      "suffix": "7042",
+      "operation": "orders",
+      "success": true,
+      "rows": 0
+    },
+    {
+      "environment": "REAL",
+      "suffix": "7042",
+      "operation": "fills",
+      "success": true,
+      "rows": 0
+    },
+    {
+      "environment": "SIMULATE",
+      "suffix": "1724",
+      "operation": "orders",
+      "success": true,
+      "rows": 0
+    },
+    {
+      "environment": "SIMULATE",
+      "suffix": "1724",
+      "operation": "fills",
+      "success": false,
+      "error": "Waiting for historical SIMULATE coverage: 模拟交易不支持成交数据"
+    }
+  ],
+  "model_input": "controlled historical test plan and public market data only",
+  "production_database_modified": false,
+  "live_review": {
+    "status": "completed",
+    "review_id": "6a9e2be596eb039970bb88b238a83f0f",
+    "cutoff_at": "2026-09-08T20:00:00+00:00",
+    "bars": 20,
+    "reflection_present": true,
+    "memories": [],
+    "observations": [
+      {
+        "account_id": null,
+        "asset_return": 0.027522339561332432,
+        "benchmark_return": -0.01106477476663259,
+        "category": "hypothetical",
+        "direction_return": 0.027522339561332432,
+        "drawdown_basis": "daily_close_equity",
+        "eligible": false,
+        "entry_basis": "next_complete_session_open",
+        "entry_price": 307.75,
+        "invalidation": "not_specified",
+        "max_drawdown": -0.036531488985710237,
+        "max_favorable_excursion": 0.07493095044679121,
+        "price_events": [],
+        "realized_return": 0.027522339561332432,
+        "return_basis": "hypothetical_asset_observation_not_trade_pnl"
+      }
+    ],
+    "reflection": {
+      "applicability": "仅适用于联调/连接性样例，不构成用户历史交易计划或可复用交易假设；不应将本次观察外推为真实交易表现或策略优势。",
+      "counter_evidence": "没有可验证的反证条件：original_plan 的 invalidation_conditions 为空，watch 计划未定义止损或失效规则；market_window 显示 AAPL 观察期内最大回撤约 -3.65%，但无法据此判定触发否定条件。",
+      "evidence_refs": [
+        "original_plan",
+        "linked_orders",
+        "linked_fills",
+        "computed_metrics",
+        "market_window",
+        "benchmark_window"
+      ],
+      "execution_deviation": "无执行偏差：计划方向为 watch，没有订单和成交记录；观察仅以 next_complete_session_open 为基准，return_basis 为 hypothetical_asset_observation_not_trade_pnl，不构成实际执行。",
+      "judgment": "原始计划为 AAPL 的 watch 联调观察样例，无入场、出场、目标或失效条件，并明确不假设成交。linked_orders 和 linked_fills 均为空，observations 中 eligible=false、category=hypothetical，说明该观察只是行情跟踪，不能作为交易盈利或策略正确性的证据。",
+      "lessons": []
+    }
+  },
+  "joined_real_account_and_model": {
+    "status": "completed",
+    "execution_complete": true,
+    "sync_errors": [],
+    "reflection_present": true,
+    "original_market_preserved": true
+  },
+  "recorded_at": "2026-09-09T16:49:17.879820+00:00",
+  "model": "deepseek-v4-pro",
+  "original_user_plan_snapshots": 0,
+  "sdk_version": "10.9.6908",
+  "result_sha256": "8650aebf4ffa681fce4d9c5b0a2f3ea3149f3a5fbc985fe10a942df454f8ea1f",
+  "limitations": [
+    "No non-empty live fills available in selected interval",
+    "SIMULATE deal history unsupported by OpenD",
+    "Controlled historical fixture is not an original user trade plan",
+    "Production account and benchmark settings not changed"
+  ]
+}

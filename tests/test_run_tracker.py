@@ -6,11 +6,6 @@ from ai_trading_copilot.copilot.graph import CopilotLangGraph
 from ai_trading_copilot.copilot.services.run_tracker import RunTracker
 
 
-class FailingRadarAgent:
-    def analyze_symbol_with_report(self, **kwargs):
-        raise RuntimeError("radar failed")
-
-
 def _tracker(tmp_path):
     return RunTracker(
         output_dir=tmp_path,
@@ -133,7 +128,6 @@ def test_langgraph_tracker_records_reports_for_successful_run(tmp_path):
     assert payload["nodes"][CopilotLangGraph.NODE_TECHNICAL_POSITION]["status"] == "succeeded"
     assert payload["nodes"][CopilotLangGraph.NODE_NEWS_SENTIMENT]["status"] == "succeeded"
     assert payload["nodes"][CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS]["status"] == "succeeded"
-    assert CopilotLangGraph.NODE_OPPORTUNITY_RADAR not in payload["nodes"]
     assert payload["reports"]["futu_portfolio"]["exists"] is True
     assert payload["reports"]["run_explanation"]["exists"] is True
     assert (tmp_path / "run_audit.md").exists()
@@ -227,30 +221,6 @@ def test_run_tracker_writes_decision_summary_from_state(tmp_path):
     assert summary["symbols"][0]["execution_status"] == "portfolio_decided"
     assert summary["symbols"][0]["target_weight"] == 0.2
     assert summary["symbols"][0]["final_weight"] == 0.2
-
-
-def test_langgraph_tracker_records_failed_node(tmp_path):
-    tracker = _tracker(tmp_path)
-
-    try:
-        CopilotLangGraph(
-            llm=None,
-            opportunity_radar_agent=FailingRadarAgent(),
-            run_tracker=tracker,
-        ).run(
-            subscription_symbols=["AAPL"],
-            portfolio=PortfolioSnapshot(),
-            selected_analysts=[AnalystType.OPPORTUNITY_RADAR],
-            report_output_dir=tmp_path,
-        )
-    except RuntimeError:
-        tracker.finish(failed=True)
-        tracker.write_audit(state=None, error=RuntimeError("radar failed"))
-
-    payload = json.loads((tmp_path / "run_status.json").read_text(encoding="utf-8"))
-    assert payload["nodes"][CopilotLangGraph.NODE_OPPORTUNITY_RADAR]["status"] == "failed"
-    assert "radar failed" in payload["nodes"][CopilotLangGraph.NODE_OPPORTUNITY_RADAR]["error"]
-    assert (tmp_path / "run_audit.md").exists()
 
 
 def test_cli_creates_status_and_audit_with_mock_graph(tmp_path, monkeypatch):

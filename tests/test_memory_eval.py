@@ -124,6 +124,19 @@ def test_live_requires_credentials_and_does_not_emit_success(monkeypatch, capsys
     assert "DEEPSEEK_API_KEY" in json.loads(capsys.readouterr().out)["error"]
 
 
+def test_memory_retrieval_failure_is_not_credited_as_a_memory_trial(tmp_path, monkeypatch):
+    case = memory_eval.load_cases(memory_eval.DEFAULT_CASES, "evaluation")[0]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("fixture retrieval unavailable")
+
+    monkeypatch.setattr(memory_eval.MemoryRetrievalSession, "prefetch", fail)
+    result = memory_eval._model_trial(case, tmp_path, Model(), with_memory=True)
+    assert not result["completed"]
+    assert result["memory_retrieval_error"]
+    assert result["decision_constraint_pass_rate"] is None
+
+
 def test_live_pair_report_preserves_case_inputs_and_incomplete_pairs(tmp_path, monkeypatch):
     fixture = json.loads(memory_eval.DEFAULT_CASES.read_text(encoding="utf-8"))
     fixture["cases"] = fixture["cases"][:1]

@@ -7,6 +7,7 @@
   <form id="search" class="panel"><label>输入完整 Request ID、Run ID 或 Trace ID<input id="query" maxlength="128" placeholder="留空查看最近事件"></label><button type="submit">查询 / 刷新</button><span id="feedback" role="status"></span></form>
   <section class="panel"><h2>执行器与采集状态</h2><p id="health"></p><div id="workers"></div></section>
   <section class="panel"><h2>工具与模型耗时</h2><p>工具总耗时含重试与本地处理；模型耗时为完整调用耗时。不是纯网络 RTT。</p><div class="table-wrap"><table class="decision-table"><thead><tr><th>调用</th><th>样本数</th><th>p50 / ms</th><th>p95 / ms</th><th>失败数</th><th>缓存命中</th></tr></thead><tbody id="services"></tbody></table></div></section>
+  <section class="panel"><h2>Token 用量</h2><p>仅统计模型返回真实 usage 的调用；缺失不会参与汇总。</p><div class="table-wrap"><table class="decision-table"><thead><tr><th>调用</th><th>调用数</th><th>缺 usage</th><th>Prompt Tokens</th><th>Completion Tokens</th><th>Total</th><th>平均 Total</th></tr></thead><tbody id="usage"></tbody></table></div></section>
   <section class="panel"><h2>异常聚合</h2><div id="errors"></div></section>
   <section class="panel"><h2>执行时间线</h2><p>点击事件查看脱敏详情；行号对应记录中的源码哈希。</p><div class="trace-layout"><div id="timeline" class="trace-timeline"></div><pre id="detail" class="trace-details">选择一次调用或异常。</pre></div></section>
 </main><script src="/static/internal.js"></script>

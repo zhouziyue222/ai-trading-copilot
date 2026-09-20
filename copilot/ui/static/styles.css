@@ -1333,6 +1333,60 @@ button.secondary:hover:not(:disabled),
   grid-template-columns: 1fr auto;
 }
 
+.intent-field {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.intent-light {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 750;
+  gap: 6px;
+  line-height: 1;
+  min-height: 22px;
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+.intent-light::before {
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px currentColor;
+  content: "";
+  height: 6px;
+  width: 6px;
+}
+
+.intent-ok {
+  background: var(--success-soft);
+  border-color: #bbf7d0;
+  color: var(--success);
+}
+
+.intent-conflict {
+  animation: conflict-pulse 1.8s ease-in-out infinite;
+  background: var(--danger-soft);
+  border-color: #fecaca;
+  color: var(--danger);
+}
+
+.intent-muted {
+  background: var(--surface-muted);
+  color: var(--muted);
+}
+
+@keyframes conflict-pulse {
+  50% { box-shadow: 0 0 0 3px rgba(185, 28, 28, 0.16); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .intent-conflict { animation: none; }
+}
+
 .danger-text {
   color: var(--danger);
 }
@@ -1393,10 +1447,129 @@ button.secondary:hover:not(:disabled),
   height: 100%;
 }
 
+.risk-layout {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(340px, 470px) minmax(420px, 1fr);
+}
+
+.risk-panel {
+  min-width: 0;
+}
+
+.risk-banner {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.risk-banner strong {
+  font-size: 13px;
+}
+
+.risk-banner span {
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.risk-form {
+  display: grid;
+  gap: 12px;
+}
+
+.risk-field {
+  display: grid;
+  gap: 6px;
+}
+
+.risk-field > label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.risk-hint {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.range-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(72px, 1fr) auto minmax(110px, 1.4fr);
+}
+
+.range-row span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.range-row.two-range {
+  grid-template-columns: minmax(64px, 1fr) auto minmax(90px, 1fr) minmax(64px, 1fr) auto minmax(90px, 1fr);
+}
+
+.risk-target-add {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 10px 0;
+}
+
+.risk-target-list {
+  display: grid;
+  gap: 8px;
+}
+
+.risk-target-row {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.risk-target-row > div:first-child {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 70px minmax(80px, 1fr) auto;
+}
+
+.risk-target-row strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.risk-target-row .current-weight {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.risk-target-row .target-inputs {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(90px, 1fr) minmax(120px, 1.4fr);
+}
+
+.risk-target-row .target-inputs input[type="number"] {
+  min-width: 0;
+}
+
 @media (max-width: 1180px) {
   .analysis-layout,
   .watchlist-layout,
-  .rag-layout {
+  .rag-layout,
+  .risk-layout {
     grid-template-columns: 1fr;
   }
 }
@@ -1432,6 +1605,7 @@ button.secondary:hover:not(:disabled),
   .field-row,
   .summary-grid,
   .portfolio-grid,
+  .risk-banner,
   .diagnostic-grid {
     grid-template-columns: 1fr;
   }
@@ -1448,6 +1622,7 @@ button.secondary:hover:not(:disabled),
   .section-heading.compact,
   .observability-status,
   .rag-status-summary,
+  .risk-banner,
   .portfolio-status {
     align-items: flex-start;
     flex-direction: column;

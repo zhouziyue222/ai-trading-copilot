@@ -2,7 +2,6 @@
 
 from .fundamental_analyst_agent import FundamentalAnalystAgent
 from .news_sentiment_agent import NewsSentimentAgent
-from .opportunity_radar_agent import OpportunityRadarAgent
 from .portfolio_manager import PortfolioManager
 from .post_trade_review_learning_agent import PostTradeReviewLearningAgent
 from .risk_agent import RiskAgent
@@ -13,7 +12,6 @@ from .trader_agent import TraderAgent
 __all__ = [
     "FundamentalAnalystAgent",
     "NewsSentimentAgent",
-    "OpportunityRadarAgent",
     "PortfolioManager",
     "PostTradeReviewLearningAgent",
     "RiskAgent",

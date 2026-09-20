@@ -1,7 +1,11 @@
 import json
+from types import SimpleNamespace
 
 from ai_trading_copilot.copilot.services import tracing as tracing_module
-from ai_trading_copilot.copilot.services.tracing import TraceRecorder
+from ai_trading_copilot.copilot.services.tracing import (
+    TraceRecorder,
+    llm_usage_attributes,
+)
 
 
 def test_trace_recorder_writes_parented_spans_and_files(tmp_path):
@@ -149,3 +153,38 @@ def test_observability_status_reports_local_only_by_default(monkeypatch):
     assert payload["otel_export_enabled"] is False
     assert payload["otlp_endpoint"] is None
     assert payload["service_name"] == "ai-trading-copilot"
+
+
+def test_llm_usage_attributes_extract_real_token_counts_and_keep_them_plain(tmp_path):
+    response = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_token_details": {"reasoning_tokens": 3},
+        }
+    )
+
+    attrs = llm_usage_attributes(response)
+
+    assert attrs == {
+        "usage.prompt_tokens": 10,
+        "usage.completion_tokens": 5,
+        "usage.total_tokens": 15,
+        "usage.reasoning_tokens": 3,
+    }
+
+    recorder = TraceRecorder(output_dir=tmp_path, run_id="usage")
+    with recorder.activate():
+        with recorder.start_span("llm.invoke") as span:
+            for key, value in attrs.items():
+                span.set_attribute(key, value)
+            span.set_attribute("Authorization", "Bearer secret")
+
+    json_path, _ = recorder.flush()
+    payload = json.loads(
+        json_path.read_text(encoding="utf-8")
+    )
+    saved = payload["spans"][0]["attributes"]
+    assert saved["usage.total_tokens"] == 15
+    assert saved["Authorization"] == "Bearer <redacted>"

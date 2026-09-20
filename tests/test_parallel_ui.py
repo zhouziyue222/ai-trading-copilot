@@ -62,7 +62,7 @@ def test_parallel_failure_never_runs_trader_or_saves_checkpoint(tmp_path, monkey
 
 @pytest.mark.parametrize("serial", [False, True])
 @pytest.mark.parametrize("analysts", [[], ["news_sentiment"], ["technical_position", "fundamental_analysis"],
-                                     ["opportunity_radar", "technical_position", "news_sentiment", "fundamental_analysis"]])
+                                     ["technical_position", "news_sentiment", "fundamental_analysis"]])
 def test_selected_analysts_and_serial_fallback(tmp_path, monkeypatch, analysts, serial):
     monkeypatch.setenv("COPILOT_FORCE_SEQUENTIAL", "1" if serial else "0")
     Graph.reset()
@@ -77,8 +77,6 @@ def test_selected_analysts_and_serial_fallback(tmp_path, monkeypatch, analysts, 
         expected = [name for name in Graph.names if name.lower().replace(" ", "_") in analysts]
         actual = [name for name in Graph.calls if name in Graph.names]
         assert (actual == expected) if serial else (set(actual) == set(expected))
-        if "opportunity_radar" in analysts:
-            assert Graph.calls.index("Opportunity Radar") < min(Graph.calls.index(name) for name in expected)
         assert Graph.calls.count("Trader") == 1
 
 

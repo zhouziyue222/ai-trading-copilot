@@ -7,11 +7,14 @@ from ai_trading_copilot.copilot.domain import (
     DistilledMemory,
     ExecutionMode,
     FundamentalAnalysisReport,
+    MarketType,
     MemoryStatus,
     MemoryType,
     NewsSentimentReport,
     PortfolioSnapshot,
     PriceBar,
+    Subscription,
+    SubscriptionBook,
     SubscriptionStatus,
     TechnicalContext,
     TechnicalDimension,
@@ -24,7 +27,6 @@ from ai_trading_copilot.copilot.graph.copilot_langgraph import (
 from ai_trading_copilot.copilot.domain.localization import zh_label
 from ai_trading_copilot.copilot.agents import (
     FundamentalAnalystAgent,
-    OpportunityRadarAgent,
     PostTradeReviewLearningAgent,
     TechnicalPositionAgent,
 )
@@ -127,16 +129,6 @@ class RoutingLLM:
     def invoke(self, prompt):
         text = _prompt_text(prompt)
         self.prompts.append(text)
-        if "Opportunity Radar analyst" in text:
-            return AIMessage(
-                content=(
-                    "# Opportunity report\n\n"
-                    '{"status": "actionable", "trend_state": "uptrend_pullback", '
-                    '"reason": "Tool reports show a pullback near support.", '
-                    '"current_price": 102, "support_level": 100, '
-                    '"reward_risk_ratio": 3, "trend_reason": "Uptrend pullback."}'
-                )
-            )
         if "Technical Position analyst" in text:
             return AIMessage(
                 content=(
@@ -242,7 +234,7 @@ def test_langgraph_routes_selected_analysts_as_fan_out_nodes():
     routes = graph._route_analyst_nodes(
         {
             "selected_analysts": [
-                AnalystType.OPPORTUNITY_RADAR,
+                AnalystType.TECHNICAL_POSITION,
                 AnalystType.FUNDAMENTAL_ANALYSIS,
             ]
         }
@@ -250,7 +242,7 @@ def test_langgraph_routes_selected_analysts_as_fan_out_nodes():
 
     assert graph.langgraph_available is True
     assert routes == [
-        graph.NODE_OPPORTUNITY_RADAR,
+        graph.NODE_TECHNICAL_POSITION,
         graph.NODE_FUNDAMENTAL_ANALYSIS,
     ]
 
@@ -304,6 +296,34 @@ def test_langgraph_portfolio_failure_is_hold_only(tmp_path):
     assert decision.action == "hold"
 
 
+def test_langgraph_explains_user_intent_without_changing_decision(tmp_path):
+    subscriptions = SubscriptionBook(
+        items=[
+            Subscription(
+                symbol="AAPL",
+                market_type=MarketType.US_STOCK,
+                status=SubscriptionStatus.NOT_COMPATIBLE,
+            )
+        ]
+    )
+
+    state = CopilotLangGraph(
+        llm=None,
+        portfolio_getter=RecordingPortfolioGetter(PortfolioSnapshot()),
+    ).run(
+        subscription_symbols=["AAPL"],
+        subscription_book=subscriptions,
+        price_history_by_symbol={"AAPL": _actionable_bars()},
+        report_output_dir=tmp_path,
+    )
+
+    risk = state["risk_assessments"]["AAPL"]
+    decision = state["execution_decisions"]["AAPL"]
+    assert risk.approved is True
+    assert decision.action == "buy"
+    assert "不一致" in state["report"].symbols[0].user_intent_note
+
+
 def test_langgraph_without_llm_does_not_record_unused_memory(tmp_path):
     store = DistilledMemoryStore(tmp_path / "memory.sqlite3")
     store.append(
@@ -343,16 +363,12 @@ def test_langgraph_runs_only_selected_analysts_and_reviews_their_outputs(tmp_pat
             )
         },
         portfolio=PortfolioSnapshot(),
-        selected_analysts=[
-            AnalystType.OPPORTUNITY_RADAR,
-            AnalystType.FUNDAMENTAL_ANALYSIS,
-        ],
+        selected_analysts=[AnalystType.FUNDAMENTAL_ANALYSIS],
         report_output_dir=tmp_path,
     )
 
     node_names = [event.node_name for event in state["trace_events"]]
 
-    assert CopilotLangGraph.NODE_OPPORTUNITY_RADAR in node_names
     assert CopilotLangGraph.NODE_FUNDAMENTAL_ANALYSIS in node_names
     assert CopilotLangGraph.NODE_TECHNICAL_POSITION not in node_names
     assert state["radar_items"][0].status == SubscriptionStatus.RISK_ELEVATED
@@ -361,7 +377,6 @@ def test_langgraph_runs_only_selected_analysts_and_reviews_their_outputs(tmp_pat
     )
     assert state["radar_items"][0].risk_points == ["earnings_gap_risk"]
     assert set(state["analyst_reports"]) == {
-        "opportunity_radar",
         "fundamental_analysis",
     }
     for report_path in state["analyst_reports"].values():
@@ -373,7 +388,6 @@ def test_langgraph_runs_only_selected_analysts_and_reviews_their_outputs(tmp_pat
 def test_analyst_context_excludes_trading_memories():
     context = _analyst_context_for_symbol(
         {
-            "opportunity_reports_by_symbol": {"AAPL": "# Radar\n\nNear support."},
             "memories": {
                 "AAPL": [
                     DistilledMemory(
@@ -392,7 +406,7 @@ def test_analyst_context_excludes_trading_memories():
 
     assert "Retrieved Trading Memories" not in context
     assert "Wait for support confirmation" not in context
-    assert "Near support" in context
+    assert context == ""
 
 
 def test_langgraph_has_no_early_memory_retrieval_node():
@@ -452,7 +466,6 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
     state = CopilotLangGraph(
         llm=llm,
         portfolio_getter=RecordingPortfolioGetter(),
-        opportunity_radar_agent=OpportunityRadarAgent(llm=llm, tools=_fake_market_tools()),
         technical_position_agent=TechnicalPositionAgent(llm=llm, tools=_fake_market_tools()),
         fundamental_analyst_agent=FundamentalAnalystAgent(llm=llm, tools=_fake_fundamental_tools()),
     ).run(
@@ -460,7 +473,6 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
         price_history_by_symbol={},
         portfolio=PortfolioSnapshot(),
         selected_analysts=[
-            AnalystType.OPPORTUNITY_RADAR,
             AnalystType.TECHNICAL_POSITION,
             AnalystType.FUNDAMENTAL_ANALYSIS,
         ],
@@ -469,7 +481,6 @@ def test_langgraph_persists_reports_for_all_business_agents_with_llm(tmp_path):
     )
 
     expected = {
-        "opportunity_radar": "1_analysts",
         "technical_position": "1_analysts",
         "fundamental_analysis": "1_analysts",
         "futu_portfolio": "0_portfolio",
@@ -508,14 +519,12 @@ def test_langgraph_retrieves_memory_inside_trader_and_portfolio_nodes(tmp_path):
         llm=llm,
         memory_agent=PostTradeReviewLearningAgent(store),
         portfolio_getter=RecordingPortfolioGetter(),
-        opportunity_radar_agent=OpportunityRadarAgent(llm=llm, tools=_fake_market_tools()),
         technical_position_agent=TechnicalPositionAgent(llm=llm, tools=_fake_market_tools()),
         fundamental_analyst_agent=FundamentalAnalystAgent(llm=llm, tools=_fake_fundamental_tools()),
     ).run(
         subscription_symbols=["AAPL"],
         portfolio=PortfolioSnapshot(),
         selected_analysts=[
-            AnalystType.OPPORTUNITY_RADAR,
             AnalystType.TECHNICAL_POSITION,
             AnalystType.FUNDAMENTAL_ANALYSIS,
         ],

@@ -224,14 +224,14 @@ def test_atomic_checkpoint_failure_does_not_publish_partial_json(tmp_path):
 
 
 def test_optional_future_node_can_be_lazily_registered():
-    snapshot = {"state": {"selected_analysts": ["opportunity_radar"], "subscription_symbols": [],
+    snapshot = {"state": {"selected_analysts": [], "subscription_symbols": [],
                           "report_output_dir": "__run__", "run_id": "source", "persona_config": {}},
-                "node_order": ["Load", "Opportunity Radar"], "next_node_index": 1,
+                "node_order": ["Load", "Optional Future"], "next_node_index": 1,
                 "reports": {}, "tracker_status": {"reports": {}, "nodes": {"Load": {"status": "succeeded"}}}}
-    validate_snapshot(snapshot, ["Load", "Opportunity Radar"])
+    validate_snapshot(snapshot, ["Load", "Optional Future"])
     snapshot["next_node_index"] = 2
     with pytest.raises(ValueError):
-        validate_snapshot(snapshot, ["Load", "Opportunity Radar"])
+        validate_snapshot(snapshot, ["Load", "Optional Future"])
 
 
 def test_utf8_json_errors_files_and_python_subprocess(app, tmp_path):

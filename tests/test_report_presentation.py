@@ -1,7 +1,14 @@
 import pytest
+from types import SimpleNamespace
 
 from ai_trading_copilot.copilot.agents.llm_tools import strip_trailing_json_object
+from ai_trading_copilot.copilot.agents.run_explanation_agent import _user_intent_note
 from ai_trading_copilot.copilot.config.prompts import render_prompt
+from ai_trading_copilot.copilot.domain import (
+    MarketType,
+    Subscription,
+    SubscriptionStatus,
+)
 from ai_trading_copilot.copilot.services.reporting import prepare_report
 
 
@@ -40,7 +47,7 @@ def test_markdown_links_and_numeric_evidence_survive_cleanup():
 
 def test_every_prompt_includes_professional_chinese_report_contract():
     for name in ['trader.v1', 'technical_position.v1', 'technical_position.debug.v1',
-                 'opportunity_radar.v1', 'news_sentiment.v1', 'fundamental_analyst.v1',
+                 'news_sentiment.v1', 'fundamental_analyst.v1',
                  'portfolio_memory_advisor.v1']:
         prompt = render_prompt(name)
         assert '【待补充】' in prompt
@@ -68,3 +75,22 @@ def test_missing_price_history_never_displays_placeholder_price():
     result = TechnicalPositionAgent().analyze_with_report(symbol='MU', bars=[])
     assert '【待补充】' in result.report
     assert '1.00' not in result.report
+
+
+def test_user_actionable_against_system_risk_gets_explicit_objection():
+    subscription = Subscription(
+        symbol='AAPL',
+        market_type=MarketType.US_STOCK,
+        status=SubscriptionStatus.ACTIONABLE,
+    )
+    item = SimpleNamespace(
+        status=SubscriptionStatus.RISK_ELEVATED,
+        reason='跌破50日线且新闻风险未消除',
+    )
+    execution = SimpleNamespace(action='hold')
+
+    note = _user_intent_note(subscription=subscription, item=item, execution=execution)
+
+    assert '你的判断' in note
+    assert '不产生买入建议' in note
+    assert '跌破50日线' in note

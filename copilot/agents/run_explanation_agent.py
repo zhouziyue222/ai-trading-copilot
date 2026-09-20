@@ -14,8 +14,10 @@ from ai_trading_copilot.copilot.domain.models import (
     SymbolExplanation,
     TechnicalPosition,
     TradePlan,
+    SubscriptionBook,
 )
 from ai_trading_copilot.copilot.domain.localization import zh_join, zh_label
+from ai_trading_copilot.copilot.agents.llm_tools import record_response_usage
 from ai_trading_copilot.copilot.services.cancellation import RunCancelled, check_cancelled
 from ai_trading_copilot.copilot.services.reporting import REPORT_WRITING_RULES, prepare_report, strip_report_json
 
@@ -37,9 +39,15 @@ class RunExplanationAgent:
         risk_assessments: Dict[str, RiskAssessment],
         execution_decisions: Dict[str, ExecutionDecision],
         risk_challenges: Dict[str, str],
+        subscriptions: SubscriptionBook | None = None,
     ) -> CopilotRunReport:
         self.fallback_reason = ""
         symbol_explanations: List[SymbolExplanation] = []
+        subscription_by_symbol = (
+            {item.symbol: item for item in subscriptions.items}
+            if subscriptions is not None
+            else {}
+        )
         for item in radar_items:
             technical = technical_positions.get(item.symbol)
             plan = trade_plans.get(item.symbol)
@@ -64,6 +72,11 @@ class RunExplanationAgent:
                 risk_notes.extend(risk.warnings)
             if item.symbol in risk_challenges:
                 risk_notes.append(risk_challenges[item.symbol])
+            intent_note = _user_intent_note(
+                subscription=subscription_by_symbol.get(item.symbol),
+                item=item,
+                execution=execution,
+            )
 
             summary = f"{item.symbol}：{item.status_label or zh_label(item.status)}"
             if plan is not None:
@@ -76,6 +89,7 @@ class RunExplanationAgent:
                     summary=summary,
                     key_evidence=evidence,
                     risk_notes=risk_notes,
+                    user_intent_note=intent_note,
                     execution_message=execution.message if execution else None,
                 )
             )
@@ -88,7 +102,6 @@ class RunExplanationAgent:
             symbols=symbol_explanations,
             risk_challenges=risk_challenges,
         )
-
     def render_report(self, report: CopilotRunReport) -> str:
         lines = ["# 运行解释报告", "", report.summary, ""]
         for item in report.symbols:
@@ -97,6 +110,7 @@ class RunExplanationAgent:
                     f"## {item.symbol}",
                     "",
                     f"- 状态：{zh_label(item.status)}",
+                    f"- 用户意图：{item.user_intent_note or '-'}",
                     f"- 摘要：{item.summary}",
                     f"- 证据：{zh_join(item.key_evidence, empty='-')}",
                     f"- 风险提示：{zh_join(item.risk_notes, empty='-')}",
@@ -145,6 +159,7 @@ class RunExplanationAgent:
             check_cancelled()
             response = self.llm.invoke(prompt)
             check_cancelled()
+            record_response_usage(response, kind="llm", model=_llm_model_name(self.llm))
             content = getattr(response, "content", response)
             return strip_report_json(str(content)) or fallback
         except RunCancelled:
@@ -152,3 +167,60 @@ class RunExplanationAgent:
         except Exception as exc:
             self.fallback_reason = f"run_explanation_llm_failed: {exc}"
             return fallback
+
+
+def _user_intent_note(*, subscription, item, execution) -> str:
+    """Explain-only user intent paragraph. It never affects decisions."""
+    if subscription is None:
+        return ""
+
+
+    user_status = subscription.status
+    user_label = zh_label(user_status)
+    system_buy = bool(execution is not None and execution.action == "buy")
+    positive_user = user_status in {
+        SubscriptionStatus.ACTIONABLE,
+        SubscriptionStatus.NEAR_OPPORTUNITY,
+    }
+    negative_user = user_status in {
+        SubscriptionStatus.RISK_ELEVATED,
+        SubscriptionStatus.NOT_COMPATIBLE,
+    }
+    parts = [f"你的判断：{user_label}"]
+    reason = _user_text(subscription.reason)
+    target_action = _user_text(subscription.target_action)
+    if reason:
+        parts.append(f"关注理由：{reason}")
+    if target_action:
+        parts.append(f"目标动作：{target_action}")
+    system_summary = (
+        getattr(execution, "message", "")
+        if execution is not None and getattr(execution, "message", "")
+        else f"系统状态：{zh_label(item.status)}"
+    )
+    parts.append(f"系统结论：{system_summary}")
+    if user_status == SubscriptionStatus.OBSERVING:
+        parts.append("你尚未表态，系统按自身证据输出结论。")
+    elif positive_user and system_buy:
+        parts.append("你的判断与系统结论一致。")
+    elif positive_user:
+        parts.append(
+            f"系统当前不产生买入建议，与你的判断冲突。反对理由："
+            f"{item.reason or '当前证据未通过买入条件'}。"
+            "系统结论不因你的标记改变，若风险解除且条件满足会重新复核。"
+        )
+    elif negative_user and not system_buy:
+        parts.append("系统同样不产生买入建议，与你的判断一致。")
+    elif negative_user:
+        parts.append(
+            "系统当前证据支持买入，与你的标记不一致，请确认该标记是否仍然有效。"
+        )
+    return " ".join(parts)
+
+
+def _user_text(value) -> str:
+    return " ".join(str(value or "").split())[:120]
+
+
+def _llm_model_name(llm) -> str:
+    return str(getattr(llm, "model_name", None) or getattr(llm, "model", "") or "")

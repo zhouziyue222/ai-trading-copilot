@@ -30,6 +30,7 @@ async function refresh(event) {
       byId("workers").appendChild(p);
     }
     byId("services").replaceChildren(...data.services.map(s => row([s.name, s.count, s.p50_ms, s.p95_ms, s.errors, s.cache_hits])));
+    byId("usage").replaceChildren(...(data.usage || []).map(u => row([u.name, u.count, u.missing_count, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.avg_total_tokens])));
     byId("errors").replaceChildren();
     for (const group of data.errors) {
       const button = document.createElement("button");

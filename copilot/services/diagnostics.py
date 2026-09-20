@@ -25,8 +25,21 @@ SECRET = re.compile(
 
 def redact(value):
     if isinstance(value, dict):
-        return {str(k): "<redacted>" if re.search(r"key|token|secret|password|authorization|cookie|account|header", str(k), re.I)
-                else redact(v) for k, v in value.items()}
+        return {
+            str(k): (
+                "<redacted>"
+                if (
+                    not str(k).lower().startswith("usage.")
+                    and re.search(
+                        r"key|token|secret|password|authorization|cookie|account|header",
+                        str(k),
+                        re.I,
+                    )
+                )
+                else redact(v)
+            )
+            for k, v in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [redact(v) for v in value[:100]]
     if isinstance(value, str):
@@ -111,6 +124,7 @@ class DiagnosticStore:
                               (query, query, query, query)).fetchall()
         events = [json.loads(row[0]) for row in rows]
         groups, services = {}, {}
+        usage: dict[str, dict[str, Any]] = {}
         for item in events:
             if item.get("error.group"):
                 group = groups.setdefault(item["error.group"], {"count": 0, "latest": item})
@@ -121,13 +135,52 @@ class DiagnosticStore:
                 stats["samples"].append(item.get("duration_ms", 0))
                 stats["errors"] += item.get("outcome") == "error"
                 stats["cache_hits"] += bool(item.get("cache_hit"))
+            if item.get("event") == "usage.record":
+                kind = str(item.get("usage_kind") or "llm")
+                model = str(item.get("usage_model") or "unknown")
+                key = f"{kind}:{model}"
+                row = usage.setdefault(
+                    key,
+                    {
+                        "name": key,
+                        "count": 0,
+                        "missing_count": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                )
+                row["count"] += 1
+                prompt = item.get("usage.prompt_tokens")
+                completion = item.get("usage.completion_tokens")
+                total = item.get("usage.total_tokens")
+                if prompt is None and completion is None:
+                    row["missing_count"] += 1
+                row["prompt_tokens"] += int(prompt or 0)
+                row["completion_tokens"] += int(completion or 0)
+                row["total_tokens"] += int(total or 0)
         metrics = []
         for name, stats in services.items():
             times = sorted(stats["samples"])
             metrics.append({"name": name, "count": len(times), "p50_ms": times[(len(times)-1)//2],
                             "p95_ms": times[min(len(times)-1, int(len(times)*.95))],
                             "errors": stats["errors"], "cache_hits": stats["cache_hits"]})
-        return {"events": events, "errors": list(groups.values()), "services": metrics,
+        usage_rows = sorted(
+            (
+                {
+                    **row,
+                    "avg_total_tokens": round(
+                        row["total_tokens"] / row["count"], 1
+                    )
+                    if row["count"]
+                    else 0,
+                }
+                for row in usage.values()
+            ),
+            key=lambda row: row["total_tokens"],
+            reverse=True,
+        )
+        return {"events": events, "errors": list(groups.values()), "services": metrics, "usage": usage_rows,
                 "health": {"last_event_at": self.last_event_at, "dropped": self.dropped, "error": self.last_error},
                 "window": "最近 1000 条匹配事件；本地最多保留 10000 条"}
 
@@ -141,6 +194,29 @@ def record(event: str, **values):
     store = CONTEXT.get().get("store")
     if store:
         store.record(event, **values)
+
+
+def record_usage(
+    *,
+    kind: str,
+    model: str | None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    reasoning_tokens: int | None = None,
+) -> None:
+    """Record one model/embedding token usage event for diagnostics."""
+    record(
+        "usage.record",
+        usage_kind=kind,
+        usage_model=model or "",
+        **{
+            "usage.prompt_tokens": prompt_tokens,
+            "usage.completion_tokens": completion_tokens,
+            "usage.total_tokens": total_tokens,
+            "usage.reasoning_tokens": reasoning_tokens,
+        },
+    )
 
 
 @contextmanager

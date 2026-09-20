@@ -218,7 +218,6 @@ def _model_trial(case: MemoryCase, root: Path, llm, *, with_memory: bool) -> dic
     )
     # Production agents deliberately fall back on failure. An evaluation must
     # expose that fallback instead of awarding the deterministic answer to LLM.
-    fallback = TraderAgent().create_plan_from_evidence(**inputs)
     started = perf_counter()
     with trace.activate():
         trader = TraderAgent(llm=observer).create_plan_from_evidence(**inputs, memory_session=trader_session)
@@ -237,10 +236,10 @@ def _model_trial(case: MemoryCase, root: Path, llm, *, with_memory: bool) -> dic
         )
     spans = [span for span in trace.spans if span.name == "llm.invoke"]
     failed = any(span.status == "error" for span in trace.spans)
-    trader_fallback = trader.report == fallback.report or trader_payload.get("direction") not in {d.value for d in TradeDirection}
+    trader_fallback = trader.fallback_used or trader_payload.get("direction") not in {d.value for d in TradeDirection}
     pm_expected = with_memory and abs(risk.final_weight) > abs(risk.current_position_weight) + 1e-6
     pm_payload = _response_payload(observer) if len(spans) > trader_spans else {}
-    pm_fallback = pm_expected and (not manager.tool_calls or pm_payload.get("decision") not in {"proceed", "scale", "hold"})
+    pm_fallback = manager.fallback_used or (pm_expected and (not manager.tool_calls or pm_payload.get("decision") not in {"proceed", "scale", "hold"}))
     decision = manager.decision
     citations = [*trader.plan.memory_citations, *decision.memory_citations]
     available_by_consumer = [
@@ -274,9 +273,10 @@ def _model_trial(case: MemoryCase, root: Path, llm, *, with_memory: bool) -> dic
         "confirmation_preserved": decision.action == "hold" or decision.requires_user_confirmation,
         "not_submitted": not decision.submitted_to_broker,
     }
-    completed = bool(spans) and not (failed or trader_fallback or pm_fallback)
+    completed = bool(spans) and not (failed or trader_fallback or pm_fallback or trader.memory_retrieval_error)
     return {
         "completed": completed, "trader_fallback": trader_fallback, "portfolio_fallback": bool(pm_fallback),
+        "memory_retrieval_error": trader.memory_retrieval_error,
         "model_errors": [span.error for span in trace.spans if span.status == "error"],
         "plan": trader.plan.model_dump(mode="json"), "risk": risk.model_dump(mode="json"),
         "decision": decision.model_dump(mode="json"), "checks": checks,

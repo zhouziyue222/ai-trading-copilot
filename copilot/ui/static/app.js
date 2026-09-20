@@ -22,6 +22,9 @@ const state = {
   ragStatus: null,
   observability: null,
   portfolio: null,
+  riskPosition: null,
+  riskDirty: false,
+  riskSaving: false,
   memories: [],
   memoryCounts: {},
 };
@@ -43,7 +46,6 @@ const primaryWorkflowNodes = [
   "Persist Trace",
 ];
 
-const optionalWorkflowNodes = ["Opportunity Radar"];
 
 const subscriptionStatusLabels = {
   observing: "观察中",
@@ -96,7 +98,6 @@ const preferredReportOrder = [
   "trader",
   "news_sentiment",
   "fundamental_analysis",
-  "opportunity_radar",
   "technical_position",
   "futu_portfolio",
   "run_audit",
@@ -137,6 +138,9 @@ function switchView(view) {
   }
   if (view === "portfolio" && !state.portfolio) {
     loadPortfolio().catch(showError);
+  }
+  if (view === "risk") {
+    loadRiskPosition().catch(showRiskError);
   }
   if (view === "memory") {
     loadMemories().catch(showMemoryError);
@@ -272,6 +276,308 @@ function showError(error) {
   if (errors) {
     errors.textContent = error ? String(error.message || error) : "";
   }
+}
+
+function showRiskError(error) {
+  const target = $("riskFeedback");
+  if (!target) return;
+  target.className = error ? "risk-banner status-danger" : "risk-banner status-neutral";
+  target.innerHTML = error
+    ? `<strong>加载或保存失败</strong><span>${escapeHtml(String(error.message || error))}</span>`
+    : `<strong>风控与仓位</strong><span>配置未加载。</span>`;
+}
+
+async function loadRiskPosition() {
+  showRiskError("");
+  const payload = await api("/api/risk-position");
+  state.riskPosition = payload;
+  state.riskDirty = false;
+  const background = [];
+  if (!state.portfolio) background.push(loadPortfolio().catch(showRiskError));
+  if (!state.subscriptions.length) background.push(loadSubscriptions().catch(showRiskError));
+  await Promise.all(background);
+  renderRiskPosition();
+}
+
+function renderRiskPosition() {
+  const config = state.riskPosition;
+  if (!config) return;
+  const persona = config.persona || {};
+  setPercentInput("riskMaxDrawdown", "riskMaxDrawdownRange", persona.max_portfolio_drawdown);
+  setPercentInput("riskMaxPosition", "riskMaxPositionRange", persona.max_single_position_weight);
+  setPercentInput("riskGrossExposure", "riskGrossExposureRange", persona.max_gross_exposure);
+  setPercentInput("riskMinWeight", "riskMinWeightRange", persona.default_position_weight_min);
+  setPercentInput("riskMaxWeight", "riskMaxWeightRange", persona.default_position_weight_max);
+  setPercentInput("riskTargetVolatility", "riskTargetVolatilityRange", persona.target_annual_volatility);
+  setPercentInput("riskAccountRisk", "riskAccountRiskRange", persona.account_risk_per_trade);
+  $("riskAtrStopMultiple").value = Number(persona.atr_stop_multiple ?? 2).toFixed(1);
+  $("riskAtrStopMultipleRange").value = persona.atr_stop_multiple ?? 2;
+  $("riskMinRewardRisk").value = Number(persona.minimum_reward_risk ?? 2).toFixed(1);
+  $("riskMinRewardRiskRange").value = persona.minimum_reward_risk ?? 2;
+  setPercentInput("riskMaxDistance", "riskMaxDistanceRange", persona.max_distance_to_support_pct);
+  $("riskVolLookback").value = persona.volatility_lookback_days ?? 60;
+  $("riskAtrWindow").value = persona.atr_window ?? 14;
+  renderRiskCurrentPositions();
+  renderRiskTargetRows();
+  updateRiskFeedback();
+}
+
+function setPercentInput(numberId, rangeId, value) {
+  const percent = Math.round((Number(value) || 0) * 1000) / 10;
+  $(numberId).value = percent;
+  $(rangeId).value = percent;
+}
+
+function syncRiskInputs(changed) {
+  const pairs = [
+    ["riskMaxDrawdown", "riskMaxDrawdownRange"],
+    ["riskMaxPosition", "riskMaxPositionRange"],
+    ["riskGrossExposure", "riskGrossExposureRange"],
+    ["riskMinWeight", "riskMinWeightRange"],
+    ["riskMaxWeight", "riskMaxWeightRange"],
+    ["riskTargetVolatility", "riskTargetVolatilityRange"],
+    ["riskAccountRisk", "riskAccountRiskRange"],
+    ["riskAtrStopMultiple", "riskAtrStopMultipleRange"],
+    ["riskMinRewardRisk", "riskMinRewardRiskRange"],
+    ["riskMaxDistance", "riskMaxDistanceRange"],
+  ];
+  for (const [numberId, rangeId] of pairs) {
+    if (changed.id !== numberId && changed.id !== rangeId) continue;
+    const value = Number(changed.value);
+    if (!Number.isFinite(value)) continue;
+    $(numberId).value = value;
+    $(rangeId).value = value;
+  }
+}
+
+function renderRiskCurrentPositions() {
+  const container = $("riskCurrentPositions");
+  if (!container) return;
+  const entries = Object.entries(state.portfolio?.position_weights || {}).sort(
+    (a, b) => Math.abs(b[1]) - Math.abs(a[1]),
+  );
+  container.innerHTML = entries.length
+    ? entries
+        .map(
+          ([symbol, weight]) => `
+            <article class="position-row">
+              <div>
+                <strong>${escapeHtml(symbol)}</strong>
+                <span>${formatPercent(weight)}</span>
+              </div>
+              <div class="weight-track"><span style="width: ${Math.min(Math.abs(Number(weight) || 0), 1) * 100}%"></span></div>
+            </article>
+          `,
+        )
+        .join("")
+    : '<div class="empty-state compact"><strong>暂无当前持仓</strong><span>连接 Futu 模拟账户后显示。</span></div>';
+}
+
+function renderRiskTargetRows() {
+  const container = $("riskTargetRows");
+  if (!container) return;
+  const targets = state.riskPosition?.target_weights || {};
+  const symbols = riskAvailableSymbols();
+  if (!symbols.length) {
+    container.innerHTML = '<div class="empty-state compact"><strong>暂无可用标的</strong><span>请先在“我的自选股”添加关注。</span></div>';
+    renderRiskTargetAddOptions();
+    return;
+  }
+  container.innerHTML = symbols
+    .map((symbol) => {
+      const target = targets[symbol];
+      const hasTarget = Object.prototype.hasOwnProperty.call(targets, symbol);
+      const current = state.portfolio?.position_weights?.[symbol] || 0;
+      const targetPercent = hasTarget ? Math.round((Number(target) || 0) * 1000) / 10 : 0;
+      return `
+        <article class="risk-target-row">
+          <div>
+            <strong>${escapeHtml(symbol)}</strong>
+            <span class="current-weight">当前 ${formatPercent(current)}</span>
+            <button class="ghost-button ${hasTarget ? "danger-text" : ""}" type="button" data-${hasTarget ? "remove" : "add"}-risk-target="${escapeHtml(symbol)}">${hasTarget ? "移除" : "设置"}</button>
+          </div>
+          <div class="target-inputs">
+            <input type="number" min="-100" max="100" step="0.1" value="${targetPercent}" data-risk-target-number="${escapeHtml(symbol)}" ${hasTarget ? "" : "disabled"} />
+            <input type="range" min="-100" max="100" step="0.1" value="${targetPercent}" data-risk-target-range="${escapeHtml(symbol)}" ${hasTarget ? "" : "disabled"} />
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+  renderRiskTargetAddOptions();
+}
+
+function riskAvailableSymbols() {
+  const symbols = new Set();
+  for (const item of state.subscriptions || []) symbols.add(item.symbol);
+  for (const symbol of Object.keys(state.portfolio?.position_weights || {})) symbols.add(symbol);
+  for (const symbol of Object.keys(state.riskPosition?.target_weights || {})) symbols.add(symbol);
+  return Array.from(symbols).sort();
+}
+
+function renderRiskTargetAddOptions() {
+  const select = $("riskTargetAddSelect");
+  if (!select) return;
+  const existing = new Set(Object.keys(state.riskPosition?.target_weights || {}));
+  const options = riskAvailableSymbols()
+    .filter((symbol) => !existing.has(symbol))
+    .map((symbol) => `<option value="${escapeHtml(symbol)}">${escapeHtml(symbol)}</option>`)
+    .join("");
+  select.innerHTML = options || '<option value="">暂无可添加标的</option>';
+  $("riskTargetAdd").disabled = !options;
+}
+
+function updateRiskFeedback() {
+  const banner = $("riskFeedback");
+  const save = $("saveRiskPosition");
+  if (!banner || !save) return;
+  const config = state.riskPosition;
+  const errors = validateRiskPosition();
+  const source = config?.source === "user" ? "用户配置" : "默认配置";
+  const updated = config?.updated_at ? ` · 保存于 ${formatDateTime(config.updated_at)}` : "";
+  banner.className = errors.length
+    ? "risk-banner status-warning"
+    : state.riskDirty
+      ? "risk-banner status-warning"
+      : "risk-banner status-success";
+  banner.innerHTML = errors.length
+    ? `<strong>请修正输入</strong><span>${escapeHtml(errors.join("；"))}</span>`
+    : state.riskDirty
+      ? `<strong>有未保存修改</strong><span>${source}${updated}</span>`
+      : `<strong>配置已加载</strong><span>${source}${updated}</span>`;
+  save.disabled = !state.riskDirty || errors.length > 0 || state.riskSaving;
+  updateRiskTargetGross();
+}
+
+function validateRiskPosition() {
+  const errors = [];
+  const values = collectRiskPersona();
+  if (!(values.default_position_weight_min <= values.default_position_weight_max)) {
+    errors.push("默认仓位区间最小值不能大于最大值");
+  }
+  if (values.default_position_weight_max > values.max_single_position_weight) {
+    errors.push("默认仓位上限不能超过单标的上限");
+  }
+  if (values.target_annual_volatility <= 0) {
+    errors.push("目标年化波动率必须大于 0");
+  }
+  if (values.account_risk_per_trade <= 0) {
+    errors.push("单笔风险预算必须大于 0");
+  }
+  if (values.volatility_lookback_days < 5 || values.volatility_lookback_days > 252) {
+    errors.push("波动率回看窗口必须在 5-252 之间");
+  }
+  if (values.atr_window < 2 || values.atr_window > 100) {
+    errors.push("ATR 窗口必须在 2-100 之间");
+  }
+  if (values.minimum_reward_risk < 1 || values.minimum_reward_risk > 5) {
+    errors.push("最低收益风险比建议在 1.0-5.0 之间");
+  }
+  if (values.max_distance_to_support_pct < 0 || values.max_distance_to_support_pct > 0.10) {
+    errors.push("距支撑上限建议在 0%-10% 之间");
+  }
+  const targets = collectRiskTargetWeights();
+  for (const [symbol, weight] of Object.entries(targets)) {
+    if (!Number.isFinite(weight) || weight < -1 || weight > 1) {
+      errors.push(`${symbol} 目标仓位必须在 -100% 到 100% 之间`);
+    }
+  }
+  return errors;
+}
+
+function collectRiskPersona() {
+  const persona = state.riskPosition?.persona || {};
+  return {
+    ...persona,
+    max_portfolio_drawdown: percentValue("riskMaxDrawdown"),
+    max_single_position_weight: percentValue("riskMaxPosition"),
+    max_gross_exposure: percentValue("riskGrossExposure"),
+    default_position_weight_min: percentValue("riskMinWeight"),
+    default_position_weight_max: percentValue("riskMaxWeight"),
+    target_annual_volatility: percentValue("riskTargetVolatility"),
+    account_risk_per_trade: percentValue("riskAccountRisk"),
+    atr_stop_multiple: floatValue("riskAtrStopMultiple"),
+    minimum_reward_risk: floatValue("riskMinRewardRisk"),
+    max_distance_to_support_pct: percentValue("riskMaxDistance"),
+    volatility_lookback_days: intValue("riskVolLookback"),
+    atr_window: intValue("riskAtrWindow"),
+  };
+}
+
+function collectRiskTargetWeights() {
+  const output = {};
+  document.querySelectorAll("[data-risk-target-number]").forEach((input) => {
+    if (input.disabled) return;
+    const symbol = input.dataset.riskTargetNumber;
+    output[symbol] = Number(input.value) / 100;
+  });
+  return output;
+}
+
+function percentValue(id) {
+  const value = Number($(id)?.value);
+  return Number.isFinite(value) ? value / 100 : 0;
+}
+
+function floatValue(id) {
+  const value = Number($(id)?.value);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function intValue(id) {
+  const value = parseInt($(id)?.value || "0", 10);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function updateRiskTargetGross() {
+  const target = $("riskTargetGross");
+  if (!target) return;
+  const weights = Object.values(collectRiskTargetWeights());
+  const gross = weights.reduce((sum, weight) => sum + Math.abs(weight || 0), 0);
+  target.textContent = `目标总敞口 ${formatPercent(gross)}`;
+}
+
+async function saveRiskPosition() {
+  const errors = validateRiskPosition();
+  if (errors.length) {
+    updateRiskFeedback();
+    return;
+  }
+  showRiskError("");
+  state.riskSaving = true;
+  updateRiskFeedback();
+  try {
+    const payload = await api("/api/risk-position", {
+      method: "PUT",
+      body: JSON.stringify({
+        persona: collectRiskPersona(),
+        target_weights: collectRiskTargetWeights(),
+      }),
+    });
+    state.riskPosition = payload;
+    state.riskDirty = false;
+    renderRiskPosition();
+    showRiskSuccess("设置已保存，将在下一次分析中生效。");
+  } finally {
+    state.riskSaving = false;
+    updateRiskFeedback();
+  }
+}
+
+async function resetRiskPosition() {
+  showRiskError("");
+  const payload = await api("/api/risk-position/reset", { method: "POST" });
+  state.riskPosition = payload;
+  state.riskDirty = false;
+  renderRiskPosition();
+  showRiskSuccess("已恢复默认配置。");
+}
+
+function showRiskSuccess(message) {
+  const banner = $("riskFeedback");
+  if (!banner) return;
+  banner.className = "risk-banner status-success";
+  banner.innerHTML = `<strong>已保存</strong><span>${escapeHtml(message)}</span>`;
 }
 
 async function loadSubscriptions() {
@@ -473,13 +779,16 @@ function renderSubscriptions() {
       </div>
       <label>
         状态
-        <select data-field="status" data-symbol="${escapeHtml(item.symbol)}">
-          ${statusOption("observing", "观察中", item.status)}
-          ${statusOption("near_opportunity", "接近机会", item.status)}
-          ${statusOption("actionable", "可执行", item.status)}
-          ${statusOption("risk_elevated", "风险升高", item.status)}
-          ${statusOption("not_compatible", "不兼容", item.status)}
-        </select>
+        <span class="intent-field">
+          <select data-field="status" data-symbol="${escapeHtml(item.symbol)}">
+            ${statusOption("observing", "观察中", item.status)}
+            ${statusOption("near_opportunity", "接近机会", item.status)}
+            ${statusOption("actionable", "可执行", item.status)}
+            ${statusOption("risk_elevated", "风险升高", item.status)}
+            ${statusOption("not_compatible", "不兼容", item.status)}
+          </select>
+          ${intentLight(item)}
+        </span>
       </label>
       <input data-field="reason" data-symbol="${escapeHtml(item.symbol)}" value="${escapeHtml(item.reason || "")}" placeholder="关注理由" />
       <div class="subscription-actions">
@@ -490,6 +799,54 @@ function renderSubscriptions() {
     list.appendChild(row);
   }
 }
+
+function latestDecisionAction(symbol) {
+  const row = latestDecisionRow(symbol);
+  return row?.action || null;
+}
+
+function latestDecisionRow(symbol) {
+  const runStatus = state.lastRunPayload?.status || {};
+  if (!["succeeded", "degraded"].includes(runStatus.status)) return null;
+  return (runStatus.decision_summary?.symbols || []).find(
+    (item) => item.symbol === symbol,
+  );
+}
+
+function intentLight(item) {
+  const action = latestDecisionAction(item.symbol);
+  const systemBuy = action === "buy";
+  const row = latestDecisionRow(item.symbol);
+  const positiveUser = ["actionable", "near_opportunity"].includes(item.status);
+  const negativeUser = ["risk_elevated", "not_compatible"].includes(item.status);
+  const userText = [item.reason, item.target_action]
+    .filter((value) => String(value || "").trim())
+    .map((value) => String(value).trim().slice(0, 80))
+    .join(" · ");
+  if (action === null) {
+    return `<span class="intent-light intent-muted" title="${escapeHtml("尚无最近一次成功运行的结论，运行后会在此对比你和系统的判断。" + (userText ? ` 你的理由/目标：${userText}` : ""))}" role="img">未评估</span>`;
+  }
+  if (item.status === "observing") {
+    return `<span class="intent-light intent-muted" title="${escapeHtml("你尚未表态；系统仅按自身分析输出结论。" + (userText ? ` 你的理由/目标：${userText}` : ""))}" role="img">未表态</span>`;
+  }
+  const conflict = (positiveUser && !systemBuy) || (negativeUser && systemBuy);
+  const baseTitle = conflict
+    ? "你的判断与系统最新运行结论冲突，请查看运行解释中的反对原因。"
+    : "你的判断与系统最新运行结论一致。";
+  const systemText = row?.execution_message || row?.suggested_action || "";
+  const title = [
+    baseTitle,
+    userText ? `你的理由/目标：${userText}` : "",
+    systemText ? `系统：${String(systemText).slice(0, 120)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  if (conflict) {
+    return `<span class="intent-light intent-conflict" title="${escapeHtml(title)}" role="img">与系统冲突</span>`;
+  }
+  return `<span class="intent-light intent-ok" title="${escapeHtml(title)}" role="img">与系统一致</span>`;
+}
+
 function renderSelectedCount() {
   const counter = $("selectedCount");
   if (counter) {
@@ -752,6 +1109,9 @@ function renderRun(payload) {
   }
   $("startRun").disabled = status === "running";
   renderReportTabs(payload.run_id, payload.reports || {});
+  if (["succeeded", "degraded"].includes(status) && $("subscriptionList")) {
+    renderSubscriptions();
+  }
 }
 
 function updateRunControls(runStatus = {}) {
@@ -844,7 +1204,7 @@ function renderSummaryCards(runStatus = {}) {
 
 const visibleStages = [
   ["准备数据", ["Load Persona Markdown", "Load Subscription Symbols"]],
-  ["分析标的", ["Technical Position", "News Sentiment", "Fundamental Analysis", "Opportunity Radar"]],
+  ["分析标的", ["Technical Position", "News Sentiment", "Fundamental Analysis"]],
   ["形成建议", ["Trader"]],
   ["风险检查", ["Risk Check", "Portfolio Manager"]],
   ["生成报告", ["Explain Run", "Persist Trace"]],
@@ -879,7 +1239,7 @@ function renderProgress(runId, runStatus = {}) {
   if (runStatus.status === "succeeded") message = (runStatus.errors || []).length || (runStatus.graph_errors || []).length ? "分析完成，但部分数据不完整，请检查报告中的限制。" : "分析完成，结果摘要已更新。";
   if (runStatus.status === "failed") message = `${stage?.label || "分析"}失败；请复制故障编号排查。`;
   if (runStatus.status === "cancelled") message = runStatus.resumable ? "已取消并保存，可在历史记录中手动恢复。" : "已取消，没有可恢复断点。";
-  if (runStatus.status === "degraded") message = "组合快照不可用：本次运行只保留研究与 Hold-only 结论，未产生任何新动作。";
+  if (runStatus.status === "degraded") message = "运行以降级状态结束（组合不可用或 LLM 未配置）：只保留分析结果，未产生新动作。";
   const tone = runStatus.status === "failed" ? "status-danger" : runStatus.status === "running" || runStatus.status === "degraded" || (runStatus.graph_errors || []).length ? "status-warning" : runStatus.status === "succeeded" ? "status-success" : "status-neutral";
   $("progress").innerHTML = `<ol class="stage-list">${stages.map(item => `<li class="stage-${item.status}"><span>${item.status === "succeeded" ? "✓" : item.status === "failed" ? "!" : item.status === "running" ? "●" : "○"}</span>${item.label}</li>`).join("")}</ol><progress max="5" value="${completed}" aria-label="已完成阶段"></progress><p class="run-message ${tone}" role="status">${escapeHtml(message)}</p>`;
   $("progress").insertAdjacentHTML("beforeend", `<div class="node-grid">${analysts.map(name => nodeCard(name, nodes[name])).join("")}</div>${renderNodeActivityDetails(runStatus)}`);
@@ -1077,15 +1437,10 @@ function activityHistoryOpenAttr(activity = {}, detailKey = "") {
 function renderNodeGuide(runStatus = {}) {
   const guide = $("nodeGuide");
   if (!guide) return;
-  const optionalPresent = Object.keys(runStatus.nodes || {}).some((name) => optionalWorkflowNodes.includes(name));
   guide.innerHTML = `
     <div>
       <strong>主流程 11 个节点</strong>
       <span>${primaryWorkflowNodes.map((name) => escapeHtml(name)).join(" → ")}</span>
-    </div>
-    <div>
-      <strong>可选节点</strong>
-      <span>${optionalPresent ? "Opportunity Radar 会按选择运行或跳过，不计入主流程总数。" : "Opportunity Radar 未进入当前状态。"}</span>
     </div>
   `;
 }
@@ -1413,7 +1768,6 @@ function reportLabel(value) {
     trader: "交易计划",
     news_sentiment: "新闻情绪",
     fundamental_analysis: "基本面分析",
-    opportunity_radar: "机会雷达",
     technical_position: "技术位置",
     futu_portfolio: "Futu 组合",
     run_audit: "运行审计",
@@ -1513,7 +1867,7 @@ function splitCsv(value) {
 
 function bindEvents() {
   document.querySelectorAll(".nav-button").forEach((button) => {
-    button.addEventListener("click", () => switchView(button.dataset.view));
+    if (button.dataset.view) button.addEventListener("click", () => switchView(button.dataset.view));
   });
 
   $("subscriptionForm").addEventListener("submit", async (event) => {
@@ -1616,6 +1970,55 @@ function bindEvents() {
   $("ingestOnline").addEventListener("click", () => ingestOnlineResearch().catch(showError));
   $("ingestText").addEventListener("click", () => ingestTextKnowledge().catch(showError));
   $("refreshPortfolio").addEventListener("click", () => loadPortfolio().catch(showError));
+  $("refreshRiskPosition").addEventListener("click", () => loadRiskPosition().catch(showRiskError));
+  $("saveRiskPosition").addEventListener("click", () => saveRiskPosition().catch(showRiskError));
+  $("resetRiskPosition").addEventListener("click", () => resetRiskPosition().catch(showRiskError));
+  $("refreshRiskPortfolio").addEventListener("click", () => loadPortfolio().then(renderRiskPosition).catch(showRiskError));
+  $("riskPositionForm").addEventListener("input", (event) => {
+    syncRiskInputs(event.target);
+    state.riskDirty = true;
+    updateRiskFeedback();
+  });
+  $("riskPositionForm").addEventListener("change", (event) => {
+    syncRiskInputs(event.target);
+    state.riskDirty = true;
+    updateRiskFeedback();
+  });
+  $("riskPositionForm").addEventListener("submit", (event) => event.preventDefault());
+  $("riskTargetAdd").addEventListener("click", () => {
+    const symbol = $("riskTargetAddSelect").value;
+    if (!symbol) return;
+    state.riskPosition.target_weights[symbol] = 0;
+    state.riskDirty = true;
+    renderRiskTargetRows();
+    updateRiskFeedback();
+  });
+  $("riskTargetRows").addEventListener("click", (event) => {
+    const removeSymbol = event.target.dataset.removeRiskTarget;
+    const addSymbol = event.target.dataset.addRiskTarget;
+    if (!removeSymbol && !addSymbol) return;
+    if (removeSymbol) delete state.riskPosition.target_weights[removeSymbol];
+    if (addSymbol) state.riskPosition.target_weights[addSymbol] = 0;
+    state.riskDirty = true;
+    renderRiskTargetRows();
+    updateRiskFeedback();
+  });
+  $("riskTargetRows").addEventListener("input", (event) => {
+    const numberInput = event.target.closest("[data-risk-target-number]");
+    const rangeInput = event.target.closest("[data-risk-target-range]");
+    const symbol = numberInput?.dataset.riskTargetNumber || rangeInput?.dataset.riskTargetRange;
+    if (!symbol) return;
+    const value = numberInput ? Number(numberInput.value) : Number(rangeInput.value);
+    if (!Number.isFinite(value)) return;
+    const normalized = Math.max(-100, Math.min(100, value));
+    state.riskPosition.target_weights[symbol] = normalized / 100;
+    state.riskDirty = true;
+    const number = document.querySelector(`[data-risk-target-number="${CSS.escape(symbol)}"]`);
+    const range = document.querySelector(`[data-risk-target-range="${CSS.escape(symbol)}"]`);
+    if (number) number.value = normalized;
+    if (range) range.value = normalized;
+    updateRiskFeedback();
+  });
   $("refreshMemories").addEventListener("click", () => loadMemories().catch(showMemoryError));
   $("memoryStatusFilter").addEventListener("change", () => loadMemories().catch(showMemoryError));
   $("memoryRows").addEventListener("click", (event) => {
@@ -1630,7 +2033,7 @@ function bindEvents() {
 
 function init() {
   bindEvents();
-  switchView("analysis");
+  switchView(location.hash === "#memory" ? "memory" : "analysis");
   renderSummaryCards();
   renderProgress(null, {});
   resetRunView();

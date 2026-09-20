@@ -16,11 +16,11 @@ from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Thread
-from typing import Callable, Iterable, List, Optional
+from threading import Event, Thread
+from typing import Callable, Dict, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
@@ -28,7 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ai_trading_copilot.copilot.adapters.futu_execution import FutuSimulatedExecutionAdapter
 from ai_trading_copilot.copilot.adapters.portfolio import get_futu_portfolio_snapshot
@@ -52,12 +52,14 @@ from ai_trading_copilot.copilot.domain.models import (
     RunOutcome,
     Subscription,
     SubscriptionBook,
+    UserPersonaConfig,
     normalize_symbol,
 )
 from ai_trading_copilot.copilot.graph import CopilotLangGraph, RunCancelled
 from ai_trading_copilot.copilot.run import (
     DEFAULT_ANALYSTS,
     DEFAULT_MEMORY_DATABASE,
+    DEFAULT_RISK_POSITION_FILE,
     DEFAULT_SUBSCRIPTIONS_FILE,
     accepts_keyword,
     create_default_fundamental_research_retriever,
@@ -83,6 +85,8 @@ from ai_trading_copilot.copilot.services.rag_store import (
 from ai_trading_copilot.copilot.services.tracing import get_observability_status, configure_otel, start_http_span
 from ai_trading_copilot.copilot.services.diagnostics import CONTEXT, DiagnosticStore, record, exception_data
 from ai_trading_copilot.copilot.services.subscription_service import SubscriptionStore
+from ai_trading_copilot.copilot.services.risk_position_store import RiskPositionStore
+from ai_trading_copilot.copilot.review import create_review_service
 
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -92,6 +96,7 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 class UISettings:
     subscriptions_file: Path = DEFAULT_SUBSCRIPTIONS_FILE
     memory_database: Path = DEFAULT_MEMORY_DATABASE
+    risk_position_file: Path = DEFAULT_RISK_POSITION_FILE
     rag_chroma_dir: Optional[Path] = None
     reports_dir: Path = DEFAULT_REPORT_OUTPUT_DIR
     graph_cls: type = CopilotLangGraph
@@ -103,6 +108,23 @@ class UISettings:
     portfolio_snapshot_getter: Optional[Callable[[ExecutionMode], object]] = None
     portfolio_snapshot_timeout_seconds: float = 5.0
     long_term_memory_enabled: Optional[bool] = None
+
+
+class ReviewAssociationRequest(BaseModel):
+    environment: str = Field(min_length=1, max_length=32)
+    account_id: str = Field(min_length=1, max_length=128)
+    deal_id: str = Field(min_length=1, max_length=128)
+    run_id: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def nonblank(self):
+        for name in type(self).model_fields:
+            value = getattr(self, name).strip()
+            if not value:
+                raise ValueError(f"{name} must not be blank")
+            setattr(self, name, value)
+        return self
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -162,6 +184,24 @@ class MemoryRollbackRequest(BaseModel):
     reason: str = Field(default="manual_rollback", min_length=1, max_length=500)
 
 
+class RiskPositionUpdateRequest(BaseModel):
+    persona: UserPersonaConfig
+    target_weights: Dict[str, float] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_target_weights(self) -> "RiskPositionUpdateRequest":
+        normalized: Dict[str, float] = {}
+        for raw_symbol, raw_weight in self.target_weights.items():
+            symbol = normalize_symbol(raw_symbol)
+            if not symbol:
+                raise ValueError("target weight symbol is required")
+            weight = float(raw_weight)
+            if weight != weight or weight < -1 or weight > 1:
+                raise ValueError(f"target weight for {symbol} must be in [-1, 1]")
+            normalized[symbol] = round(weight, 6)
+        return self.model_copy(update={"target_weights": normalized})
+
+
 def create_app(settings: UISettings | None = None) -> FastAPI:
     resolved = settings or UISettings(reports_dir=Path(os.getenv("COPILOT_UI_REPORTS_DIR") or DEFAULT_REPORT_OUTPUT_DIR))
     static_dir = Path(__file__).resolve().parent / "static"
@@ -172,9 +212,22 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
     async def lifespan(app):
         runtime.start()
         configure_otel()
+        review_stop = Event()
+        def review_worker():
+            while not review_stop.is_set():
+                try:
+                    create_review_service(resolved.memory_database).run_due(stop_event=review_stop)
+                except Exception as exc:
+                    record("review.scheduler.failed", level="ERROR", **exception_data(exc))
+                if review_stop.wait(3600):
+                    break
+        review_thread = Thread(target=review_worker, name="delayed-reviews", daemon=True)
+        review_thread.start()
         try:
             yield
         finally:
+            # In-flight provider calls finish under their leases; never block shutdown.
+            review_stop.set()
             runtime.shutdown()
             diagnostics.close()
 
@@ -185,6 +238,52 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
     app.state.run_controls = runtime.controls
     app.state.run_controls_lock = runtime.lock
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/reviews")
+    def reviews_page():
+        return FileResponse(static_dir / "reviews.html")
+
+    @app.get("/api/reviews")
+    def reviews_list():
+        return {"items": create_review_service(resolved.memory_database).repository.list_reviews()}
+
+    @app.post("/api/reviews/run-due")
+    def reviews_run_due():
+        return create_review_service(resolved.memory_database).run_due()
+
+    @app.get("/api/reviews/{review_id}")
+    def review_detail(review_id: str):
+        result = create_review_service(resolved.memory_database).repository.detail(review_id)
+        if result is None:
+            raise HTTPException(404, "Review not found")
+        return result
+
+    @app.post("/api/reviews/{review_id}/retry")
+    def review_retry(review_id: str):
+        repository = create_review_service(resolved.memory_database).repository
+        if repository.detail(review_id) is None:
+            raise HTTPException(404, "Review not found")
+        try:
+            if not repository.retry(review_id):
+                raise HTTPException(409, "Review cannot be retried in its current state")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"retried": True}
+
+    @app.get("/api/review-fills")
+    def review_fills():
+        return {"items": create_review_service(resolved.memory_database).repository.list_fills()}
+
+    @app.post("/api/review-fills/associate")
+    def review_associate(body: ReviewAssociationRequest):
+        try:
+            create_review_service(resolved.memory_database).repository.associate_fill(
+                body.environment, body.account_id, body.deal_id, body.run_id, body.symbol)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"associated": True}
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -387,6 +486,24 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             )
         }
 
+    @app.get("/api/risk-position")
+    def get_risk_position() -> dict:
+        return _risk_position_store(resolved).load()
+
+    @app.put("/api/risk-position")
+    def update_risk_position(request: RiskPositionUpdateRequest) -> dict:
+        try:
+            return _risk_position_store(resolved).save(
+                request.persona,
+                request.target_weights,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/risk-position/reset")
+    def reset_risk_position() -> dict:
+        return _risk_position_store(resolved).reset()
+
     @app.get("/api/memories")
     def list_memories(status: Optional[MemoryStatus] = None, symbol: str | None = None) -> dict:
         agent = _memory_agent(resolved, auto_ingest_seed=False)
@@ -519,7 +636,7 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
                 "cash": None,
                 "cash_weight": None,
                 "position_weights": {},
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": _utc_now_iso(),
                 "error": str(exc),
             }
         total_value = snapshot.total_value
@@ -536,7 +653,7 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             "cash": cash,
             "cash_weight": cash_weight,
             "position_weights": snapshot.position_weights,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": _utc_now_iso(),
             "error": None,
         }
 
@@ -570,8 +687,13 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             "user_confirmed": False,
             "run_id": run_id,
         }
+        params["subscription_book"] = _store(resolved).load()
+        risk_position = _risk_position_store(resolved).load()
+        persona_config = UserPersonaConfig(**risk_position["persona"])
+        params["persona_config"] = persona_config
+        params["target_weight_overrides"] = risk_position["target_weights"]
         defaults = {
-            "persona": DEFAULT_PERSONA_CONFIG,
+            "persona": persona_config.model_dump(mode="json"),
             "selected_analysts": [analyst.value for analyst in request.selected_analysts],
             "execution_mode_default": ExecutionMode.SIMULATION.value,
             "portfolio_mode_default": ExecutionMode.SIMULATION.value,
@@ -642,9 +764,6 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
                 raise HTTPException(status_code=503, detail="UI service is shutting down.")
             try:
                 allowed = list(resolved.graph_cls.NODE_ORDER)
-                optional = getattr(resolved.graph_cls, "NODE_OPPORTUNITY_RADAR", None)
-                if optional:
-                    allowed.append(optional)
                 checkpoint = runtime.read_checkpoint(checkpoint_id, allowed)
                 params = checkpoint["params"]
                 request = RunCreateRequest(
@@ -747,7 +866,7 @@ def create_app(settings: UISettings | None = None) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        status["updated_at"] = datetime.utcnow().isoformat()
+        status["updated_at"] = _utc_now_iso()
         write_json_atomic(status_path, status)
         response = _run_response(run_id, run_dir)
         response["order"] = order
@@ -845,6 +964,15 @@ def _confirm_simulated_broker_order(
         max_attempts=max_attempts,
     )
     _refresh_broker_metrics(status)
+    if result.submitted and result.order_id:
+        account_id = result.raw.get("acc_id") or result.raw.get("account_id") or getattr(adapter, "acc_id", None)
+        if account_id and str(account_id) != "0" and status.get("run_id"):
+            try:
+                create_review_service(settings.memory_database).repository.record_order(
+                    "SIMULATE", str(account_id), str(result.order_id), status["run_id"], row["symbol"])
+            except Exception as exc:
+                # Submission already succeeded: preserve that fact to prevent duplicate orders.
+                status.setdefault("errors", []).append(f"review order linkage failed: {exc}")
     _record_simulated_order_audit(run_dir, status, row)
     return _order_payload(row)
 
@@ -971,7 +1099,7 @@ def _apply_broker_result(
     row["broker_order_id"] = result.order_id
     row["broker_status"] = result.status
     row["broker_message"] = result.message
-    row["last_broker_attempt_at"] = datetime.utcnow().isoformat()
+    row["last_broker_attempt_at"] = _utc_now_iso()
     row["broker_attempt_count"] = int(row.get("broker_attempt_count") or 0) + 1
     if result.submitted:
         row["pending_broker_order"] = False
@@ -1011,7 +1139,7 @@ def _record_simulated_order_audit(run_dir: Path, status: dict, row: dict) -> Non
 def _append_simulated_order_audit(run_dir: Path, row: dict) -> None:
     path = run_dir / "simulated_broker_orders.jsonl"
     event = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": _utc_now_iso(),
         "symbol": row.get("symbol"),
         "action": row.get("action"),
         "quantity": row.get("quantity"),
@@ -1086,7 +1214,7 @@ def _record_status_report(status: dict, key: str, path: Path) -> None:
         "path": str(path),
         "exists": exists,
         "bytes": stat.st_size if stat else 0,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": _utc_now_iso(),
     }
 
 
@@ -1119,6 +1247,10 @@ def _value(value):
 
 def _store(settings: UISettings) -> SubscriptionStore:
     return SubscriptionStore(settings.subscriptions_file)
+
+
+def _risk_position_store(settings: UISettings) -> RiskPositionStore:
+    return RiskPositionStore(settings.risk_position_file)
 
 
 def _missing_rag_embedding_key_status(settings: UISettings) -> dict | None:
@@ -1296,7 +1428,13 @@ def _run_copilot_job(
         if control.cancel_event.is_set():
             raise RunCancelled("Run stopped before graph execution.")
         state = graph.resume(control.resume_snapshot) if control.resume_snapshot is not None else graph.run(**params)
-        if memory_agent is not None and not control.cancel_event.is_set():
+        review_registered = False
+        try:
+            create_review_service(memory_database).register_run({**state, "memory_learning_enabled": memory_agent is not None})
+            review_registered = True
+        except Exception as persistence_error:
+            tracker.add_error(f"delayed review registration failed: {persistence_error}")
+        if review_registered and memory_agent is not None and not control.cancel_event.is_set():
             try:
                 candidates = memory_agent.learn_from_run(state)
                 if candidates:
@@ -1317,18 +1455,19 @@ def _run_copilot_job(
                 control,
                 state=state,
                 error=error,
-                degraded=_portfolio_degraded(state),
+                degraded=_degraded_run_state(state),
             )
             record("run.end", outcome=tracker.status["status"], stop_reason=control.reason)
         finally:
             runtime.unregister(control)
 
 
-def _portfolio_degraded(state: dict | None) -> bool:
+def _degraded_run_state(state: dict | None) -> bool:
     if not state:
         return False
     return any(
         str(item).startswith("portfolio_fetch_failed")
+        or str(item) == "llm_unavailable"
         for item in (state.get("errors") or [])
     )
 
@@ -1392,6 +1531,10 @@ def _read_json(path: Path) -> dict:
         return json.loads(content) if content.strip() else {}
     except (json.JSONDecodeError, UnicodeError):
         return {}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _parse_symbol_text(value: str) -> List[str]:

@@ -50,12 +50,19 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
 
 
 def ensure_yfinance_proxy() -> None:
-    """Configure yfinance proxy defaults for Copilot adapter calls."""
+    """Apply the proxy only to yfinance's own network config.
+
+    Previously this mutated process-wide HTTP(S)_PROXY, which redirected every
+    later HTTP client through the local proxy.
+    """
     load_project_env_files()
     proxy_url = os.getenv("YFINANCE_PROXY_URL", "").strip() or DEFAULT_YFINANCE_PROXY_URL
-    for key in ("HTTP_PROXY", "HTTPS_PROXY"):
-        if not os.getenv(key):
-            os.environ[key] = proxy_url
+    try:
+        from yfinance.config import YfConfig
+
+        YfConfig.network.proxy = proxy_url
+    except Exception:
+        pass
 
 
 def _load_env_file_fallback(path: Path) -> None:

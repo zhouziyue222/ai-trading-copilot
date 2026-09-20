@@ -57,4 +57,4 @@ class OfflineParallelGraph(CopilotLangGraph):
                     assert list(state["analyst_reports"]) == [item.lower().replace(" ", "_") for item in self.names if item in expected]
                 return {}
             return self._tracked_node(name, execute)
-        return {name: node(name) for name in [*self.NODE_ORDER, self.NODE_OPPORTUNITY_RADAR]}
+        return {name: node(name) for name in self.NODE_ORDER}

@@ -72,6 +72,13 @@ class UserPersonaConfig(BaseModel):
     max_gross_exposure: float = Field(default=1.00, gt=0)
     default_position_weight_min: float = Field(default=0.10, ge=0, le=1)
     default_position_weight_max: float = Field(default=0.25, ge=0, le=1)
+    target_annual_volatility: float = Field(default=0.20, gt=0, le=1)
+    account_risk_per_trade: float = Field(default=0.01, gt=0, le=0.10)
+    atr_stop_multiple: float = Field(default=2.0, gt=0, le=10)
+    minimum_reward_risk: float = Field(default=2.0, ge=0.5, le=10)
+    max_distance_to_support_pct: float = Field(default=0.03, ge=0, le=0.50)
+    volatility_lookback_days: int = Field(default=60, ge=5, le=252)
+    atr_window: int = Field(default=14, ge=2, le=100)
     stock_source: str = "user_subscription_list"
     preferred_market_regime: str = "bull_market_or_uptrend"
 
@@ -654,6 +661,7 @@ class SymbolExplanation(BaseModel):
     summary: str
     key_evidence: List[str] = Field(default_factory=list)
     risk_notes: List[str] = Field(default_factory=list)
+    user_intent_note: str = ""
     execution_message: Optional[str] = None
 
 

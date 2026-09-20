@@ -11,8 +11,10 @@ from ai_trading_copilot.copilot.services.cancellation import (
     get_current_cancellation_token,
     tool_cancel_callback,
 )
+from ai_trading_copilot.copilot.services.diagnostics import record_usage
 from ai_trading_copilot.copilot.services.tracing import (
     get_current_trace_recorder,
+    llm_usage_attributes,
     sanitize_value,
     summarize_text,
 )
@@ -72,6 +74,7 @@ def run_tool_calling_llm(
                 result = bound.invoke(messages)
                 last_content = str(getattr(result, "content", result) or "")
                 tool_calls = list(getattr(result, "tool_calls", []) or [])
+                _set_usage_attributes(span, result)
                 span.set_attribute("llm.tool_call_count", len(tool_calls))
                 for key, value in summarize_text(last_content, "llm.response").items():
                     span.set_attribute(key, value)
@@ -79,6 +82,7 @@ def run_tool_calling_llm(
             result = bound.invoke(messages)
             last_content = str(getattr(result, "content", result) or "")
             tool_calls = list(getattr(result, "tool_calls", []) or [])
+        record_response_usage(result, kind="llm", model=_llm_model_name(llm))
         check_cancelled()
         if not tool_calls:
             return last_content, calls
@@ -178,12 +182,15 @@ def _run_deepseek_tool_calling_llm(
         if recorder is not None:
             with recorder.start_span("llm.invoke", kind="client", attributes=llm_attrs) as span:
                 span.set_attribute("llm.request.messages", _messages_for_trace(messages))
-                message = _create_deepseek_completion(
+                response = _create_deepseek_completion(
                     client=client,
                     config=config,
                     messages=messages,
                     tools=tool_schemas,
                 )
+                message = response.choices[0].message
+                _set_usage_attributes(span, response)
+                record_response_usage(response, kind="llm", model=config["model"])
                 last_content, reasoning_content, tool_calls = _openai_message_parts(message)
                 _record_llm_response(
                     span=span,
@@ -192,12 +199,14 @@ def _run_deepseek_tool_calling_llm(
                     tool_calls=tool_calls,
                 )
         else:
-            message = _create_deepseek_completion(
+            response = _create_deepseek_completion(
                 client=client,
                 config=config,
                 messages=messages,
                 tools=tool_schemas,
             )
+            message = response.choices[0].message
+            record_response_usage(response, kind="llm", model=config["model"])
             last_content, reasoning_content, tool_calls = _openai_message_parts(message)
 
         check_cancelled()
@@ -292,7 +301,7 @@ def _create_deepseek_completion(
     observer = config.get("completion_observer")
     if observer is not None:
         observer(response)
-    return response.choices[0].message
+    return response
 
 
 def _record_llm_response(
@@ -310,6 +319,30 @@ def _record_llm_response(
         span.set_attribute(key, value)
     for key, value in summarize_text(reasoning_content, "llm.response.reasoning_content").items():
         span.set_attribute(key, value)
+
+
+def _set_usage_attributes(span, response) -> None:
+    for key, value in llm_usage_attributes(response).items():
+        span.set_attribute(key, value)
+
+
+def record_response_usage(
+    response,
+    *,
+    kind: str,
+    model: str,
+) -> None:
+    attrs = llm_usage_attributes(response)
+    if not attrs:
+        return
+    record_usage(
+        kind=kind,
+        model=model,
+        prompt_tokens=attrs.get("usage.prompt_tokens"),
+        completion_tokens=attrs.get("usage.completion_tokens"),
+        total_tokens=attrs.get("usage.total_tokens"),
+        reasoning_tokens=attrs.get("usage.reasoning_tokens"),
+    )
 
 
 def _openai_message_parts(message: Any) -> tuple[str, str, list[dict[str, Any]]]:
